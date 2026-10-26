@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from conftest import make_beatmap, make_beatmapset
 
-from models import Candidate, ScoredCandidate
+from models import Candidate, ScoredCandidate, SkillScore
 from randomizer import (
     select_random_subset,
     selection_weight,
@@ -25,20 +25,67 @@ def scored(beatmapset_id: int, score: float = 0.7) -> ScoredCandidate:
     )
 
 
-def test_subset_dedupes_by_beatmapset_and_keeps_recommendation_order() -> None:
+def _ids(items) -> tuple[int, ...]:
+    return tuple(item.beatmapset.id for item in items)
+
+
+def _rating_ids(items) -> tuple[int, ...]:
+    return tuple(
+        item.beatmapset.id
+        for item in sorted(items, key=lambda item: (-item.score, item.beatmapset.id))
+    )
+
+
+def scored_with_fit(
+    beatmapset_id: int,
+    score: float,
+    fit: float,
+) -> ScoredCandidate:
+    item = scored(beatmapset_id, score)
+    candidate = Candidate(
+        item.candidate.beatmapset,
+        item.candidate.beatmap,
+        skillsets={
+            "aim_classic": SkillScore(
+                skill_id="aim_classic",
+                name="Aim",
+                score=fit,
+                confidence="high",
+                support="measured",
+            ),
+        },
+    )
+    return ScoredCandidate(candidate, item.score, item.factors)
+
+
+def test_subset_dedupes_by_beatmapset_without_restoring_recommendation_order() -> None:
     items = [
         scored(1, 0.9),
         scored(2, 0.8),
         scored(1, 0.7),
         scored(3, 0.6),
     ]
-    selection = select_random_subset(items, 2, seed=11)
-    assert selection.pool_size == 3
-    assert selection.available == 3
-    assert selection.count == 2
-    assert len({item.beatmapset.id for item in selection.items}) == 2
-    indexes = [items.index(item) for item in selection.items]
-    assert indexes == sorted(indexes)
+    selections = [select_random_subset(items, 2, seed=seed) for seed in range(20)]
+    for selection in selections:
+        assert selection.pool_size == 3
+        assert selection.available == 3
+        assert selection.count == 2
+        assert len({item.beatmapset.id for item in selection.items}) == 2
+        assert set(_ids(selection.items)) <= {1, 2, 3}
+    assert any(
+        _ids(selection.items) != _rating_ids(selection.items)
+        for selection in selections
+    )
+
+
+def test_shortfall_order_is_shuffled_instead_of_using_input_order() -> None:
+    items = [scored(index, 1.0 - index / 10) for index in range(1, 9)]
+    selections = [select_random_subset(items, 20, seed=seed) for seed in range(20)]
+    expected = _rating_ids(items)
+    for selection in selections:
+        assert selection.count == len(items)
+        assert set(_ids(selection.items)) == set(expected)
+    assert any(_ids(selection.items) != expected for selection in selections)
 
 
 def test_subset_never_returns_avoided_ids_and_reports_shortfall() -> None:
@@ -88,6 +135,16 @@ def test_selection_weight_is_positive_and_prefers_score() -> None:
     high = scored(2, 0.9)
     assert selection_weight(low) > 0
     assert selection_weight(high) > selection_weight(low)
+
+
+def test_selection_weight_lets_skill_fit_outweigh_a_higher_general_score() -> None:
+    weights = {"aim_classic": 1.0}
+    high_fit_low_score = scored_with_fit(1, 0.3, 1.0)
+    low_fit_high_score = scored_with_fit(2, 0.9, 0.0)
+    assert selection_weight(high_fit_low_score, weights) > selection_weight(
+        low_fit_high_score,
+        weights,
+    )
 
 
 def test_shuffle_changes_order_without_dropping_ids() -> None:

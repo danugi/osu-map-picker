@@ -56,7 +56,6 @@ def selection_weight(
     """
 
     score = max(0.0, min(1.0, float(item.score)))
-    base = 0.12 + score
     fit_value = 0.5
     weights = {
         key: float(value)
@@ -67,7 +66,25 @@ def selection_weight(
         fit = skill_fit(item.candidate.skillsets, weights)
         if fit is not None and fit.score is not None:
             fit_value = max(0.0, min(1.0, float(fit.score)))
-    return max(1e-9, (base**1.35) * (0.55 + 0.9 * fit_value))
+    # Keep a floor for both signals so a low general score or a missing skill
+    # never makes a card practically unreachable.  The score still spans a 4x
+    # range and the selected skill fit spans a 2.86x range; a strong skill fit
+    # can therefore beat a much higher general score without turning sampling
+    # into a uniform draw.
+    score_term = 0.25 + 0.75 * score
+    fit_term = 0.35 + 0.65 * fit_value
+    return max(1e-9, score_term * fit_term)
+
+
+def _display_order(
+    items: Sequence[ScoredCandidate],
+    seed: int,
+) -> list[ScoredCandidate]:
+    """Shuffle a selected sample independently from its sampling keys."""
+
+    ordered = list(items)
+    random.Random(int(seed) ^ 0x5EED5EED).shuffle(ordered)
+    return ordered
 
 
 def _dedupe_by_set(
@@ -101,10 +118,10 @@ def _weighted_sample(
         # Larger keys are selected first; the index keeps ties deterministic.
         keyed.append((key, -index, item))
     keyed.sort(key=lambda row: (row[0], row[1]), reverse=True)
-    chosen = keyed[:count]
-    # Display the sample in recommendation order instead of random key order.
-    chosen.sort(key=lambda row: -row[1])
-    return [row[2] for row in chosen]
+    chosen = [row[2] for row in keyed[:count]]
+    # Sampling keys decide membership; display order must not leak the
+    # recommendation ranking back into the random result.
+    return _display_order(chosen, seed)
 
 
 def select_random_subset(
@@ -151,7 +168,7 @@ def select_random_subset(
         )
 
     if requested >= available:
-        chosen = available_items
+        chosen = _display_order(available_items, seed)
         note = (
             f"Новых кандидатов только {available} из запрошенных {requested}. "
             "Показаны все доступные; строгие фильтры не ослаблялись."

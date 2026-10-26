@@ -16,7 +16,7 @@ import logging
 import random
 import secrets
 import tempfile
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -332,8 +332,25 @@ def _clear_result_display() -> None:
 def _clear_random_state() -> None:
     st.session_state["random_round"] = 0
     st.session_state["random_last_ids"] = []
+    st.session_state["random_seen_ids"] = []
+    st.session_state.pop("random_scope_key", None)
     st.session_state["random_meta"] = None
     st.session_state["random_notice"] = None
+
+
+def _random_scope_key(cfg: PresetConfig) -> str:
+    """Identify the random session so a preset/filter change starts fresh."""
+
+    return json.dumps(
+        {
+            "preset": cfg.name,
+            "filters": cfg.filters.to_dict(),
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+        default=str,
+        separators=(",", ":"),
+    )
 
 
 def _clear_result_state() -> None:
@@ -1996,20 +2013,25 @@ def _execute_search(
 
 
 def _random_discovery_settings(
-    cfg: PresetConfig, pool_round: int
+    cfg: PresetConfig, _pool_round: int
 ) -> DiscoverySettings:
-    settings = copy.deepcopy(cfg.discovery)
-    # Random selection deliberately goes deeper than a normal search, but it
-    # must stay bounded. Rotating the strategy order and adding one page per
-    # round explores new pages before spending the request budget again.
-    extra_pages = min(4, max(1, int(pool_round)))
-    settings.max_pages_per_strategy = min(
-        10, int(settings.max_pages_per_strategy) + extra_pages
-    )
-    settings.max_requests = min(
-        40, max(int(settings.max_requests), 14 + int(pool_round) * 2)
-    )
-    return settings
+    # User request/page limits are hard limits.  Rotating the strategy order
+    # still changes which cached pages are useful, but randomization must not
+    # silently spend more network budget than an explicit search.
+    return copy.deepcopy(cfg.discovery)
+
+
+@dataclass(frozen=True)
+class RandomPool:
+    """One collected random pool and the provenance of its counters."""
+
+    result: DiscoveryResult
+    source_note: str
+    api: DiscoveryResult | None = None
+    local: DiscoveryResult | None = None
+    api_configured: bool = False
+    local_only: bool = False
+    api_error: str | None = None
 
 
 def _merge_random_pools(
@@ -2023,20 +2045,24 @@ def _merge_random_pools(
     merged = sorted(
         by_set.values(), key=lambda item: (-item.score, item.beatmapset.id)
     )
+    api_ids = {item.beatmapset.id for item in primary.scored}
+    local_ids = {item.beatmapset.id for item in local.scored}
     notes = list(primary.notes)
     notes.append(
-        f"Пул расширен локальным кешем: {len(merged)} уникальных кандидатов "
-        f"после дедупликации ({len(primary.scored)} из API, "
-        f"{len(local.scored)} из SQLite)."
+        f"пул: {len(merged)} уникальных; API: {len(primary.scored)}; "
+        f"локально: {len(local.scored)}; пересечение: {len(api_ids & local_ids)}; "
+        f"строгие фильтры: API {primary.passed_filters}, локально "
+        f"{local.passed_filters}; после relevance: API "
+        f"{primary.passed_relevance}, локально {local.passed_relevance}."
     )
+    # Deliberately keep the API counters and cache metrics intact.  The merged
+    # count describes the candidate pool, not how many maps the API fetched or
+    # how many strict-filter checks ran.
     return replace(
         primary,
         scored=tuple(merged),
-        total_fetched=len(merged),
-        passed_filters=max(primary.passed_filters, len(merged)),
-        cache_hits=primary.cache_hits + local.cache_hits,
         origin="mixed",
-        notes=tuple(notes)[:12],
+        notes=tuple(dict.fromkeys(notes))[:12],
     )
 
 
@@ -2046,13 +2072,8 @@ def _collect_random_pool(
     pool_round: int,
     *,
     local_only: bool,
-) -> tuple[DiscoveryResult, str]:
-    """Collect a broad candidate pool for one explicit random action.
-
-    Each click asks for deeper pagination and rotates the strategy order. Cached
-    pages are free, so repeated clicks mostly spend requests on pages that have
-    not been seen yet. Local cache candidates are merged when available.
-    """
+) -> RandomPool:
+    """Collect a candidate pool without exceeding the user's request limits."""
 
     local: DiscoveryResult | None = None
     try:
@@ -2063,7 +2084,16 @@ def _collect_random_pool(
     if local_only:
         if local is None:
             raise ValueError("Локальный кеш недоступен.")
-        return local, "Случайная подборка собрана только из локального кеша."
+        return RandomPool(
+            result=local,
+            source_note=(
+                "Локальный режим: API отключён пользователем; новые страницы "
+                "не запрашиваются."
+            ),
+            local=local,
+            local_only=True,
+            api_configured=False,
+        )
 
     try:
         api_config = config.load_api_config()
@@ -2074,9 +2104,14 @@ def _collect_random_pool(
             raise ValueError(
                 "API не настроен, а в локальном кеше нет подходящих карт."
             )
-        return (
-            local,
-            "API не настроен: случайная подборка собрана из локального кеша.",
+        return RandomPool(
+            result=local,
+            source_note=(
+                "API не настроен; новые страницы не запрашиваются. "
+                "Показан локальный кеш."
+            ),
+            local=local,
+            api_configured=False,
         )
 
     try:
@@ -2084,8 +2119,7 @@ def _collect_random_pool(
         settings = _random_discovery_settings(cfg, pool_round)
         engine = DiscoveryEngine(client, store, settings)
         with st.spinner(
-            "Собираю новых кандидатов: ротация стратегий и более глубокая "
-            "пагинация…"
+            "Собираю кандидатов в пределах настроенных лимитов запросов…"
         ):
             result = engine.run(
                 cfg.filters,
@@ -2094,19 +2128,143 @@ def _collect_random_pool(
                 strategy_offset=pool_round,
             )
     except OsuApiError as exc:
+        message = exc.user_message()
         if local is not None and local.scored:
-            return (
-                local,
-                f"osu! API: {exc.user_message()}. Показан локальный кеш.",
+            return RandomPool(
+                result=local,
+                source_note=(
+                    f"osu! API: {message}. Показан локальный кеш; новые "
+                    "страницы не запрашивались."
+                ),
+                local=local,
+                api_configured=True,
+                api_error=message,
             )
         raise
     merged = _merge_random_pools(result, local)
+    local_count = len(local.scored) if local is not None else 0
     source = (
-        f"Поиск для случайной подборки: раунд {pool_round}, "
-        f"{len(merged.scored)} уникальных кандидатов. Следующее нажатие "
-        "запросит более глубокие страницы."
+        "API-поиск выполнен в пределах настроенных лимитов: "
+        f"{len(result.scored)} уникальных из API, {local_count} из локального "
+        f"кеша; пул {len(merged.scored)}."
     )
-    return merged, source
+    return RandomPool(
+        result=merged,
+        source_note=source,
+        api=result,
+        local=local,
+        api_configured=True,
+    )
+
+
+def _random_empty_message(
+    selection: randomizer.RandomSelection,
+    pool: RandomPool,
+) -> str:
+    """Explain an empty random result without promising impossible pages."""
+
+    parts = [selection.note]
+    if selection.pool_size and selection.available == 0:
+        parts.append("В текущей random-сессии показаны все доступные карты.")
+        if pool.local_only:
+            parts.append(
+                "Локальный режим: API отключён пользователем, новые страницы "
+                "не запрашиваются."
+            )
+        elif not pool.api_configured:
+            parts.append("API не настроен, новые страницы не запрашиваются.")
+        elif pool.api_error:
+            parts.append(f"API недоступен: {pool.api_error}.")
+        elif pool.api is not None and not pool.api.complete:
+            parts.append(
+                "Лимит запросов или страниц исчерпан; поиск остановлен."
+            )
+        else:
+            parts.append(
+                "API не сообщил о новых уникальных картах в доступных "
+                "страницах."
+            )
+        parts.append(
+            "Можно разрешить повторно показанные карты или изменить фильтры."
+        )
+        return " ".join(parts)
+
+    if pool.local_only:
+        parts.append(
+            "Локальный режим: API отключён пользователем, новые страницы не "
+            "запрашиваются. Можно расширить локальный кеш или изменить фильтры."
+        )
+    elif not pool.api_configured:
+        parts.append(
+            "API не настроен, новые страницы не запрашиваются. Можно "
+            "расширить локальный кеш или изменить фильтры."
+        )
+    elif pool.api_error:
+        parts.append(
+            f"API недоступен: {pool.api_error}. Новые страницы не "
+            "запрашивались."
+        )
+    elif pool.api is not None and not pool.api.complete:
+        parts.append(
+            "Лимит запросов или страниц исчерпан; поиск остановлен. "
+            "Увеличьте лимиты в настройках или измените фильтры."
+        )
+    else:
+        parts.append(
+            "API не нашёл уникальных карт, прошедших фильтры, в доступных "
+            "страницах."
+        )
+    return " ".join(parts)
+
+
+def _random_meta(
+    selection: randomizer.RandomSelection,
+    pool: RandomPool,
+    *,
+    round_number: int,
+    desired: int,
+    seed: int | None,
+    session_seen: int,
+    recent_history: int,
+) -> dict[str, Any]:
+    api = pool.api
+    local = pool.local
+    return {
+        "round": round_number,
+        "pool": selection.pool_size,
+        "available": selection.available,
+        "count": selection.count,
+        "requested": desired,
+        "shortfall": selection.shortfall,
+        "excluded": selection.excluded,
+        "seed": seed,
+        "note": selection.note,
+        "source": pool.source_note,
+        "origin": pool.result.origin,
+        "local_only": pool.local_only,
+        "api_configured": pool.api_configured,
+        "api_error": pool.api_error,
+        "api_unique": len(api.scored) if api is not None else 0,
+        "local_unique": len(local.scored) if local is not None else 0,
+        "api_strict_passed": api.passed_filters if api is not None else 0,
+        "local_strict_passed": (
+            local.passed_filters if local is not None else 0
+        ),
+        "api_relevance_passed": (
+            api.passed_relevance if api is not None else 0
+        ),
+        "local_relevance_passed": (
+            local.passed_relevance if local is not None else 0
+        ),
+        "local_considered": (
+            local.total_fetched if local is not None else 0
+        ),
+        "api_requests": pool.result.api_requests,
+        "cache_hits": pool.result.cache_hits,
+        "complete": bool(pool.result.complete),
+        "session_seen": session_seen,
+        "recent_history": recent_history,
+    }
 
 
 def _execute_random_selection(store: Storage, cfg: PresetConfig) -> None:
@@ -2117,6 +2275,11 @@ def _execute_random_selection(store: Storage, cfg: PresetConfig) -> None:
     except (FilterConfigError, RankingConfigError, PresetError) as exc:
         st.error(f"Случайная подборка не запущена: {exc}")
         return
+
+    scope_key = _random_scope_key(cfg)
+    if st.session_state.get("random_scope_key") != scope_key:
+        _clear_random_state()
+        st.session_state["random_scope_key"] = scope_key
 
     try:
         desired = int(st.session_state.get("random_size", 12))
@@ -2131,21 +2294,29 @@ def _execute_random_selection(store: Storage, cfg: PresetConfig) -> None:
         for value in st.session_state.get("random_last_ids", [])
         if str(value).isdigit()
     }
+    session_seen = {
+        int(value)
+        for value in st.session_state.get("random_seen_ids", [])
+        if isinstance(value, int) or str(value).isdigit()
+    }
     recent_ids: set[int] = set()
     if avoid_seen:
-        # Only randomization surfaces consume the bounded random window.
-        # Explicit searches remain in History but do not exhaust it.
+        # History is a cross-session fallback.  The in-session set is what
+        # guarantees no repeats after the bounded recent window rolls over.
         recent_ids = {
             item.id
             for item in store.recent_sets(
                 60, surfaces=("random", "random_pick")
             )
         }
-    avoid_ids = recent_ids | last_ids
+        avoid_ids = recent_ids | last_ids | session_seen
+    else:
+        # Turning the option off must actually allow the last selection again.
+        avoid_ids = set()
     seed = secrets.randbits(64)
 
     try:
-        pool, source_note = _collect_random_pool(
+        pool = _collect_random_pool(
             store, cfg, pool_round, local_only=local_only
         )
     except OsuApiError as exc:
@@ -2156,80 +2327,75 @@ def _execute_random_selection(store: Storage, cfg: PresetConfig) -> None:
         return
 
     selection = randomizer.select_random_subset(
-        pool.scored,
+        pool.result.scored,
         desired,
         seed=seed,
         avoid_ids=avoid_ids,
         skill_weights=cfg.ranking.skill_weights,
     )
     st.session_state["random_round"] = pool_round
+    seen_ids = set(session_seen)
+    if selection.items:
+        seen_ids.update(item.beatmapset.id for item in selection.items)
+    st.session_state["random_seen_ids"] = sorted(seen_ids)
+    meta = _random_meta(
+        selection,
+        pool,
+        round_number=pool_round,
+        desired=desired,
+        seed=seed,
+        session_seen=len(seen_ids),
+        recent_history=len(recent_ids),
+    )
+
     if not selection.items:
         empty_result = replace(
-            pool,
+            pool.result,
             scored=(),
             notes=tuple(
                 dict.fromkeys(
                     [
                         note
-                        for note in (*pool.notes, source_note, selection.note)
+                        for note in (
+                            *pool.result.notes,
+                            pool.source_note,
+                            selection.note,
+                        )
                         if note
                     ]
                 )
             )[:12],
         )
         _remember_result(store, cfg, empty_result, surface="random")
-        st.session_state["random_meta"] = {
-            "round": pool_round,
-            "pool": selection.pool_size,
-            "available": selection.available,
-            "count": 0,
-            "requested": desired,
-            "shortfall": True,
-            "excluded": selection.excluded,
-            "note": selection.note,
-            "source": source_note,
-        }
-        st.session_state["random_notice"] = (
-            selection.note
-            + " Следующее нажатие попробует более глубокие страницы, если API "
-            "доступен."
+        st.session_state["random_meta"] = meta
+        st.session_state["random_notice"] = _random_empty_message(
+            selection, pool
         )
         _flash("Новых кандидатов для случайной подборки нет.")
         st.rerun()
 
     notes = [
         note
-        for note in (*pool.notes, source_note, selection.note)
+        for note in (*pool.result.notes, pool.source_note, selection.note)
         if note
     ]
     selected_result = replace(
-        pool,
+        pool.result,
         scored=selection.items,
         notes=tuple(dict.fromkeys(notes))[:12],
-        passed_filters=pool.passed_filters,
+        passed_filters=pool.result.passed_filters,
     )
     _remember_result(store, cfg, selected_result, surface="random")
     st.session_state["random_last_ids"] = [
         item.beatmapset.id for item in selection.items
     ]
-    st.session_state["random_meta"] = {
-        "round": pool_round,
-        "pool": selection.pool_size,
-        "available": selection.available,
-        "count": selection.count,
-        "requested": desired,
-        "shortfall": selection.shortfall,
-        "excluded": selection.excluded,
-        "seed": seed,
-        "note": selection.note,
-        "source": source_note,
-    }
+    st.session_state["random_meta"] = meta
     st.session_state["random_notice"] = (
         selection.note if selection.shortfall else None
     )
     _flash(
-        f"Случайная подборка: {selection.count} карт из {selection.pool_size} "
-        f"в пуле."
+        f"Случайная подборка: {selection.count} карт; пул "
+        f"{selection.pool_size}, доступно новых {selection.available}."
     )
     st.rerun()
 
@@ -2334,8 +2500,20 @@ def _render_result(store: Storage, result: DiscoveryResult) -> None:
             f"🎲 Случайная подборка · раунд {random_meta.get('round', 1)} · "
             f"{random_meta.get('count', 0)} карт из "
             f"{random_meta.get('available', 0)} новых кандидатов "
-            f"(пул {random_meta.get('pool', 0)}; недавно показано и "
-            f"исключено: {random_meta.get('excluded', 0)})."
+            f"(пул {random_meta.get('pool', 0)}: API "
+            f"{random_meta.get('api_unique', 0)}, локально "
+            f"{random_meta.get('local_unique', 0)}; в сессии показано "
+            f"{random_meta.get('session_seen', 0)}; исключено "
+            f"{random_meta.get('excluded', 0)})."
+        )
+        st.caption(
+            "Прошли проверки: API — "
+            f"{random_meta.get('api_strict_passed', 0)} строгих / "
+            f"{random_meta.get('api_relevance_passed', 0)} relevance; "
+            "локально — "
+            f"{random_meta.get('local_strict_passed', 0)} строгих / "
+            f"{random_meta.get('local_relevance_passed', 0)} relevance "
+            f"(рассмотрено {random_meta.get('local_considered', 0)})."
         )
         meta_note = random_meta.get("note")
         if meta_note:

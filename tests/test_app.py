@@ -9,9 +9,12 @@ from conftest import make_beatmap, make_beatmapset
 from PIL import Image
 from streamlit.testing.v1 import AppTest
 
+import app as app_module
 import appearance
 import gameplay
 import presets
+from models import Candidate, DiscoveryResult, ScoredCandidate
+from randomizer import RandomSelection
 from storage import Storage
 from skillsets import SKILL_IDS
 from test_patterns import make_osu
@@ -958,6 +961,91 @@ def _seed_many_cached_maps(store: Storage, count: int = 30) -> None:
     store.save_beatmapsets(beatmapsets)
 
 
+def _pool_item(beatmapset_id: int, score: float = 0.7) -> ScoredCandidate:
+    beatmapset = make_beatmapset(
+        beatmapset_id,
+        beatmaps=(make_beatmap(beatmapset_id * 10 + 1, beatmapset_id),),
+    )
+    return ScoredCandidate(
+        Candidate(beatmapset, beatmapset.beatmaps[0]),
+        score,
+        (),
+    )
+
+
+def test_merge_random_pools_keeps_source_counts_separate() -> None:
+    api = DiscoveryResult(
+        scored=(_pool_item(1), _pool_item(2)),
+        total_fetched=5,
+        passed_filters=4,
+        passed_relevance=3,
+        api_requests=2,
+        cache_hits=1,
+        complete=False,
+    )
+    local = DiscoveryResult(
+        scored=(_pool_item(2), _pool_item(3)),
+        total_fetched=7,
+        passed_filters=6,
+        passed_relevance=5,
+        origin="local_cache",
+    )
+    merged = app_module._merge_random_pools(api, local)
+    assert merged.count == 3
+    assert merged.total_fetched == 5
+    assert merged.passed_filters == 4
+    assert merged.passed_relevance == 3
+    assert merged.api_requests == 2
+    assert merged.cache_hits == 1
+    assert merged.origin == "mixed"
+    note = " ".join(merged.notes)
+    assert "API: 2" in note
+    assert "локально: 2" in note
+    assert "пул: 3" in note
+
+
+def test_random_selection_does_not_raise_user_request_limits() -> None:
+    cfg = presets.builtin_by_name("Mixed Aim")
+    assert cfg is not None
+    cfg.discovery.max_requests = 7
+    cfg.discovery.max_pages_per_strategy = 1
+    settings = app_module._random_discovery_settings(cfg, 5)
+    assert settings.max_requests == 7
+    assert settings.max_pages_per_strategy == 1
+
+
+def test_empty_random_message_respects_local_mode_and_request_budget() -> None:
+    selection = RandomSelection(
+        items=(),
+        requested=12,
+        pool_size=5,
+        available=0,
+        excluded=5,
+        seed=1,
+        shortfall=True,
+        note="Нет новых подходящих карт.",
+    )
+    local = app_module.RandomPool(
+        result=DiscoveryResult(origin="local_cache", complete=False),
+        source_note="",
+        local_only=True,
+        api_configured=False,
+    )
+    local_message = app_module._random_empty_message(selection, local)
+    assert "Локальный режим" in local_message
+    assert "более глубокие страницы" not in local_message.casefold()
+
+    api = app_module.RandomPool(
+        result=DiscoveryResult(complete=False),
+        source_note="",
+        api=DiscoveryResult(complete=False),
+        api_configured=True,
+    )
+    api_message = app_module._random_empty_message(selection, api)
+    assert "лимит" in api_message.casefold()
+    assert "более глубокие страницы" not in api_message.casefold()
+
+
 def test_random_selection_ignores_plain_search_history_window(app_env) -> None:
     store = Storage(app_env)
     _seed_many_cached_maps(store, 30)
@@ -976,6 +1064,12 @@ def test_random_selection_ignores_plain_search_history_window(app_env) -> None:
     meta = at.session_state["random_meta"]
     assert meta["excluded"] == 0
     assert meta["available"] == 30
+    assert meta["pool"] == 30
+    assert meta["api_unique"] == 0
+    assert meta["local_unique"] == 30
+    assert meta["local_strict_passed"] == 30
+    assert meta["local_relevance_passed"] == 30
+    assert meta["session_seen"] == 12
 
 
 def test_random_selection_uses_new_candidates_and_reports_shortfall(app_env) -> None:
@@ -1032,8 +1126,122 @@ def test_random_selection_uses_new_candidates_and_reports_shortfall(app_env) -> 
     assert at.session_state["result"].count == 0
     assert at.session_state["random_meta"]["count"] == 0
     assert "Нет новых подходящих карт" in _texts(at)
+    empty_text = " ".join(str(item.value) for item in at.warning).casefold()
+    assert "более глубокие страницы" not in empty_text
+    assert "api не настроен" in empty_text
     assert at.session_state["active_config"].to_dict() == before_config
     assert store.search_run_count() == 0
+
+
+def test_random_avoid_seen_off_allows_repeating_the_last_selection(app_env) -> None:
+    store = Storage(app_env)
+    _seed_many_cached_maps(store, 3)
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.run()
+    _number(at, "random_size").set_value(3).run()
+
+    _button(at, "random_selection").click().run()
+    assert not at.exception, _texts(at)
+    first = _search_result(at)
+    assert first is not None
+    first_ids = {item.beatmapset.id for item in first.scored}
+    assert len(first_ids) == 3
+    assert _checkbox(at, "random_avoid_seen").value is True
+
+    _button(at, "random_selection").click().run()
+    assert not at.exception
+    assert at.session_state["result"].count == 0
+
+    _checkbox(at, "random_avoid_seen").set_value(False).run()
+    _button(at, "random_selection").click().run()
+    assert not at.exception
+    repeated = _search_result(at)
+    assert repeated is not None
+    assert {item.beatmapset.id for item in repeated.scored} == first_ids
+
+
+def test_random_session_resets_when_filters_change(app_env) -> None:
+    store = Storage(app_env)
+    _seed_many_cached_maps(store, 12)
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.run()
+    _number(at, "random_size").set_value(3).run()
+
+    _button(at, "random_selection").click().run()
+    assert not at.exception, _texts(at)
+    assert at.session_state["random_meta"]["round"] == 1
+    assert at.session_state["random_meta"]["session_seen"] == 3
+
+    _go_settings_section(at, "filters")
+    _versioned(at.number_input, "flt_stars_min").set_value(5.0).run()
+    _go(at, "search")
+    _number(at, "random_size").set_value(3).run()
+    _button(at, "random_selection").click().run()
+    assert not at.exception
+    meta = at.session_state["random_meta"]
+    assert meta["round"] == 1
+    assert meta["session_seen"] == 3
+
+
+def test_random_session_does_not_repeat_across_large_selections(app_env) -> None:
+    store = Storage(app_env)
+    _seed_many_cached_maps(store, 82)
+    at = AppTest.from_file(APP, default_timeout=120)
+    at.run()
+    _number(at, "random_size").set_value(40).run()
+
+    _button(at, "random_selection").click().run()
+    assert not at.exception, _texts(at)
+    first = _search_result(at)
+    assert first is not None and first.count == 40
+    first_ids = {item.beatmapset.id for item in first.scored}
+
+    _button(at, "random_selection").click().run()
+    assert not at.exception
+    second = _search_result(at)
+    assert second is not None and second.count == 40
+    second_ids = {item.beatmapset.id for item in second.scored}
+    assert first_ids.isdisjoint(second_ids)
+
+    _button(at, "random_selection").click().run()
+    assert not at.exception
+    third = _search_result(at)
+    assert third is not None
+    third_ids = {item.beatmapset.id for item in third.scored}
+    assert third.count == 2
+    assert first_ids.isdisjoint(third_ids)
+    assert second_ids.isdisjoint(third_ids)
+    assert at.session_state["random_meta"]["session_seen"] == 82
+
+
+def test_random_selection_keeps_strict_filters(app_env) -> None:
+    store = Storage(app_env)
+    _seed_many_cached_maps(store, 2)
+    store.save_beatmapset(
+        make_beatmapset(
+            99,
+            title="Too hard",
+            beatmaps=(
+                make_beatmap(
+                    991,
+                    99,
+                    stars=8.5,
+                    total_length=90,
+                    hit_length=85,
+                ),
+            ),
+        )
+    )
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.run()
+    _number(at, "random_size").set_value(3).run()
+    _button(at, "random_selection").click().run()
+    assert not at.exception, _texts(at)
+    result = _search_result(at)
+    assert result is not None
+    assert result.count == 2
+    assert 99 not in {item.beatmapset.id for item in result.scored}
+    assert result.origin == "local_cache"
 
 
 def test_random_pick_is_strict_and_repeatable_from_current_result(app_env) -> None:
