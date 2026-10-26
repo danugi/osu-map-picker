@@ -1,0 +1,4 @@
+[server]
+# The appearance uploader accepts up to 12 MB; validation in appearance.py
+# enforces the same bound independently of Streamlit.
+maxUploadSize = 12
