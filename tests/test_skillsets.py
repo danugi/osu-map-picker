@@ -128,13 +128,17 @@ def test_single_skillset_uses_available_features_and_reports_confidence() -> Non
     assert classic.skill_id == "aim_classic"
 
 
-def test_tag_only_evidence_is_low_confidence() -> None:
-    beatmapset = make_beatmapset(1, tags=("aim", "stream"))
+def test_tag_only_evidence_is_low_confidence_but_not_aim_proof() -> None:
+    beatmapset = make_beatmapset(1, tags=("aim", "stream", "tech"))
     beatmap = make_beatmap(11, 1, stars=5.0, bpm=180.0)
     features = derive_features(beatmap, beatmapset, None)
     skills = evaluate_skills(features)
-    assert skills["aim_classic"].score is not None
-    assert skills["aim_classic"].confidence == "low"
+    # A mapper tag is allowed to remain a low-confidence hint for a broad
+    # category, but it must not satisfy mandatory official aim evidence.
+    assert skills["tech"].score is not None
+    assert skills["tech"].confidence == "low"
+    assert skills["aim_classic"].score is None
+    assert "aim_pressure" in skills["aim_classic"].missing
     # Tags do not create measured wide/flow geometry.
     assert "wide" not in features.scores
     assert "flow" not in features.scores
@@ -184,9 +188,11 @@ def test_composite_skill_combines_components_and_marks_missing() -> None:
         confidence="medium",
     )
     partial = evaluate_skills(only_aim)["speed_aim"]
-    assert partial.score is not None
+    # Speed + aim is a target skill: missing speed evidence must not be
+    # compensated by the aim component alone.
+    assert partial.score is None
     assert "speed_high_bpm" in partial.missing
-    assert partial.confidence == "low"
+    assert partial.confidence == "none"
 
 
 def test_difficulty_variety_requires_multiple_difficulties() -> None:
@@ -202,3 +208,102 @@ def test_difficulty_variety_requires_multiple_difficulties() -> None:
     assert derive_features(single.beatmaps[0], single, None).get(
         "difficulty_variety"
     ) is None
+
+
+def test_aim_classic_requires_official_aim_pressure() -> None:
+    features = BeatmapFeatures(
+        scores={"aim": 0.9, "stars": 0.8, "density": 0.7},
+        sources={
+            "aim": "tags",
+            "stars": "beatmap_stars",
+            "density": "beatmap_counts",
+        },
+        confidence="low",
+    )
+    skill = evaluate_skills(features)["aim_classic"]
+    assert skill.score is None
+    assert "aim_pressure" in skill.missing
+
+
+def test_speed_high_bpm_requires_official_speed_pressure() -> None:
+    features = BeatmapFeatures(
+        scores={"bpm": 0.9, "speed": 0.8, "density": 0.7},
+        sources={
+            "bpm": "beatmap_bpm",
+            "speed": "tags",
+            "density": "beatmap_counts",
+        },
+        confidence="low",
+    )
+    skill = evaluate_skills(features)["speed_high_bpm"]
+    assert skill.score is None
+    assert "speed_pressure" in skill.missing
+
+
+def test_required_any_accepts_one_reliable_feature() -> None:
+    features = BeatmapFeatures(
+        scores={"control": 0.8, "cs": 0.6},
+        sources={"control": "osu_api_attributes", "cs": "beatmap_cs"},
+        confidence="medium",
+    )
+    skill = evaluate_skills(features)["aim_control"]
+    assert skill.score is not None
+    assert "control" in skill.evidence[0] or "control" in " ".join(skill.evidence)
+
+
+def test_stream_control_requires_sequence_evidence() -> None:
+    features = BeatmapFeatures(
+        scores={"od": 0.9, "slider_ratio": 0.8},
+        sources={"od": "beatmap_od", "slider_ratio": "beatmap_counts"},
+        confidence="low",
+    )
+    skill = evaluate_skills(features)["stream_control"]
+    assert skill.score is None
+    assert "streams" in skill.missing
+
+
+def test_double_tap_control_requires_burst_sequence_evidence() -> None:
+    features = BeatmapFeatures(
+        scores={"tag_finger": 1.0},
+        sources={"tag_finger": "tags"},
+        confidence="low",
+    )
+    skill = evaluate_skills(features)["double_tap_control"]
+    assert skill.score is None
+    assert "bursts" in skill.missing
+
+
+def test_od_precision_requires_od_not_only_cs() -> None:
+    features = BeatmapFeatures(
+        scores={"cs": 0.9},
+        sources={"cs": "beatmap_cs"},
+        confidence="low",
+    )
+    skill = evaluate_skills(features)["od_precision"]
+    assert skill.score is None
+    assert "od" in skill.missing
+
+
+def test_ar_challenge_requires_measured_ar() -> None:
+    features = BeatmapFeatures(
+        scores={"tag_reading": 1.0},
+        sources={"tag_reading": "tags"},
+        confidence="low",
+    )
+    skill = evaluate_skills(features)["ar_challenge"]
+    assert skill.score is None
+    assert "high_ar" in skill.missing and "low_ar" in skill.missing
+
+
+def test_stream_consistency_requires_streams_field() -> None:
+    features = BeatmapFeatures(
+        scores={"stream_longest": 0.8, "stream_rhythm_quality": 0.9},
+        sources={
+            "stream_longest": "osu_sequence",
+            "stream_rhythm_quality": "osu_sequence",
+        },
+        confidence="high",
+    )
+    skill = evaluate_skills(features)["stream_consistency"]
+    assert skill.score is None
+    assert "streams" in skill.missing

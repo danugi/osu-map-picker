@@ -39,7 +39,7 @@ from models import (
     search_page_from_dict,
     search_page_to_dict,
 )
-from patterns import SEQUENCE_FEATURE_KEYS, load_analysis
+from patterns import load_analysis
 from osu_api import (
     OsuApiClient,
     OsuApiError,
@@ -48,14 +48,49 @@ from osu_api import (
     OsuRateLimitError,
 )
 from ranking import RankingContext, evaluate_candidate, rank_candidates, validate_ranking
-from relevance import evaluate_relevance
-from skillsets import SKILLS, evaluate_skills
+from relevance import (
+    BELOW,
+    NO_DATA,
+    NOT_ANALYZED,
+    evaluate_relevance,
+)
+from skillsets import SKILLS, evaluate_skills, skill_uses_sequences
 from storage import Storage, StorageError
 
 logger = logging.getLogger("osu_picker.discovery")
 
 MAX_NOTES = 12
 MAX_EXCLUSION_SAMPLES = 80
+# Cached-only analysis is deliberately bounded even when the user sets the
+# .osu download limit to zero.
+MAX_CACHED_SEQUENCE_ANALYSIS = 50
+SEQUENCE_STRATA = 5
+_ATTRIBUTE_FEATURE_KEYS = {
+    "aim",
+    "speed",
+    "control",
+    "aim_pressure",
+    "speed_pressure",
+    "slider_factor",
+    "stamina",
+    "low_aim",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class SequenceStats:
+    required: bool = False
+    analyzed: int = 0
+    unanalyzed: int = 0
+    downloads: int = 0
+    cache_hits: int = 0
+    failed: int = 0
+    limit: int = 0
+    cached_only: bool = False
+
+    @property
+    def complete(self) -> bool:
+        return not self.required or self.unanalyzed == 0
 
 
 @dataclass(frozen=True)
@@ -192,7 +227,15 @@ def _apply_relevance_gate(
         if check.passed:
             kept.append(checked)
             continue
-        reason = "соответствие целевым тегам ниже порога"
+        statuses = {target.status for target in check.targets}
+        if BELOW in statuses:
+            reason = "соответствие целевым тегам ниже порога"
+        elif NO_DATA in statuses:
+            reason = "недостаточно данных для целевых тегов"
+        elif NOT_ANALYZED in statuses:
+            reason = "не анализировалось (нужен .osu)"
+        else:
+            reason = "соответствие целевым тегам ниже порога"
         excluded[reason] = excluded.get(reason, 0) + 1
         if len(exclusions) < MAX_EXCLUSION_SAMPLES:
             exclusions.append(
@@ -206,8 +249,29 @@ def _apply_relevance_gate(
     return kept
 
 
-def _skill_uses_sequences(skill_id: str, seen: set[str] | None = None) -> bool:
-    """Whether a skill (directly or through a component) needs .osu evidence."""
+def _needs_sequence_analysis(settings: RankingSettings) -> bool:
+    """Whether any target, ranking skill or legacy trait needs .osu data."""
+
+    if any(
+        skill_uses_sequences(target)
+        for target in settings.relevance_targets
+    ):
+        return True
+    if any(
+        weight > 0 and skill_uses_sequences(skill_id)
+        for skill_id, weight in settings.skill_weights.items()
+    ):
+        return True
+    return any(
+        weight > 0 and trait in {"streams", "bursts"}
+        for trait, weight in settings.trait_targets.items()
+    )
+
+
+def _skill_uses_attributes(
+    skill_id: str, seen: set[str] | None = None
+) -> bool:
+    """Whether a skill (directly or by component) can use API attributes."""
 
     visited = seen if seen is not None else set()
     if skill_id in visited:
@@ -216,18 +280,32 @@ def _skill_uses_sequences(skill_id: str, seen: set[str] | None = None) -> bool:
     definition = SKILLS.get(skill_id)
     if definition is None:
         return False
-    if set(definition.feature_names) & SEQUENCE_FEATURE_KEYS:
+    if set(definition.feature_names) & _ATTRIBUTE_FEATURE_KEYS:
         return True
     return any(
-        _skill_uses_sequences(component, visited)
+        _skill_uses_attributes(component, visited)
         for component in definition.component_names
     )
 
 
-def _needs_sequence_analysis(settings: RankingSettings) -> bool:
-    return any(
-        _skill_uses_sequences(target)
+def _needs_attribute_enrichment(settings: RankingSettings) -> bool:
+    """Keep the attribute budget only where it can affect a gate or ranking."""
+
+    if not settings.relevance_targets:
+        return True
+    if any(
+        not skill_uses_sequences(target)
         for target in settings.relevance_targets
+    ):
+        return True
+    if any(
+        weight > 0 and _skill_uses_attributes(skill_id)
+        for skill_id, weight in settings.skill_weights.items()
+    ):
+        return True
+    return any(
+        weight > 0 and trait in {"aim", "speed", "control"}
+        for trait, weight in settings.trait_targets.items()
     )
 
 
@@ -239,11 +317,13 @@ class DiscoveryEngine:
         settings: DiscoverySettings | None = None,
         *,
         sequence_loader: Callable[[int, bool], SequenceAnalysis] | None = None,
+        sequence_cache_probe: Callable[[int], bool] | None = None,
     ) -> None:
         self.api = api
         self.storage = storage
         self.settings = settings or DiscoverySettings()
         self.sequence_loader = sequence_loader
+        self.sequence_cache_probe = sequence_cache_probe
 
     # -- page fetching -----------------------------------------------------
     def _fetch_page(
@@ -313,6 +393,8 @@ class DiscoveryEngine:
         limit = self.settings.fetch_attributes_limit
         if limit <= 0 or not candidates:
             return candidates
+        if not _needs_attribute_enrichment(ctx.settings):
+            return candidates
         # Preselect without computing the Recommendation score. For
         # specialized presets the target gate decides which cards deserve
         # attributes; a popular but irrelevant card must not consume the
@@ -322,15 +404,36 @@ class DiscoveryEngine:
                 (evaluate_relevance(candidate, ctx.settings), candidate)
                 for candidate in candidates
             ]
-            pre.sort(
-                key=lambda item: (
-                    -(item[0].best_target.display_score or 0)
-                    if item[0].best_target is not None
-                    else 0,
-                    item[1].beatmapset.id,
+            if any(
+                check.best_target is not None
+                and check.best_target.display_score is not None
+                for check, _ in pre
+            ):
+                pre.sort(
+                    key=lambda item: (
+                        -(item[0].best_target.display_score or 0)
+                        if item[0].best_target is not None
+                        else 0,
+                        item[1].beatmapset.id,
+                    )
                 )
-            )
-            top_ids = [candidate.beatmap.id for _, candidate in pre[:limit]]
+                top_ids = [
+                    candidate.beatmap.id for _, candidate in pre[:limit]
+                ]
+            else:
+                # Every target is sequence-only, so its pre-sequence score is
+                # unknown. Use a generic pre-score rather than falling back to
+                # the lowest beatmap ids.
+                ranked = [
+                    evaluate_candidate(candidate, ctx)
+                    for candidate in candidates
+                ]
+                ranked.sort(
+                    key=lambda item: (-item.score, item.beatmapset.id)
+                )
+                top_ids = [
+                    item.candidate.beatmap.id for item in ranked[:limit]
+                ]
         else:
             ranked = [
                 evaluate_candidate(candidate, ctx) for candidate in candidates
@@ -418,6 +521,88 @@ class DiscoveryEngine:
             allow_download=allow_download,
         )
 
+    def _sequence_is_cached(self, beatmap_id: int) -> bool:
+        if self.sequence_cache_probe is not None:
+            return bool(self.sequence_cache_probe(beatmap_id))
+        return (
+            self.storage.path.parent
+            / "gameplay_cache"
+            / f"{beatmap_id}.osu"
+        ).exists()
+
+    @staticmethod
+    def _stable_sequence_key(candidate: Candidate) -> str:
+        raw = f"{candidate.beatmapset.id}:{candidate.beatmap.id}"
+        return hashlib.blake2b(
+            raw.encode("utf-8"), digest_size=8
+        ).hexdigest()
+
+    def _fair_sequence_order(
+        self, candidates: list[Candidate], ctx: RankingContext
+    ) -> list[Candidate]:
+        """Deterministic stratified order, not a pure general-score shortlist."""
+
+        scored = [
+            (evaluate_candidate(candidate, ctx).score, candidate)
+            for candidate in candidates
+        ]
+        scored.sort(
+            key=lambda item: (
+                -item[0],
+                item[1].beatmapset.id,
+                item[1].beatmap.id,
+            )
+        )
+        ranked = [candidate for _, candidate in scored]
+        total = len(ranked)
+        if total == 0:
+            return []
+        strata_count = min(SEQUENCE_STRATA, total)
+        strata = [
+            ranked[
+                (index * total)
+                // strata_count : ((index + 1) * total)
+                // strata_count
+            ]
+            for index in range(strata_count)
+        ]
+        for stratum in strata:
+            stratum.sort(key=self._stable_sequence_key)
+        # Interleave score bands from the extremes inward, so even a small
+        # budget sees more than the top of the general Recommendation score.
+        band_order: list[int] = []
+        left, right = 0, strata_count - 1
+        while left <= right:
+            band_order.append(left)
+            left += 1
+            if left <= right:
+                band_order.append(right)
+                right -= 1
+        ordered = [strata[index] for index in band_order]
+        result: list[Candidate] = []
+        for slot in range(max(len(stratum) for stratum in ordered)):
+            for stratum in ordered:
+                if slot < len(stratum):
+                    result.append(stratum[slot])
+        return result
+
+    @staticmethod
+    def _with_sequence(
+        candidate: Candidate, analysis: SequenceAnalysis
+    ) -> Candidate:
+        traits = derive_features(
+            candidate.beatmap,
+            candidate.beatmapset,
+            candidate.attributes,
+            sequence=analysis,
+        )
+        return replace(
+            candidate,
+            sequence=analysis,
+            traits=traits,
+            skillsets=evaluate_skills(traits),
+        )
+
     def _enrich_sequences(
         self,
         candidates: list[Candidate],
@@ -425,66 +610,128 @@ class DiscoveryEngine:
         *,
         allow_download: bool,
         notes: list[str],
-    ) -> list[Candidate]:
+    ) -> tuple[list[Candidate], SequenceStats]:
         limit = int(self.settings.fetch_sequences_limit)
-        if (
-            limit <= 0
-            or not candidates
-            or not _needs_sequence_analysis(ctx.settings)
-        ):
-            return candidates
+        required = _needs_sequence_analysis(ctx.settings)
+        if not required or not candidates:
+            return candidates, SequenceStats(required=required)
 
-        # The budget is spent on candidates that already look promising. This
-        # is only a selection heuristic; the mandatory target gate runs later
-        # and still sees no evidence for the unanalysed cards.
-        ranked = [
-            evaluate_candidate(candidate, ctx) for candidate in candidates
+        cached_only = limit <= 0 or not allow_download
+        analysis_limit = (
+            MAX_CACHED_SEQUENCE_ANALYSIS if limit <= 0 else limit
+        )
+        if analysis_limit <= 0:
+            return candidates, SequenceStats(
+                required=True,
+                unanalyzed=len(candidates),
+                limit=limit,
+                cached_only=True,
+            )
+
+        fair = self._fair_sequence_order(candidates, ctx)
+        cached = [
+            candidate
+            for candidate in fair
+            if self._sequence_is_cached(candidate.beatmap.id)
         ]
-        ranked.sort(key=lambda item: (-item.score, item.beatmapset.id))
-        selected = ranked[:limit]
-        by_beatmap_id = {
-            item.candidate.beatmap.id: item.candidate for item in selected
-        }
+        cached_ids = {candidate.beatmap.id for candidate in cached}
         updated: dict[int, Candidate] = {}
-        analysed = 0
+        attempted: set[int] = set()
+        analyzed = 0
+        downloads = 0
+        cache_hits = 0
         failed = 0
-        missing_cache = 0
-        for beatmap_id, candidate in by_beatmap_id.items():
-            try:
-                analysis = self._load_sequence(beatmap_id, allow_download)
-            except GameplayError as exc:
-                if allow_download:
-                    failed += 1
-                    if len(notes) < MAX_NOTES:
-                        notes.append(f".osu {beatmap_id}: {exc}")
-                else:
-                    missing_cache += 1
-                continue
-            except Exception as exc:  # noqa: BLE001 - one map must not stop search
-                failed += 1
-                logger.warning("sequence analysis failed for %s: %s", beatmap_id, exc)
-                if len(notes) < MAX_NOTES:
-                    notes.append(
-                        f".osu {beatmap_id}: анализ последовательностей не удался."
-                    )
-                continue
-            traits = derive_features(
-                candidate.beatmap,
-                candidate.beatmapset,
-                candidate.attributes,
-                sequence=analysis,
-            )
-            updated[beatmap_id] = replace(
-                candidate,
-                sequence=analysis,
-                traits=traits,
-                skillsets=evaluate_skills(traits),
-            )
-            analysed += 1
 
-        if analysed:
+        def store(
+            candidate: Candidate, analysis: SequenceAnalysis, source: str
+        ) -> None:
+            nonlocal analyzed, downloads, cache_hits
+            updated[candidate.beatmap.id] = self._with_sequence(
+                candidate, analysis
+            )
+            analyzed += 1
+            if source == "cache":
+                cache_hits += 1
+            else:
+                downloads += 1
+
+        def attempt(
+            candidate: Candidate, allow: bool
+        ) -> tuple[Exception | None, bool]:
+            try:
+                analysis = self._load_sequence(candidate.beatmap.id, allow)
+            except GameplayError as exc:
+                return exc, False
+            except Exception as exc:  # noqa: BLE001 - one map must not stop search
+                logger.warning(
+                    "sequence analysis failed for %s: %s",
+                    candidate.beatmap.id,
+                    exc,
+                )
+                return exc, True
+            store(candidate, analysis, "cache" if not allow else "download")
+            return None, False
+
+        def failure_note(
+            candidate: Candidate, exc: Exception, unexpected: bool
+        ) -> None:
+            if len(notes) >= MAX_NOTES:
+                return
+            if unexpected:
+                notes.append(
+                    f".osu {candidate.beatmap.id}: анализ последовательностей "
+                    "не удался."
+                )
+            else:
+                notes.append(f".osu {candidate.beatmap.id}: {exc}")
+
+        # Cached files always go first. The attempt count is bounded even when
+        # the user asks for cached-only analysis.
+        for candidate in cached[:MAX_CACHED_SEQUENCE_ANALYSIS]:
+            if analyzed >= analysis_limit:
+                break
+            attempted.add(candidate.beatmap.id)
+            error, unexpected = attempt(candidate, False)
+            if error is None:
+                continue
+            if cached_only:
+                failed += 1
+                failure_note(candidate, error, unexpected)
+
+        # In network mode fill the remaining slots from the same fair order.
+        # Missing local files never block later candidates, and a broken cache
+        # entry is retried as a download.
+        if not cached_only and analyzed < analysis_limit:
+            for candidate in fair:
+                if analyzed >= analysis_limit:
+                    break
+                beatmap_id = candidate.beatmap.id
+                if beatmap_id in updated:
+                    continue
+                if beatmap_id in cached_ids and beatmap_id not in attempted:
+                    attempted.add(beatmap_id)
+                    error, _ = attempt(candidate, False)
+                    if error is None:
+                        continue
+                error, unexpected = attempt(candidate, True)
+                if error is not None:
+                    failed += 1
+                    failure_note(candidate, error, unexpected)
+
+        missing_cache = (
+            sum(1 for candidate in fair if candidate.beatmap.id not in cached_ids)
+            if cached_only
+            else 0
+        )
+        unanalyzed = len(candidates) - analyzed
+        if limit <= 0:
             notes.append(
-                f"Sequence-анализ .osu: {analysed} карт; streams и bursts "
+                "Лимит .osu = 0: новые файлы не скачиваются; используется "
+                "только локальный кэш (не более 50 карт)."
+            )
+        if analyzed:
+            notes.append(
+                f"Sequence-анализ .osu: {analyzed} карт; streams и bursts "
                 "считаются раздельно по непрерывным цепочкам."
             )
         if failed:
@@ -492,25 +739,36 @@ class DiscoveryEngine:
                 f"Sequence-анализ: не удалось прочитать .osu для {failed} карт; "
                 "их stream/burst-признаки остаются неизвестными."
             )
-        if missing_cache:
+        if cached_only and missing_cache:
             notes.append(
                 "Локальное переранжирование не скачивает .osu: для "
                 f"{missing_cache} карт файла нет в кеше."
             )
-        if len(candidates) > len(selected):
+        if unanalyzed:
+            cap = "0 (только кэш, до 50)" if limit <= 0 else str(analysis_limit)
             notes.append(
-                f"Sequence-анализ ограничен {len(selected)} из "
-                f"{len(candidates)} кандидатов (лимит "
-                f"{limit}); у остальных stream/burst-признаки неизвестны."
+                f"Sequence-анализ: проанализировано {analyzed} из "
+                f"{len(candidates)}; {unanalyzed} остались без анализа "
+                f"(лимит {cap})."
             )
+        stats = SequenceStats(
+            required=True,
+            analyzed=analyzed,
+            unanalyzed=unanalyzed,
+            downloads=downloads,
+            cache_hits=cache_hits,
+            failed=failed,
+            limit=limit,
+            cached_only=cached_only,
+        )
         if not updated:
-            return candidates
+            return candidates, stats
 
         result: list[Candidate] = []
         for candidate in candidates:
             enriched = updated.get(candidate.beatmap.id)
             result.append(enriched if enriched is not None else candidate)
-        return result
+        return result, stats
 
     # -- main entry point --------------------------------------------------
     def run(
@@ -535,8 +793,13 @@ class DiscoveryEngine:
         # optional difficulty attributes are requested. This keeps the first
         # search bounded without silently disabling measurable skillsets.
         resolved_requests = max(1, int(self.settings.max_requests))
+        attribute_budget = (
+            max(0, int(self.settings.fetch_attributes_limit))
+            if _needs_attribute_enrichment(ranking_settings)
+            else 0
+        )
         attribute_reserve = min(
-            max(0, int(self.settings.fetch_attributes_limit)),
+            attribute_budget,
             max(0, resolved_requests - 1),
         )
         page_budget = max(1, resolved_requests - attribute_reserve)
@@ -737,7 +1000,7 @@ class DiscoveryEngine:
         )
         attributes_elapsed = time.perf_counter() - attributes_started
         sequences_started = time.perf_counter()
-        candidates = self._enrich_sequences(
+        candidates, sequence_stats = self._enrich_sequences(
             candidates,
             ctx,
             allow_download=True,
@@ -855,6 +1118,12 @@ class DiscoveryEngine:
                 "rank": round(rank_elapsed, 3),
                 "total": round(total_elapsed, 3),
             },
+            sequence_required=sequence_stats.required,
+            sequences_complete=sequence_stats.complete,
+            sequence_analyzed=sequence_stats.analyzed,
+            sequence_unanalyzed=sequence_stats.unanalyzed,
+            sequence_downloads=sequence_stats.downloads,
+            sequence_cache_hits=sequence_stats.cache_hits,
         )
         if record:
             try:
@@ -976,7 +1245,7 @@ class DiscoveryEngine:
         )
         sequence_notes: list[str] = []
         sequences_started = time.perf_counter()
-        candidates = self._enrich_sequences(
+        candidates, sequence_stats = self._enrich_sequences(
             candidates,
             ctx,
             allow_download=False,
@@ -1049,6 +1318,12 @@ class DiscoveryEngine:
                 "rank": round(rank_elapsed, 3),
                 "total": round(time.perf_counter() - started_perf, 3),
             },
+            sequence_required=sequence_stats.required,
+            sequences_complete=sequence_stats.complete,
+            sequence_analyzed=sequence_stats.analyzed,
+            sequence_unanalyzed=sequence_stats.unanalyzed,
+            sequence_downloads=sequence_stats.downloads,
+            sequence_cache_hits=sequence_stats.cache_hits,
         )
 
 

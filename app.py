@@ -58,6 +58,7 @@ from models import (
 from osu_api import OsuApiClient, OsuApiError
 from presets import PresetError
 from ranking import FACTOR_LABELS, RankingConfigError, explain, validate_ranking
+from relevance import BELOW, MATCHED, MATCHED_LIMITED, NO_DATA, NOT_ANALYZED
 from skillsets import (
     CONFIDENCE_LABELS,
     SKILLS,
@@ -72,6 +73,13 @@ logger = logging.getLogger("osu_picker.app")
 
 APP_TITLE = "Personal osu! Map Picker"
 CFG_EDITOR_PREFIX = "cfgskill"
+TARGET_STATUS_LABELS = {
+    MATCHED: "подтверждено",
+    MATCHED_LIMITED: "выше порога (ограниченная поддержка)",
+    BELOW: "ниже порога",
+    NO_DATA: "недостаточно данных",
+    NOT_ANALYZED: "не анализировалось",
+}
 NAV_ITEMS = (
     "search",
     "favorites",
@@ -1536,7 +1544,9 @@ def _render_target_gate(scored: ScoredCandidate) -> None:
                 "Целевой тег": target.label,
                 "Соответствие": score,
                 "Порог": f">{check.threshold:.0%}",
-                "Статус": target.status,
+                "Статус": TARGET_STATUS_LABELS.get(
+                    target.status, target.status
+                ),
                 "Источник": target.source,
                 "Уверенность": CONFIDENCE_LABELS.get(
                     target.confidence, target.confidence
@@ -2302,9 +2312,21 @@ def _render_result(store: Storage, result: DiscoveryResult) -> None:
     }.get(result.origin, result.origin)
     st.caption(
         f"{result.count} карт · источник: {source} · API-запросов: "
-        f"{result.api_requests} · попаданий в кеш: {result.cache_hits}. "
+        f"{result.api_requests} · кэш-хитов поиска: {result.cache_hits}. "
         "Recommendation score — внутренний порядок 0–100, не вероятность."
     )
+    if result.sequence_required:
+        sequence_state = (
+            "полный" if result.sequences_complete else "неполный"
+        )
+        st.caption(
+            "Sequence-анализ: "
+            f"{result.sequence_analyzed} проанализировано, "
+            f"{result.sequence_unanalyzed} без анализа · "
+            f".osu скачано: {result.sequence_downloads} · "
+            f"из локального кэша: {result.sequence_cache_hits} · "
+            f"полнота sequence-данных: {sequence_state}."
+        )
 
     random_meta = st.session_state.get("random_meta")
     if isinstance(random_meta, dict):
@@ -2351,6 +2373,7 @@ def _render_result(store: Storage, result: DiscoveryResult) -> None:
                     "fetch": "Получение страниц",
                     "filter": "Строгие фильтры",
                     "attributes": "Difficulty attributes",
+                    "sequences": "Sequence-анализ .osu",
                     "rank": "Ранжирование",
                     "total": "Всего",
                 }
@@ -2798,7 +2821,8 @@ def _search_advanced_filters(cfg: PresetConfig) -> None:
             key=_ck("dsc_sequences"),
             help="Сколько .osu скачать за один поиск для Streams/Bursts. "
             "0 отключает загрузку; уже сохранённые файлы всё равно "
-            "используются. Это отдельно от лимита osu! API.",
+            "используются, но анализируется не более 50 карт из кэша. "
+            "Это отдельно от лимита osu! API.",
         )
     )
     strategy_cols = st.columns(4)

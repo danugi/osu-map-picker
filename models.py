@@ -900,8 +900,17 @@ class DiscoveryResult:
     # presents a local pool as a fresh exhaustive API result.
     origin: str = "api"
     # Stage timings in seconds. Keys are "fetch", "filter", "attributes",
-    # "rank" and "total". They are diagnostic only and never affect ranking.
+    # "sequences", "rank" and "total". They are diagnostic only and never
+    # affect ranking.
     timings: dict[str, float] = field(default_factory=dict)
+    # Sequence analysis is reported separately from API/search completeness.
+    # Missing sequence evidence is unknown, not evidence of absence.
+    sequence_required: bool = False
+    sequences_complete: bool = True
+    sequence_analyzed: int = 0
+    sequence_unanalyzed: int = 0
+    sequence_downloads: int = 0
+    sequence_cache_hits: int = 0
 
     @property
     def count(self) -> int:

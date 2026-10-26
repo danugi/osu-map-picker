@@ -8,12 +8,18 @@ from conftest import make_beatmap, make_beatmapset
 import presets
 from discovery import (
     DiscoveryEngine,
+    _apply_relevance_gate,
     build_strategies,
     collect_seeds,
 )
+from features import derive_features
+from gameplay import GameplayError
+from skillsets import evaluate_skills
 from models import (
+    Candidate,
     DifficultyAttributes,
     DiscoverySettings,
+    Exclusion,
     Filters,
     PatternChain,
     RankingSettings,
@@ -22,6 +28,7 @@ from models import (
     SequenceAnalysis,
 )
 from osu_api import OsuForbiddenError, OsuServerError
+from ranking import RankingContext
 from storage import Storage
 
 
@@ -514,6 +521,382 @@ def test_any_taste_preset_works_without_traits(storage: Storage) -> None:
     result = engine.run(preset.filters, preset.ranking)
     assert result.count == 1
     assert result.scored[0].score > 0
+
+
+def _candidate(
+    set_id: int,
+    *,
+    rating: float = 8.0,
+    play_count: int = 1_000,
+    stars: float = 5.5,
+    bpm: float = 180.0,
+    sequence: SequenceAnalysis | None = None,
+) -> Candidate:
+    beatmapset = make_beatmapset(
+        set_id,
+        rating=rating,
+        play_count=play_count,
+        beatmaps=(
+            make_beatmap(
+                set_id * 10 + 1,
+                set_id,
+                stars=stars,
+                bpm=bpm,
+                total_length=120,
+                hit_length=110,
+                count_circles=350,
+                count_sliders=150,
+                count_spinners=0,
+            ),
+        ),
+    )
+    beatmap = beatmapset.beatmaps[0]
+    traits = derive_features(beatmap, beatmapset, None, sequence=sequence)
+    return Candidate(
+        beatmapset=beatmapset,
+        beatmap=beatmap,
+        traits=traits,
+        skillsets=evaluate_skills(traits),
+        sequence=sequence,
+    )
+
+
+def test_sequence_selection_does_not_take_only_top_general_scores(
+    storage: Storage,
+) -> None:
+    sets = tuple(
+        make_beatmapset(
+            index,
+            rating=10.0 - index * 0.7,
+            play_count=1_000_000 // index,
+        )
+        for index in range(1, 7)
+    )
+    calls: list[int] = []
+
+    def loader(beatmap_id: int, allow_download: bool) -> SequenceAnalysis:
+        calls.append(beatmap_id)
+        return SequenceAnalysis()
+
+    streams = presets.builtin_by_name("Streams & Stamina")
+    assert streams is not None
+    api = StubApi(lambda query: SearchPage(beatmapsets=sets))
+    engine = DiscoveryEngine(
+        api,
+        storage,
+        settings(fetch_sequences_limit=2),
+        sequence_loader=loader,
+    )
+    engine.run(streams.filters, streams.ranking)
+    assert len(calls) == 2
+    # The second slot must not simply be the next-highest Recommendation
+    # score. Stratification deliberately includes a different score band.
+    assert max(calls) > 21
+
+    first = list(calls)
+    calls.clear()
+    second = engine.run(streams.filters, streams.ranking)
+    assert calls == first
+    assert second.sequence_required is True
+
+
+def test_sequence_selection_prefers_cached_files_first(storage: Storage) -> None:
+    sets = tuple(
+        make_beatmapset(
+            index,
+            rating=10.0 - index * 0.7,
+            play_count=1_000_000 // index,
+        )
+        for index in range(1, 7)
+    )
+    calls: list[tuple[int, bool]] = []
+
+    def loader(beatmap_id: int, allow_download: bool) -> SequenceAnalysis:
+        calls.append((beatmap_id, allow_download))
+        return SequenceAnalysis()
+
+    streams = presets.builtin_by_name("Streams & Stamina")
+    assert streams is not None
+    api = StubApi(lambda query: SearchPage(beatmapsets=sets))
+    engine = DiscoveryEngine(
+        api,
+        storage,
+        settings(fetch_sequences_limit=2),
+        sequence_loader=loader,
+        sequence_cache_probe=lambda beatmap_id: beatmap_id == 61,
+    )
+    result = engine.run(streams.filters, streams.ranking)
+    assert calls[0] == (61, False)
+    assert any(allow_download for _, allow_download in calls)
+    assert result.sequence_cache_hits == 1
+    assert result.sequence_downloads == 1
+
+
+def test_local_sequence_rerank_skips_missing_cache_without_blocking(
+    storage: Storage,
+) -> None:
+    storage.save_beatmapsets(
+        [
+            make_beatmapset(1, rating=10.0, play_count=1_000_000),
+            make_beatmapset(2, rating=7.0, play_count=1_000),
+        ]
+    )
+    calls: list[tuple[int, bool]] = []
+
+    def loader(beatmap_id: int, allow_download: bool) -> SequenceAnalysis:
+        calls.append((beatmap_id, allow_download))
+        if beatmap_id == 21:
+            return _sequence("stream")
+        raise GameplayError("missing cache entry")
+
+    streams = presets.builtin_by_name("Streams & Stamina")
+    assert streams is not None
+    engine = DiscoveryEngine(
+        None,
+        storage,
+        settings(fetch_sequences_limit=2),
+        sequence_loader=loader,
+        sequence_cache_probe=lambda beatmap_id: beatmap_id == 21,
+    )
+    result = engine.rerank_stored(streams.filters, streams.ranking)
+    assert calls == [(21, False)]
+    assert [item.beatmapset.id for item in result.scored] == [2]
+    assert result.sequence_analyzed == 1
+    assert result.sequence_unanalyzed == 1
+    assert result.sequences_complete is False
+
+
+@pytest.mark.parametrize(
+    "name",
+    ("Mixed Aim", "All-rounder", "Speed", "Stamina", "Rhythm Control"),
+)
+def test_sequence_analysis_triggers_for_skill_weights(
+    name: str, storage: Storage
+) -> None:
+    calls: list[tuple[int, bool]] = []
+
+    def loader(beatmap_id: int, allow_download: bool) -> SequenceAnalysis:
+        calls.append((beatmap_id, allow_download))
+        return SequenceAnalysis()
+
+    preset = presets.known_builtin_by_name(name)
+    assert preset is not None
+    api = StubApi(
+        lambda query: SearchPage(beatmapsets=(make_beatmapset(1),))
+    )
+    engine = DiscoveryEngine(
+        api,
+        storage,
+        settings(fetch_sequences_limit=1),
+        sequence_loader=loader,
+    )
+    engine.run(preset.filters, preset.ranking)
+    assert calls
+
+
+def test_sequence_analysis_triggers_for_legacy_trait_targets(
+    storage: Storage,
+) -> None:
+    calls: list[tuple[int, bool]] = []
+
+    def loader(beatmap_id: int, allow_download: bool) -> SequenceAnalysis:
+        calls.append((beatmap_id, allow_download))
+        return SequenceAnalysis()
+
+    ranking = RankingSettings()
+    ranking.trait_targets = {"bursts": 1.0}
+    api = StubApi(
+        lambda query: SearchPage(beatmapsets=(make_beatmapset(1),))
+    )
+    engine = DiscoveryEngine(
+        api,
+        storage,
+        settings(fetch_sequences_limit=1),
+        sequence_loader=loader,
+    )
+    engine.run(Filters(), ranking)
+    assert calls
+
+
+def test_sequence_stats_distinguish_downloads_and_unanalyzed(
+    storage: Storage,
+) -> None:
+    sets = tuple(make_beatmapset(index) for index in range(1, 4))
+
+    def loader(beatmap_id: int, allow_download: bool) -> SequenceAnalysis:
+        return SequenceAnalysis()
+
+    streams = presets.builtin_by_name("Streams & Stamina")
+    assert streams is not None
+    api = StubApi(lambda query: SearchPage(beatmapsets=sets))
+    engine = DiscoveryEngine(
+        api,
+        storage,
+        settings(fetch_sequences_limit=1),
+        sequence_loader=loader,
+    )
+    result = engine.run(streams.filters, streams.ranking)
+    assert result.sequence_required is True
+    assert result.sequence_analyzed == 1
+    assert result.sequence_unanalyzed == 2
+    assert result.sequences_complete is False
+    assert result.sequence_downloads == 1
+    assert result.sequence_cache_hits == 0
+
+
+def test_zero_sequence_limit_uses_bounded_cache_only(
+    storage: Storage,
+) -> None:
+    sets = tuple(make_beatmapset(index) for index in range(1, 56))
+    calls: list[tuple[int, bool]] = []
+
+    def loader(beatmap_id: int, allow_download: bool) -> SequenceAnalysis:
+        calls.append((beatmap_id, allow_download))
+        return SequenceAnalysis()
+
+    streams = presets.builtin_by_name("Streams & Stamina")
+    assert streams is not None
+    api = StubApi(lambda query: SearchPage(beatmapsets=sets))
+    engine = DiscoveryEngine(
+        api,
+        storage,
+        settings(fetch_sequences_limit=0),
+        sequence_loader=loader,
+        sequence_cache_probe=lambda beatmap_id: True,
+    )
+    result = engine.run(streams.filters, streams.ranking)
+    assert len(calls) == 50
+    assert all(not allow_download for _, allow_download in calls)
+    assert result.sequence_analyzed == 50
+    assert result.sequence_unanalyzed == 5
+    assert result.sequence_downloads == 0
+    assert result.sequence_cache_hits == 50
+    assert result.sequences_complete is False
+    assert any("50" in note and "кэш" in note.casefold() for note in result.notes)
+
+
+def test_bursts_preset_does_not_spend_attribute_budget(
+    storage: Storage,
+) -> None:
+    calls: list[int] = []
+
+    def loader(beatmap_id: int, allow_download: bool) -> SequenceAnalysis:
+        calls.append(beatmap_id)
+        return SequenceAnalysis()
+
+    bursts = presets.builtin_by_name("Bursts")
+    assert bursts is not None
+    api = StubApi(
+        lambda query: SearchPage(beatmapsets=(make_beatmapset(1),))
+    )
+    engine = DiscoveryEngine(
+        api,
+        storage,
+        settings(fetch_attributes_limit=1, fetch_sequences_limit=1),
+        sequence_loader=loader,
+    )
+    engine.run(bursts.filters, bursts.ranking)
+    assert calls
+    assert api.attribute_calls == []
+
+
+def test_sequence_only_preset_does_not_reserve_attribute_requests(
+    storage: Storage,
+) -> None:
+    bursts = presets.builtin_by_name("Bursts")
+    assert bursts is not None
+
+    def responder(query: SearchQuery) -> SearchPage:
+        return SearchPage(
+            beatmapsets=(make_beatmapset(1),),
+            cursor={"page": len(api.search_calls)},
+        )
+
+    api = StubApi(responder)
+    engine = DiscoveryEngine(
+        api,
+        storage,
+        settings(
+            max_requests=2,
+            max_pages_per_strategy=5,
+            fetch_attributes_limit=1,
+            fetch_sequences_limit=1,
+        ),
+        sequence_loader=lambda beatmap_id, allow_download: SequenceAnalysis(),
+    )
+    engine.run(bursts.filters, bursts.ranking)
+    assert len(api.search_calls) == 2
+    assert api.attribute_calls == []
+
+
+def test_sequence_only_preset_preselects_attributes_by_generic_score(
+    storage: Storage,
+) -> None:
+    streams = presets.builtin_by_name("Streams & Stamina")
+    assert streams is not None
+    low = _candidate(1, rating=5.0, play_count=100)
+    high = _candidate(2, rating=10.0, play_count=1_000_000)
+    storage.save_beatmapsets([low.beatmapset, high.beatmapset])
+    api = StubApi(lambda query: SearchPage(beatmapsets=()))
+    engine = DiscoveryEngine(
+        api,
+        storage,
+        settings(fetch_attributes_limit=1),
+    )
+    ctx = RankingContext.from_user_data(streams.ranking, {}, {}, {})
+    engine._enrich_attributes(
+        [low, high],
+        ctx,
+        budget={"requests": 0},
+        notes=[],
+        errors=[],
+    )
+    assert api.attribute_calls == [21]
+
+
+def test_relevance_gate_reports_not_analyzed_separately() -> None:
+    bursts = presets.builtin_by_name("Bursts")
+    assert bursts is not None
+    excluded: dict[str, int] = {}
+    exclusions: list[Exclusion] = []
+    kept = _apply_relevance_gate(
+        [_candidate(1)],
+        bursts.ranking,
+        excluded=excluded,
+        exclusions=exclusions,
+    )
+    assert kept == []
+    assert any("не анализировалось" in reason for reason in excluded)
+
+
+def test_relevance_gate_reports_insufficient_data_separately() -> None:
+    farm = presets.builtin_by_name("Aim Farm")
+    assert farm is not None
+    excluded: dict[str, int] = {}
+    exclusions: list[Exclusion] = []
+    kept = _apply_relevance_gate(
+        [_candidate(1)],
+        farm.ranking,
+        excluded=excluded,
+        exclusions=exclusions,
+    )
+    assert kept == []
+    assert any("недостаточно данных" in reason for reason in excluded)
+
+
+def test_relevance_gate_reports_below_threshold_separately() -> None:
+    bursts = presets.builtin_by_name("Bursts")
+    assert bursts is not None
+    excluded: dict[str, int] = {}
+    exclusions: list[Exclusion] = []
+    kept = _apply_relevance_gate(
+        [_candidate(1, sequence=SequenceAnalysis(analyzed_notes=10, total_notes=10))],
+        bursts.ranking,
+        excluded=excluded,
+        exclusions=exclusions,
+    )
+    assert kept == []
+    assert any("ниже порога" in reason for reason in excluded)
 
 
 def test_aim_farm_uses_short_nm_profile_without_pp_surface(

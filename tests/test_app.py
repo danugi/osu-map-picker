@@ -739,6 +739,20 @@ def _seed_short_cached_maps(store: Storage) -> None:
         for index in range(1, 13)
     ]
     store.save_beatmapsets(beatmapsets)
+    # Local reranking cannot fetch difficulty attributes. Seed them so
+    # presets whose mandatory evidence requires official aim/speed pressure
+    # can still be exercised against the cache.
+    for index in range(1, 13):
+        store.save_attributes(
+            index * 10 + 1,
+            {
+                "star_rating": 5.2 + index / 100,
+                "aim_difficulty": 3.4,
+                "speed_difficulty": 1.6,
+                "slider_factor": 1.2,
+                "max_combo": 900,
+            },
+        )
 
 
 def test_local_cache_search_reranks_for_each_switched_preset(app_env) -> None:
@@ -798,6 +812,16 @@ def test_local_streams_and_bursts_use_only_cached_osu_evidence(app_env) -> None:
     assert streams is not None and streams.count == 1
     assert streams.scored[0].beatmapset.id == 1
     assert streams.api_requests == 0
+    assert streams.sequence_analyzed == 2
+    assert streams.sequence_unanalyzed == 10
+    assert streams.sequence_downloads == 0
+    assert streams.sequence_cache_hits == 2
+    assert (
+        "Sequence-анализ: 2 проанализировано, 10 без анализа"
+        in _texts(at)
+    )
+    assert ".osu скачано: 0" in _texts(at)
+    assert "из локального кэша: 2" in _texts(at)
 
     at.sidebar.selectbox[0].select("Bursts").run()
     _button(at, "run_search").click().run()
@@ -834,8 +858,18 @@ def test_specialized_card_shows_target_gate_and_threshold(app_env) -> None:
         "Уверенность",
     ]
     assert gate_table.iloc[0]["Целевой тег"] == "Tech"
-    assert gate_table.iloc[0]["Статус"] == "совпал"
+    assert (
+        gate_table.iloc[0]["Статус"]
+        == "выше порога (ограниченная поддержка)"
+    )
     assert "тег" in gate_table.iloc[0]["Источник"].casefold()
+
+    timing_table = next(
+        frame.value
+        for frame in at.dataframe
+        if "Этап" in getattr(frame.value, "columns", [])
+    )
+    assert "Sequence-анализ .osu" in set(timing_table["Этап"])
 
     _go_settings_section(at, "ranking")
     slider = _versioned(at.slider, "rnk_relevance_threshold")

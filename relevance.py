@@ -14,17 +14,21 @@ a stream chain cannot satisfy a burst target and vice versa.
 
 Missing data is not replaced by 0.5 or by a title word. If no target can be
 evaluated, the candidate is excluded and the UI shows "недостаточно данных".
+A sequence target that was never offered to the analyzer is reported separately
+as "не анализировалось"; an analyzed map with zero chains is "ниже порога".
 """
 
 from __future__ import annotations
 
 from features import SOURCE_LABELS
 from models import Candidate, RankingSettings, RelevanceResult, TargetMatch
-from skillsets import SKILLS, evaluate_skills
+from skillsets import SKILLS, evaluate_skills, skill_uses_sequences
 
 NO_DATA = "недостаточно данных"
-MATCHED = "совпал"
+MATCHED = "подтверждено"
+MATCHED_LIMITED = "выше порога (ограниченная поддержка)"
 BELOW = "ниже порога"
+NOT_ANALYZED = "не анализировалось"
 
 
 def _clamp(value: float) -> float:
@@ -48,14 +52,23 @@ def _target_match(
     skillsets = candidate.skillsets or evaluate_skills(candidate.traits)
     item = skillsets.get(target_id)
     if item is None or item.score is None:
+        needs_sequence = (
+            definition is not None and skill_uses_sequences(target_id)
+        )
+        if needs_sequence and candidate.sequence is None:
+            status = NOT_ANALYZED
+            source = NOT_ANALYZED
+        else:
+            status = NO_DATA
+            source = NO_DATA
         return TargetMatch(
             target_id=target_id,
             label=label,
             score=None,
             threshold=threshold,
             matched=False,
-            status=NO_DATA,
-            source=NO_DATA,
+            status=status,
+            source=source,
             confidence="none",
             support=definition.support if definition is not None else "limited",
             missing=item.missing if item is not None else (target_id,),
@@ -63,13 +76,21 @@ def _target_match(
 
     score = _clamp(float(item.score))
     matched = score > threshold
+    if matched:
+        confirmed = item.support == "measured" and item.confidence in {
+            "medium",
+            "high",
+        }
+        status = MATCHED if confirmed else MATCHED_LIMITED
+    else:
+        status = BELOW
     return TargetMatch(
         target_id=target_id,
         label=label,
         score=score,
         threshold=threshold,
         matched=matched,
-        status=MATCHED if matched else BELOW,
+        status=status,
         source=_source_text(item.sources),
         confidence=item.confidence,
         support=item.support,
@@ -110,19 +131,31 @@ def evaluate_relevance(
         else None
     )
     if matched:
+        parts = []
+        for item in matched:
+            suffix = (
+                " (ограниченная поддержка)"
+                if item.status == MATCHED_LIMITED
+                else ""
+            )
+            parts.append(f"{item.label} {item.display_score}%{suffix}")
         reason = (
             f"Хотя бы один целевой тег выше порога {threshold:.0%}: "
-            + ", ".join(
-                f"{item.label} {item.display_score}%" for item in matched
-            )
+            + ", ".join(parts)
             + "."
         )
     elif not available:
-        reason = (
-            "недостаточно данных: ни один из целевых тегов ("
-            + ", ".join(item.label for item in targets)
-            + ") не удалось оценить. Совпадение не выдумывается."
-        )
+        if all(item.status == NOT_ANALYZED for item in targets):
+            reason = (
+                "не анализировалось: для целевых тегов нужен .osu, но "
+                "sequence-анализ для этой карты не выполнялся."
+            )
+        else:
+            reason = (
+                "недостаточно данных: ни один из целевых тегов ("
+                + ", ".join(item.label for item in targets)
+                + ") не удалось оценить. Совпадение не выдумывается."
+            )
     else:
         reason = (
             f"Ни один целевой тег не выше порога {threshold:.0%}: "

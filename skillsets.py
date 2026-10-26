@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 from features import FEATURE_LABELS, SOURCE_LABELS
 from models import BeatmapFeatures, SkillScore
+from patterns import SEQUENCE_FEATURE_KEYS
 
 SUPPORT_LABELS = {
     "measured": "Измеряемая основа",
@@ -68,7 +69,13 @@ class SkillDefinition:
     support: str = "limited"
     feature_weights: tuple[tuple[str, float], ...] = ()
     components: tuple[tuple[str, float], ...] = ()
+    # Evidence that must be present before a score may be produced. ``required``
+    # is an AND list; ``required_any`` is an OR list. They are deliberately
+    # separate from feature weights: a high score from other features can never
+    # compensate for missing mandatory evidence.
     required_features: tuple[str, ...] = ()
+    required_any: tuple[str, ...] = ()
+    required_components: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
     applicable_filters: tuple[str, ...] = ("stars", "length", "statuses")
 
@@ -103,6 +110,7 @@ def _base(
     *,
     support: str = "limited",
     required: tuple[str, ...] = (),
+    required_any: tuple[str, ...] = (),
     limitations: tuple[str, ...] = (),
 ) -> SkillDefinition:
     return SkillDefinition(
@@ -113,6 +121,7 @@ def _base(
         support=support,
         feature_weights=tuple(weights.items()),
         required_features=required,
+        required_any=required_any,
         limitations=limitations,
     )
 
@@ -124,6 +133,7 @@ def _combo(
     description: str,
     components: dict[str, float],
     *,
+    required_components: tuple[str, ...] = (),
     limitations: tuple[str, ...] = (),
 ) -> SkillDefinition:
     return SkillDefinition(
@@ -133,6 +143,7 @@ def _combo(
         description=description,
         support="limited",
         components=tuple(components.items()),
+        required_components=required_components,
         limitations=limitations,
     )
 
@@ -156,6 +167,7 @@ _add(
         "Основа — официальные aim/speed-атрибуты, звёздность и плотность.",
         {"aim": 0.45, "aim_pressure": 0.25, "stars": 0.15, "density": 0.15},
         support="measured",
+        required_any=("aim_pressure",),
         limitations=(
             "Без difficulty attributes остаются теги/метаданные низкой уверенности.",
         ),
@@ -169,6 +181,7 @@ _add(
         "Большие расстояния и широкий размах прыжков. Пока это прокси по "
         "aim-давлению, низкой плотности и тегу wide/spacing.",
         {"aim_pressure": 0.45, "low_density": 0.25, "tag_wide": 0.20, "aim": 0.10},
+        required_any=("aim_pressure",),
         limitations=(
             "Реальная ширина прыжков не измеряется без геометрии .osu.",
         ),
@@ -182,6 +195,7 @@ _add(
         "Связанные движения и непрерывные траектории. Прокси по aim, "
         "плотности и доле слайдеров.",
         {"aim_pressure": 0.35, "aim": 0.25, "density": 0.20, "slider_ratio": 0.20},
+        required_any=("aim_pressure",),
         limitations=(
             "Flow-геометрия и углы не измеряются по метаданным API.",
         ),
@@ -195,6 +209,7 @@ _add(
         "Смена направлений, углы и контроль перемещения. Использует "
         "control-прокси, aim-давление, slider factor и CS.",
         {"control": 0.35, "aim_pressure": 0.25, "slider_factor": 0.20, "cs": 0.10, "tag_tech": 0.10},
+        required_any=("control", "aim_pressure", "slider_factor"),
         limitations=(
             "Углы и резкость смены направления требуют локального анализа .osu.",
         ),
@@ -209,6 +224,7 @@ _add(
         "aim-давление.",
         {"cs": 0.35, "od": 0.25, "aim": 0.25, "aim_pressure": 0.15},
         support="proxy",
+        required_any=("aim_pressure",),
         limitations=(
             "CS/OD измеряются напрямую, но «точность наведения» — не отдельное "
             "поле API.",
@@ -239,6 +255,7 @@ _add(
         "напрямую, плотность — из счётчиков объектов.",
         {"bpm": 0.40, "speed_pressure": 0.30, "speed": 0.20, "density": 0.10},
         support="measured",
+        required_any=("speed_pressure",),
         limitations=("BPM сам по себе не определяет рисунок паттерна.",),
     )
 )
@@ -251,6 +268,7 @@ _add(
         "цепочек и их доля считаются отдельно от streams.",
         {"bursts": 0.50, "burst_count": 0.30, "burst_median": 0.20},
         support="measured",
+        required=("bursts",),
         limitations=("Нужен публичный .osu этой difficulty.",),
     )
 )
@@ -263,6 +281,7 @@ _add(
         "длинная цепочка и ровность интервалов.",
         {"streams": 0.55, "stream_longest": 0.25, "stream_rhythm_quality": 0.20},
         support="measured",
+        required=("streams",),
         limitations=("Cutstreams и широкие потоки требуют компактной геометрии.",),
     )
 )
@@ -275,6 +294,7 @@ _add(
         "Не использует streams, BPM или плотность как доказательство.",
         {"bursts": 0.55, "burst_count": 0.25, "burst_rhythm_quality": 0.20},
         support="measured",
+        required=("bursts",),
         limitations=("Короткие серии отделены от длинных stream-цепочек.",),
     )
 )
@@ -287,6 +307,7 @@ _add(
         "медианная длина. Stream-цепочки в этот расчёт не входят.",
         {"bursts": 0.45, "burst_count": 0.35, "burst_median": 0.20},
         support="measured",
+        required=("bursts",),
         limitations=("Burst-серия должна быть компактной и ритмичной.",),
     )
 )
@@ -298,6 +319,7 @@ _add(
         "Высокая плотность объектов в секунду и speed-нагрузка.",
         {"density": 0.55, "speed": 0.25, "bpm": 0.20},
         support="measured",
+        required_any=("speed_pressure",),
         limitations=("Плотность измеряется, но расположение объектов — нет.",),
     )
 )
@@ -309,6 +331,7 @@ _add(
         "Способность держать скорость. Прокси по speed-давлению, плотности "
         "и stamina; разброс интервалов недоступен.",
         {"speed_pressure": 0.35, "density": 0.30, "stamina": 0.25, "length": 0.10},
+        required_any=("speed_pressure",),
         limitations=("Стабильность интервалов требует локального анализа .osu.",),
     )
 )
@@ -319,6 +342,7 @@ _add(
         "speed",
         "Комбинация скорости и classic aim.",
         {"aim_classic": 0.50, "speed_high_bpm": 0.50},
+        required_components=("aim_classic", "speed_high_bpm"),
     )
 )
 _add(
@@ -346,6 +370,7 @@ _add(
             "stream_chain_count": 0.15,
         },
         support="measured",
+        required=("streams",),
         limitations=("Нужен публичный .osu этой difficulty.",),
     )
 )
@@ -358,6 +383,7 @@ _add(
         "карты и ровность интервалов.",
         {"streams": 0.35, "stream_longest": 0.40, "stream_rhythm_quality": 0.25},
         support="measured",
+        required=("streams",),
         limitations=("Длина считается по максимальной цепочке, а не по карте.",),
     )
 )
@@ -370,6 +396,7 @@ _add(
         "Burst-серии 5–9 нот сюда не входят.",
         {"streams": 0.55, "stream_chain_count": 0.25, "stream_rhythm_quality": 0.20},
         support="measured",
+        required=("streams",),
         limitations=("Цепочка короче 10 нот классифицируется как burst, не stream.",),
     )
 )
@@ -382,6 +409,7 @@ _add(
         "burst-серии 5–9 нот. Оба признака берутся из .osu раздельно.",
         {"streams": 0.50, "bursts": 0.50},
         support="measured",
+        required=("streams", "bursts"),
         limitations=("Не является целевым навыком чистого Streams-пресета.",),
     )
 )
@@ -417,6 +445,7 @@ _add(
         "доля слайдеров.",
         {"streams": 0.50, "stream_rhythm_quality": 0.20, "od": 0.15, "slider_ratio": 0.15},
         support="measured",
+        required=("streams",),
         limitations=("Контроль stream-геометрии остаётся частичной эвристикой.",),
     )
 )
@@ -436,6 +465,7 @@ _add(
         "streams",
         "Выносливость и alternation: stamina + alternating.",
         {"stamina_finger": 0.50, "alternating": 0.50},
+        required_components=("stamina_finger", "alternating"),
     )
 )
 
@@ -470,6 +500,7 @@ _add(
         "Контроль коротких burst-групп: burst-доля, медианная длина и "
         "finger-тег как подсказка.",
         {"bursts": 0.55, "burst_median": 0.20, "tag_finger": 0.25},
+        required=("bursts",),
         limitations=("Double-tap-паттерны не определяются по метаданным API.",),
     )
 )
@@ -512,6 +543,7 @@ _add(
         "finger",
         "Стабильный tapping: speed, плотность, stamina и OD.",
         {"speed": 0.30, "density": 0.30, "stamina": 0.25, "od": 0.15},
+        required_any=("speed_pressure",),
         limitations=("Стабильность нажатий требует локальных данных игры.",),
     )
 )
@@ -535,6 +567,7 @@ _add(
         "как подсказка.",
         {"bursts": 0.60, "burst_rhythm_quality": 0.25, "tag_tech": 0.15},
         support="measured",
+        required=("bursts",),
         limitations=("Структура complex bursts остаётся частичной эвристикой.",),
     )
 )
@@ -545,6 +578,7 @@ _add(
         "finger",
         "Контроль скорости: speed-давление, плотность, OD и stamina.",
         {"speed_pressure": 0.35, "density": 0.25, "od": 0.20, "stamina": 0.20},
+        required_any=("speed_pressure",),
         limitations=("Контроль скорости — прокси, не измерение точности.",),
     )
 )
@@ -559,6 +593,7 @@ _add(
         "плотность.",
         {"od": 0.40, "cs": 0.25, "stars": 0.15, "low_density": 0.20},
         support="proxy",
+        required_any=("od",),
         limitations=("OD/CS измеряются напрямую; «accuracy-карта» — эвристика.",),
     )
 )
@@ -570,6 +605,7 @@ _add(
         "Высокий OD и маленькие круги. Прямые метаданные карты.",
         {"od": 0.60, "cs": 0.40},
         support="measured",
+        required_any=("od",),
         limitations=("OD/CS не описывают рисунок паттерна.",),
     )
 )
@@ -602,6 +638,7 @@ _add(
         "Точность на разреженных паттернах: низкая плотность, OD, CS.",
         {"low_density": 0.40, "od": 0.35, "cs": 0.25},
         support="proxy",
+        required_any=("od",),
         limitations=("Разреженность измеряется, точность наведения — нет.",),
     )
 )
@@ -613,6 +650,7 @@ _add(
         "Точность на плотных паттернах: плотность, OD, CS.",
         {"density": 0.40, "od": 0.35, "cs": 0.25},
         support="proxy",
+        required_any=("od",),
         limitations=("Плотность измеряется, точность наведения — нет.",),
     )
 )
@@ -634,6 +672,7 @@ _add(
         "reading",
         "Челлендж по approach rate: высокий или низкий AR плюс reading-тег.",
         {"high_ar": 0.40, "low_ar": 0.30, "tag_reading": 0.30},
+        required_any=("high_ar", "low_ar"),
         limitations=("AR измеряется, но читаемость паттерна — нет.",),
     )
 )
@@ -645,6 +684,7 @@ _add(
         "Высокий AR и плотность: чтение быстрых появлений объектов.",
         {"high_ar": 0.70, "density": 0.30},
         support="measured",
+        required_any=("high_ar",),
         limitations=("Высокий AR измеряется, реальная читаемость — нет.",),
     )
 )
@@ -656,6 +696,7 @@ _add(
         "Низкий AR и плотность: чтение перекрывающихся объектов.",
         {"low_ar": 0.70, "density": 0.30},
         support="measured",
+        required_any=("low_ar",),
         limitations=("Низкий AR измеряется, визуальная сложность — нет.",),
     )
 )
@@ -708,6 +749,7 @@ _add(
         "reading",
         "Чтение вместе с контролем наведения.",
         {"aim_control": 0.50, "ar_challenge": 0.50},
+        required_components=("aim_control", "ar_challenge"),
     )
 )
 _add(
@@ -738,6 +780,7 @@ _add(
         "tech",
         "Углы и контроль траектории: aim control + tech.",
         {"control": 0.45, "aim_pressure": 0.25, "tag_tech": 0.30},
+        required_any=("control", "aim_pressure"),
         limitations=("Углы не измеряются без геометрии .osu.",),
     )
 )
@@ -750,6 +793,7 @@ _add(
         "по счётчикам объектов.",
         {"slider_ratio": 0.55, "slider_factor": 0.25, "length": 0.20},
         support="measured",
+        required_any=("slider_ratio", "slider_factor"),
         limitations=("Сложность слайдеров не сводится к их количеству.",),
     )
 )
@@ -849,6 +893,7 @@ _add(
         "flashlight",
         "FL-совместимость вместе с aim.",
         {"fl_friendly": 0.50, "aim_classic": 0.50},
+        required_components=("fl_friendly", "aim_classic"),
         limitations=("Нет отдельного FL-анализа наведения.",),
     )
 )
@@ -859,6 +904,7 @@ _add(
         "flashlight",
         "FL-совместимость вместе с reading.",
         {"fl_friendly": 0.50, "ar_challenge": 0.50},
+        required_components=("fl_friendly", "ar_challenge"),
         limitations=("Нет отдельного FL-анализа читаемости.",),
     )
 )
@@ -976,6 +1022,7 @@ _add(
         "combined",
         "Скорость вместе с выносливостью.",
         {"speed_high_bpm": 0.50, "stamina_finger": 0.50},
+        required_components=("speed_high_bpm", "stamina_finger"),
     )
 )
 _add(
@@ -1006,6 +1053,24 @@ _add(
 SKILL_DEFINITIONS: tuple[SkillDefinition, ...] = tuple(_DEFINITIONS)
 SKILLS: dict[str, SkillDefinition] = {item.id: item for item in SKILL_DEFINITIONS}
 SKILL_IDS: tuple[str, ...] = tuple(SKILLS)
+
+
+def skill_uses_sequences(skill_id: str, seen: set[str] | None = None) -> bool:
+    """Whether a skill needs public ``.osu`` sequence evidence."""
+
+    visited = seen if seen is not None else set()
+    if skill_id in visited:
+        return False
+    visited.add(skill_id)
+    definition = SKILLS.get(skill_id)
+    if definition is None:
+        return False
+    if set(definition.feature_names) & SEQUENCE_FEATURE_KEYS:
+        return True
+    return any(
+        skill_uses_sequences(component, visited)
+        for component in definition.component_names
+    )
 
 # Public alias used by validation and UI.
 DEFINITIONS = SKILL_DEFINITIONS
@@ -1060,6 +1125,10 @@ def _base_score(
     missing_required = [
         key for key in definition.required_features if key not in features.scores
     ]
+    if definition.required_any and not any(
+        key in features.scores for key in definition.required_any
+    ):
+        missing_required.extend(definition.required_any)
     available = [
         (key, weight)
         for key, weight in definition.feature_weights
@@ -1143,7 +1212,12 @@ def evaluate_skills(
                 else:
                     parts.append((SKILLS[component_id], weight, component))
             visiting.discard(skill_id)
-            if not parts:
+            required_missing = [
+                component_id
+                for component_id in definition.required_components
+                if component_id in missing
+            ]
+            if not parts or required_missing:
                 result = SkillScore(
                     skill_id=skill_id,
                     name=definition.name,

@@ -16,10 +16,13 @@ from models import (
     RankingSettings,
     SearchPage,
     SearchQuery,
+    SequenceAnalysis,
     SkillScore,
 )
+from features import derive_features
 from ranking import RankingConfigError, validate_ranking
 from relevance import evaluate_relevance
+from skillsets import evaluate_skills
 
 
 class StubApi:
@@ -38,6 +41,9 @@ def search_settings() -> DiscoverySettings:
         max_pages_per_strategy=1,
         max_candidates=100,
         fetch_attributes_limit=0,
+        # Unit tests must never attempt a real .osu download. D3 makes
+        # sequence analysis relevant for several presets; zero means cache-only.
+        fetch_sequences_limit=0,
         cache_ttl_minutes=0,
         use_oldest=False,
         use_rating=False,
@@ -408,6 +414,111 @@ def test_generic_presets_do_not_filter_untagged_maps(name, storage) -> None:
     assert all(
         item.candidate.relevance is None for item in result.scored
     )
+
+
+def _derived_candidate(
+    set_id: int,
+    *,
+    tags: tuple[str, ...] = (),
+    stars: float = 5.5,
+    bpm: float = 180.0,
+    ar: float = 9.0,
+    od: float = 8.0,
+    circles: int = 350,
+    sliders: int = 150,
+    sequence: SequenceAnalysis | None = None,
+) -> Candidate:
+    beatmapset = make_beatmapset(
+        set_id,
+        tags=tags,
+        beatmaps=(
+            make_beatmap(
+                set_id * 10 + 1,
+                set_id,
+                stars=stars,
+                bpm=bpm,
+                ar=ar,
+                od=od,
+                total_length=120,
+                hit_length=110,
+                count_circles=circles,
+                count_sliders=sliders,
+                count_spinners=0,
+            ),
+        ),
+    )
+    beatmap = beatmapset.beatmaps[0]
+    traits = derive_features(beatmap, beatmapset, None, sequence=sequence)
+    return Candidate(
+        beatmapset=beatmapset,
+        beatmap=beatmap,
+        traits=traits,
+        skillsets=evaluate_skills(traits),
+        sequence=sequence,
+    )
+
+
+def test_aim_farm_gate_rejects_missing_aim_attributes() -> None:
+    preset = presets.builtin_by_name("Aim Farm")
+    assert preset is not None
+    candidate = _derived_candidate(
+        1,
+        tags=(),
+        circles=600,
+        sliders=200,
+    )
+    check = evaluate_relevance(candidate, preset.ranking)
+    assert check.passed is False
+    assert all(target.score is None for target in check.targets)
+    assert all(target.status == "недостаточно данных" for target in check.targets)
+    assert "недостаточно данных" in check.reason
+
+
+def test_speed_gate_rejects_missing_speed_attributes() -> None:
+    preset = presets.builtin_by_name("Speed")
+    assert preset is not None
+    candidate = _derived_candidate(
+        1,
+        tags=(),
+        bpm=240.0,
+        circles=700,
+        sliders=50,
+    )
+    check = evaluate_relevance(candidate, preset.ranking)
+    assert check.passed is False
+    assert all(target.score is None for target in check.targets)
+    assert "недостаточно данных" in check.reason
+
+
+def test_burst_target_without_sequence_is_not_analyzed() -> None:
+    preset = presets.builtin_by_name("Bursts")
+    assert preset is not None
+    candidate = _derived_candidate(1)
+    check = evaluate_relevance(candidate, preset.ranking)
+    assert check.passed is False
+    assert all(target.status == "не анализировалось" for target in check.targets)
+
+
+def test_analyzed_burst_target_without_bursts_is_below_threshold() -> None:
+    preset = presets.builtin_by_name("Bursts")
+    assert preset is not None
+    candidate = _derived_candidate(
+        1,
+        sequence=SequenceAnalysis(analyzed_notes=10, total_notes=10),
+    )
+    check = evaluate_relevance(candidate, preset.ranking)
+    assert check.passed is False
+    assert all(target.status == "ниже порога" for target in check.targets)
+
+
+def test_tag_only_target_is_not_reported_as_confirmed() -> None:
+    candidate = score_candidate(1, {"tech": 0.9}, tags=("tech",))
+    preset = presets.builtin_by_name("Tech")
+    assert preset is not None
+    check = evaluate_relevance(candidate, preset.ranking)
+    assert check.passed is True
+    target = next(item for item in check.targets if item.target_id == "tech")
+    assert target.status == "выше порога (ограниченная поддержка)"
 
 
 def test_strict_filters_run_before_relevance(storage) -> None:
