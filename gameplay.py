@@ -20,6 +20,8 @@ import math
 import os
 import tempfile
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -33,6 +35,31 @@ USER_AGENT = "Personal-osu-Map-Picker/0.4 (+local gameplay preview)"
 
 class GameplayError(ValueError):
     """Raised when a map cannot be downloaded or safely parsed."""
+
+
+class GameplayRateLimitError(GameplayError):
+    """HTTP 429 from the public .osu endpoint."""
+
+    def __init__(self, message: str, retry_after: float | None = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+def _parse_retry_after(value: str | None, default: float = 5.0) -> float:
+    if value:
+        try:
+            return max(1.0, min(300.0, float(value.strip())))
+        except (TypeError, ValueError):
+            pass
+        try:
+            moment = parsedate_to_datetime(value)
+            if moment.tzinfo is None:
+                moment = moment.replace(tzinfo=timezone.utc)
+            seconds = (moment - datetime.now(timezone.utc)).total_seconds()
+            return max(1.0, min(300.0, seconds))
+        except (TypeError, ValueError, OverflowError):
+            pass
+    return default
 
 
 @dataclass(frozen=True, slots=True)
@@ -354,6 +381,13 @@ def download_osu(
             if response.status_code == 404:
                 raise GameplayError(
                     "osu! не нашёл .osu-файл для этой difficulty."
+                )
+            if response.status_code == 429:
+                raise GameplayRateLimitError(
+                    "osu! ограничил загрузку .osu (HTTP 429).",
+                    retry_after=_parse_retry_after(
+                        response.headers.get("Retry-After")
+                    ),
                 )
             if response.status_code >= 400:
                 raise GameplayError(

@@ -163,6 +163,8 @@ def test_ensure_worker_starts_one_daemon_thread(
         assert analysis_worker.worker_alive()
         assert analysis_worker._THREAD is not None
         assert analysis_worker._THREAD.daemon
+        # Lease acquisition alone must not look like a completed discovery.
+        assert storage.worker_state()["last_discovery_at"] is None
     finally:
         analysis_worker.stop_worker()
 
@@ -177,6 +179,119 @@ def test_auto_discovery_skips_without_api(storage: Storage) -> None:
     message = analysis_worker.run_auto_discovery(storage)
     assert "API не настроен" in message
     assert storage.search_run_count() == 0
+
+
+def test_bounded_concurrency_processes_jobs_in_parallel(
+    storage: Storage, monkeypatch
+) -> None:
+    ids = _seed(storage, 8)
+    for beatmap_id in ids:
+        _write_osu(storage, beatmap_id, _valid_osu())
+    analysis_worker.enqueue_catalog(storage, allow_download=False)
+    monkeypatch.setenv("OSU_PICKER_ANALYSIS_CONCURRENCY", "4")
+    import threading as _threading
+    import time as _time
+
+    original = analysis.analyze_beatmap
+    lock = _threading.Lock()
+    active = 0
+    maximum = 1
+
+    def tracked(*args, **kwargs):
+        nonlocal active, maximum
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+        try:
+            _time.sleep(0.05)
+            return original(*args, **kwargs)
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(analysis, "analyze_beatmap", tracked)
+    assert analysis_worker.process_once(
+        storage, limit=8, allow_download=False
+    ) == 8
+    assert maximum >= 2
+    assert storage.queue_stats()["done"] == 8
+
+
+def test_active_result_priority_is_preserved_by_rescan(
+    storage: Storage,
+) -> None:
+    ids = _seed(storage, 3)
+    for beatmap_id in ids:
+        _write_osu(storage, beatmap_id, _valid_osu())
+    analysis_worker.prioritize_beatmaps(
+        storage, [ids[2]], priority=-5, reason="active_result"
+    )
+    analysis_worker.enqueue_catalog(storage, allow_download=False)
+    claimed = storage.claim_analysis("owner", 1)
+    assert int(claimed[0]["beatmap_id"]) == ids[2]
+    assert int(claimed[0]["priority"]) == -5
+    assert claimed[0]["reason"] == "active_result"
+
+
+def test_rate_limit_retry_after_schedules_next_attempt(
+    storage: Storage, monkeypatch
+) -> None:
+    ids = _seed(storage)
+    _write_osu(storage, ids[0], _valid_osu())
+    analysis_worker.enqueue_catalog(storage, allow_download=False)
+    from models import AnalysisEvidence, now_iso
+
+    monkeypatch.setattr(
+        analysis,
+        "analyze_beatmap",
+        lambda *a, **k: AnalysisEvidence(
+            beatmap_id=ids[0],
+            status=evidence.FAILED,
+            scope="HTTP 429",
+            retry_after=12.0,
+        ),
+    )
+    try:
+        analysis_worker.process_once(storage, limit=1, allow_download=True)
+    finally:
+        analysis_worker._RATE_LIMIT_UNTIL = 0.0
+    with storage.connection() as conn:
+        row = conn.execute(
+            "SELECT status, next_attempt_at, attempts FROM analysis_queue "
+            "WHERE beatmap_id=?",
+            (ids[0],),
+        ).fetchone()
+    assert row["status"] == "pending"
+    assert row["next_attempt_at"] is not None
+    assert row["next_attempt_at"] > now_iso()
+    assert int(row["attempts"]) == 1
+
+
+def test_discovery_runs_despite_queue_and_records_attempt_time(
+    storage: Storage, monkeypatch
+) -> None:
+    ids = _seed(storage, 12)
+    for beatmap_id in ids:
+        _write_osu(storage, beatmap_id, _valid_osu())
+    analysis_worker.enqueue_catalog(storage, allow_download=False)
+    calls: list[str] = []
+    monkeypatch.setattr(analysis_worker, "_configured", lambda: True)
+    monkeypatch.setattr(
+        analysis_worker,
+        "run_auto_discovery",
+        lambda store: calls.append("run") or "Автопоиск: ok",
+    )
+    worker = analysis_worker.AnalysisWorker(storage.path)
+    worker._maybe_discovery(storage)
+    assert calls == ["run"]
+    assert storage.worker_state()["last_discovery_at"] is not None
+    # A second call inside the interval is skipped even with the queue full.
+    worker._maybe_discovery(storage)
+    assert calls == ["run"]
+    # After the interval it is allowed again.
+    storage.set_worker_discovery_time("2000-01-01T00:00:00+00:00")
+    worker._maybe_discovery(storage)
+    assert calls == ["run", "run"]
 
 
 def test_favorite_and_recent_maps_get_priority(storage: Storage) -> None:

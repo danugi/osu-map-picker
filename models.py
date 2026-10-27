@@ -879,6 +879,7 @@ class AnalysisEvidence:
     file_mtime_ns: int | None = None
     file_size: int | None = None
     attempts: int = 0
+    retry_after: float | None = None
 
     @property
     def usable(self) -> bool:

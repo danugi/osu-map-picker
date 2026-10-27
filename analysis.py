@@ -117,6 +117,10 @@ def _row_evidence(
     if int(row.get("analyzer_version", 0)) != patterns.ANALYZER_VERSION:
         return None
     status = str(row.get("status", evidence.NOT_ANALYZED))
+    # A failed row with retry budget left must be allowed to try again.
+    # ``peek_analysis`` still reports it as failed for the UI/status panel.
+    if status == evidence.FAILED:
+        return None
     sequence = sequence_from_json(row.get("sequence_json"))
     if status in {evidence.MEASURED, evidence.PARTIAL} and sequence is None:
         return None
@@ -305,6 +309,29 @@ def analyze_beatmap(
             )
         else:
             preview = gameplay.load_cached_preview(beatmap_id, cache_dir)
+    except gameplay.GameplayRateLimitError as exc:
+        attempts = (
+            int(row.get("attempts", 0)) + 1 if row is not None else 1
+        )
+        _save(
+            store,
+            beatmap_id,
+            status=evidence.FAILED,
+            source=source,
+            scope=str(exc)[:300],
+            sequence=None,
+            file_stat=file_stat,
+            attempts=attempts,
+        )
+        return AnalysisEvidence(
+            beatmap_id=beatmap_id,
+            status=evidence.FAILED,
+            source=source,
+            scope=str(exc),
+            analyzer_version=patterns.ANALYZER_VERSION,
+            attempts=attempts,
+            retry_after=exc.retry_after,
+        )
     except gameplay.GameplayError as exc:
         attempts = (
             int(row.get("attempts", 0)) + 1 if row is not None else 1

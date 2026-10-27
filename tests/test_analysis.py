@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 
+import httpx
 from conftest import make_beatmap, make_beatmapset
 
 import analysis
@@ -126,11 +127,12 @@ def test_failed_analysis_is_bounded_and_not_retried_forever(
     assert first.status == evidence.FAILED
     second = analysis.analyze_beatmap(storage, beatmap_id, allow_download=False)
     assert second.status == evidence.FAILED
-    # A failed row is returned as failed; it must not be parsed repeatedly.
-    assert second.attempts == first.attempts
+    assert second.attempts == first.attempts + 1
+    # After the analyzer attempt limit, later calls must not parse again.
     third = analysis.analyze_beatmap(storage, beatmap_id, allow_download=False)
     assert third.status == evidence.FAILED
     assert third.attempts == second.attempts
+    assert second.attempts >= analysis.MAX_ATTEMPTS
 
 
 def test_batch_analyze_reports_analyzed_skipped_and_remaining(
@@ -182,6 +184,20 @@ def test_truncated_analysis_reports_scope_and_partial_status(
     assert result.sequence is not None and result.sequence.truncated
     assert "preview limit" in result.scope
     assert result.sequence.analyzed_notes == gameplay.MAX_PREVIEW_OBJECTS
+
+
+def test_http_429_preserves_retry_after(
+    storage: Storage, monkeypatch
+) -> None:
+    beatmap_id = _save_set(storage)
+    response = httpx.Response(429, headers={"Retry-After": "7"})
+    monkeypatch.setattr(gameplay.httpx, "get", lambda *a, **k: response)
+    result = analysis.analyze_beatmap(
+        storage, beatmap_id, allow_download=True
+    )
+    assert result.status == evidence.FAILED
+    assert result.retry_after == 7.0
+    assert "429" in result.scope
 
 
 def test_stale_analyzer_version_is_not_trusted(storage: Storage) -> None:

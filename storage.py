@@ -781,7 +781,7 @@ class Storage:
                 ) VALUES (?, 'pending', ?, ?, 0, ?, ?, ?)
                 ON CONFLICT(beatmap_id) DO UPDATE SET
                     status='pending',
-                    priority=excluded.priority,
+                    priority=MIN(analysis_queue.priority, excluded.priority),
                     reason=excluded.reason,
                     max_attempts=excluded.max_attempts,
                     next_attempt_at=NULL,
@@ -792,6 +792,31 @@ class Storage:
                 payload,
             )
         return len(payload)
+
+    def prioritize_analysis(
+        self,
+        beatmap_ids: Iterable[int],
+        *,
+        priority: int,
+        reason: str,
+    ) -> int:
+        wanted = list(dict.fromkeys(int(value) for value in beatmap_ids))
+        if not wanted:
+            return 0
+        updated = 0
+        with self.connection() as conn:
+            for start in range(0, len(wanted), 400):
+                chunk = wanted[start : start + 400]
+                placeholders = ",".join("?" for _ in chunk)
+                cursor = conn.execute(
+                    "UPDATE analysis_queue "
+                    "SET priority=MIN(priority, ?), reason=?, updated_at=? "
+                    f"WHERE beatmap_id IN ({placeholders}) "
+                    "AND status IN ('pending','processing','unavailable')",
+                    (int(priority), str(reason), now_iso(), *chunk),
+                )
+                updated += int(cursor.rowcount or 0)
+        return updated
 
     def claim_analysis(
         self, owner: str, limit: int

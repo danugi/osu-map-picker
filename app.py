@@ -2055,6 +2055,15 @@ def _remember_result(
             )
         except StorageError as exc:
             st.warning(f"История показа не записана: {exc}")
+        try:
+            analysis_worker.prioritize_beatmaps(
+                store,
+                [item.beatmap.id for item in result.scored[:50]],
+                priority=-5,
+                reason="active_result",
+            )
+        except Exception:  # noqa: BLE001 - queue nudge must not break browsing
+            logger.warning("analysis priority nudged failed")
 
 
 def _render_gameplay_preview(

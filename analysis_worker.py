@@ -20,6 +20,7 @@ import socket
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -67,6 +68,47 @@ def _backoff(index: int) -> datetime:
 
 def _cache_file(store: Storage, beatmap_id: int) -> Path:
     return analysis.cache_dir_for(store) / f"{int(beatmap_id)}.osu"
+
+
+_DOWNLOAD_LOCK = threading.Lock()
+_LAST_DOWNLOAD_START = 0.0
+_RATE_LIMIT_UNTIL = 0.0
+
+
+def _analysis_concurrency() -> int:
+    raw = os.getenv(
+        "OSU_PICKER_ANALYSIS_CONCURRENCY",
+        str(config.DEFAULT_ANALYSIS_CONCURRENCY),
+    )
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = config.DEFAULT_ANALYSIS_CONCURRENCY
+    return max(1, min(8, value))
+
+
+def _throttle_download(interval: float) -> None:
+    """Serialize download starts while allowing requests to overlap."""
+
+    global _LAST_DOWNLOAD_START
+    with _DOWNLOAD_LOCK:
+        now = time.monotonic()
+        delay = max(
+            interval - (now - _LAST_DOWNLOAD_START),
+            _RATE_LIMIT_UNTIL - now,
+        )
+        if delay > 0:
+            time.sleep(delay)
+        _LAST_DOWNLOAD_START = time.monotonic()
+
+
+def _set_rate_limit(retry_after: float | None) -> None:
+    global _RATE_LIMIT_UNTIL
+    seconds = max(1.0, min(300.0, float(retry_after or 5.0)))
+    with _DOWNLOAD_LOCK:
+        _RATE_LIMIT_UNTIL = max(
+            _RATE_LIMIT_UNTIL, time.monotonic() + seconds
+        )
 
 
 def enqueue_catalog(
@@ -188,6 +230,62 @@ def enqueue_catalog(
     return added
 
 
+def prioritize_beatmaps(
+    store: Storage,
+    beatmap_ids: list[int] | tuple[int, ...],
+    *,
+    priority: int = -5,
+    reason: str = "active_result",
+) -> int:
+    """Nudge the current search/random result to the front of the queue.
+
+    Existing queue rows are reprioritized without creating duplicates. Only
+    missing/stale analysis is inserted as a new pending job.
+    """
+
+    wanted = list(dict.fromkeys(int(value) for value in beatmap_ids))
+    if not wanted:
+        return 0
+    with store.connection() as conn:
+        analyses = {
+            int(row["beatmap_id"]): dict(row)
+            for row in conn.execute(
+                "SELECT * FROM beatmap_analysis"
+            )
+        }
+        queued = {
+            int(row["beatmap_id"]): dict(row)
+            for row in conn.execute("SELECT * FROM analysis_queue")
+        }
+    new_rows: list[tuple[int, int, str]] = []
+    for beatmap_id in wanted:
+        existing_queue = queued.get(beatmap_id)
+        if existing_queue is not None:
+            continue
+        existing = analyses.get(beatmap_id)
+        if existing is not None:
+            if int(existing.get("analyzer_version", 0)) == (
+                patterns.ANALYZER_VERSION
+            ) and str(existing.get("status")) in {
+                evidence.MEASURED,
+                evidence.PARTIAL,
+            }:
+                continue
+            if str(existing.get("status")) == evidence.FAILED and (
+                int(existing.get("attempts", 0)) >= analysis.MAX_ATTEMPTS
+            ):
+                continue
+        new_rows.append((beatmap_id, int(priority), str(reason)))
+    if new_rows:
+        store.enqueue_analysis(
+            new_rows, max_attempts=config.DEFAULT_ANALYSIS_MAX_ATTEMPTS
+        )
+    store.prioritize_analysis(
+        wanted, priority=priority, reason=reason
+    )
+    return len(new_rows)
+
+
 def _configured() -> bool:
     try:
         return bool(config.load_api_config().configured)
@@ -293,6 +391,11 @@ class AnalysisWorker:
         beatmap_id = int(row["beatmap_id"])
         attempts = int(row.get("attempts", 0))
         max_attempts = int(row.get("max_attempts", 3))
+        if allow_download and not _cache_file(store, beatmap_id).exists():
+            if not analysis.peek_analysis(store, beatmap_id).usable:
+                _throttle_download(
+                    config.DEFAULT_WORKER_DOWNLOAD_INTERVAL_SECONDS
+                )
         try:
             result = analysis.analyze_beatmap(
                 store,
@@ -312,6 +415,8 @@ class AnalysisWorker:
                 next_attempt_at=None,
             )
             return
+        if result is not None and result.retry_after:
+            _set_rate_limit(result.retry_after)
         if (
             result is not None
             and result.status == evidence.SOURCE_UNAVAILABLE
@@ -337,15 +442,83 @@ class AnalysisWorker:
                 ),
             )
         else:
+            if result is not None and result.retry_after:
+                next_at = _iso(
+                    _now()
+                    + timedelta(
+                        seconds=max(
+                            1.0,
+                            min(300.0, float(result.retry_after)),
+                        )
+                    )
+                )
+            else:
+                next_at = _iso(_backoff(attempts - 1))
             store.finish_analysis(
                 beatmap_id,
                 status="pending",
                 attempts=attempts,
-                next_attempt_at=_iso(_backoff(attempts - 1)),
+                next_attempt_at=next_at,
                 error=error or (
                     result.scope if result is not None else "ошибка анализа"
                 ),
             )
+
+    def process_batch(
+        self,
+        store: Storage,
+        rows: list[dict[str, Any]],
+        allow_download: bool,
+    ) -> None:
+        """Process one claimed batch with bounded, database-safe concurrency."""
+
+        if not rows:
+            return
+        workers = min(_analysis_concurrency(), len(rows))
+        if workers <= 1:
+            for row in rows:
+                self._process_job(store, row, allow_download)
+            return
+        with ThreadPoolExecutor(
+            max_workers=workers,
+            thread_name_prefix="osu-analysis-job",
+        ) as pool:
+            futures = {
+                pool.submit(self._process_job, store, row, allow_download): row
+                for row in rows
+            }
+            pending = set(futures)
+            while pending and not self.stop_event.is_set():
+                _, pending = wait(pending, timeout=5.0)
+                self._heartbeat(store)
+            for future in futures:
+                try:
+                    future.result()
+                except Exception as exc:  # noqa: BLE001 - one job must not stop
+                    row = futures[future]
+                    logger.warning(
+                        "analysis job failed: %s", type(exc).__name__
+                    )
+                    attempts = int(row.get("attempts", 0)) + 1
+                    maximum = int(row.get("max_attempts", 3))
+                    try:
+                        store.finish_analysis(
+                            int(row["beatmap_id"]),
+                            status=(
+                                "failed"
+                                if attempts >= maximum
+                                else "pending"
+                            ),
+                            attempts=attempts,
+                            next_attempt_at=(
+                                None
+                                if attempts >= maximum
+                                else _iso(_backoff(attempts - 1))
+                            ),
+                            error=type(exc).__name__,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
 
     def _maybe_discovery(self, store: Storage) -> None:
         requested = store.consume_worker_discovery_request()
@@ -361,12 +534,11 @@ class AnalysisWorker:
             )
             if last is not None and _now() - last < interval:
                 return
-            stats = store.queue_stats()
-            if stats.get("pending", 0) + stats.get("processing", 0) > (
-                config.DEFAULT_ANALYSIS_BATCH_SIZE * 2
-            ):
-                return
+        # Discovery is allowed even while the analysis queue is large. It is
+        # bounded independently and must not be starved by analysis backlog.
         message = run_auto_discovery(store)
+        # Record the attempt time, not lease-acquisition time. A failed
+        # attempt also has a real timestamp and is retried only on schedule.
         store.set_worker_discovery_time()
         if "не удался" in message:
             store.set_worker_error(message)
@@ -378,8 +550,6 @@ class AnalysisWorker:
             return
         try:
             store.recover_analysis_jobs()
-            # A worker that just acquired the lease owns recovery.
-            store.set_worker_discovery_time()
             last_enqueue = 0.0
             while not self.stop_event.is_set():
                 try:
@@ -407,28 +577,17 @@ class AnalysisWorker:
                             config.DEFAULT_WORKER_POLL_SECONDS
                         )
                         continue
-                    for row in batch:
-                        if self.stop_event.is_set():
-                            break
-                        state = store.worker_state()
-                        if bool(state.get("paused")):
+                    if bool(store.worker_state().get("paused")):
+                        for row in batch:
                             store.finish_analysis(
                                 int(row["beatmap_id"]),
                                 status="pending",
                                 attempts=int(row.get("attempts", 0)),
                                 next_attempt_at=None,
                             )
-                            continue
-                        self._process_job(store, row, configured)
-                        self._heartbeat(store)
-                        if not configured:
-                            self.stop_event.wait(
-                                config.DEFAULT_WORKER_POLL_SECONDS / 2
-                            )
-                        else:
-                            self.stop_event.wait(
-                                config.DEFAULT_WORKER_DOWNLOAD_INTERVAL_SECONDS
-                            )
+                        continue
+                    self.process_batch(store, batch, configured)
+                    self._heartbeat(store)
                     # Newly analyzed rows may make more catalog work eligible.
                     last_enqueue = 0.0
                 except Exception as exc:  # noqa: BLE001 - keep worker alive
@@ -529,8 +688,7 @@ def process_once(
         store.recover_analysis_jobs()
         batch = store.claim_analysis(owner, limit)
         worker = AnalysisWorker(store.path)
-        for row in batch:
-            worker._process_job(store, row, allow_download)
+        worker.process_batch(store, batch, allow_download)
         return len(batch)
     finally:
         store.release_worker_lease(owner)
