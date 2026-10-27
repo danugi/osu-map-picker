@@ -1096,6 +1096,15 @@ h2, [data-testid="stHeadingWithActionElements"] h2 {
   color: var(--osu-muted);
   font-size: 0.68rem;
 }
+.library-preset-pick {
+  color: var(--osu-lavender);
+  border: 1px solid rgba(185, 163, 208, 0.35);
+  border-radius: 6px;
+  padding: 0.08rem 0.38rem;
+  font-size: 0.64rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
 .library-state {
   margin-left: auto;
   border: 1px solid var(--osu-border);

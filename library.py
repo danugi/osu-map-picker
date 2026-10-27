@@ -6,6 +6,8 @@ with persisted analysis and queue state, and exposes one row per difficulty.
 
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Iterable
 
@@ -184,6 +186,7 @@ class LibraryFilters:
     page: int = 1
     per_page: int = 12
     set_ids: tuple[int, ...] = ()
+    shuffle_seed: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -462,70 +465,268 @@ def counts(store: Storage) -> dict[str, int]:
     }
 
 
-def query_sets(store: Storage, filters: LibraryFilters) -> LibraryPage:
+def _shuffle_key(seed: int, set_id: int) -> bytes:
+    return hashlib.blake2b(
+        f"{int(seed)}:{int(set_id)}".encode("ascii"), digest_size=8
+    ).digest()
+
+
+def _sort_rows(rows: list[dict[str, Any]], sort: str) -> list[dict[str, Any]]:
+    if sort == "stars_desc":
+        return sorted(
+            rows,
+            key=lambda row: (
+                row["max_stars"] is None,
+                -(row["max_stars"] or 0.0),
+                row["title_key"],
+                row["artist_key"],
+            ),
+        )
+    if sort == "stars_asc":
+        return sorted(
+            rows,
+            key=lambda row: (
+                row["max_stars"] is None,
+                row["max_stars"] or 0.0,
+                row["title_key"],
+                row["artist_key"],
+            ),
+        )
+    if sort == "bpm_desc":
+        return sorted(
+            rows,
+            key=lambda row: (
+                row["max_bpm"] is None,
+                -(row["max_bpm"] or 0.0),
+                row["title_key"],
+            ),
+        )
+    if sort == "length_desc":
+        return sorted(
+            rows,
+            key=lambda row: (
+                row["max_length"] is None,
+                -(row["max_length"] or 0),
+                row["title_key"],
+            ),
+        )
+    if sort == "title":
+        return sorted(rows, key=lambda row: (row["artist_key"], row["title_key"]))
+    if sort in {"ranked", "recent_analysis"}:
+        field_name = "ranked_date" if sort == "ranked" else "last_analyzed"
+        non_empty = [row for row in rows if row[field_name]]
+        empty = [row for row in rows if not row[field_name]]
+        non_empty.sort(
+            key=lambda row: (
+                row[field_name],
+                row["max_stars"] or 0.0,
+                row["title_key"],
+            ),
+            reverse=True,
+        )
+        empty.sort(key=lambda row: (row["title_key"], row["artist_key"]))
+        return non_empty + empty
+    return rows
+
+
+def query_sets(
+    store: Storage,
+    filters: LibraryFilters,
+    *,
+    preset_order: Sequence[int] | None = None,
+    preset_beatmaps: Mapping[int, int] | None = None,
+) -> LibraryPage:
     where, params = _where_clause(filters)
     base = _BASE_SELECT
     state = _state_clause(filters.scope)
-    sort_sql = _SORT_SQL.get(filters.sort, _SORT_SQL["recent_analysis"])
     per_page = max(1, min(48, int(filters.per_page)))
+    preset_mode = preset_order is not None
+    shuffle_seed = filters.shuffle_seed
+    order_map = {
+        int(set_id): index
+        for index, set_id in enumerate(preset_order or ())
+    }
+    preset_map = {
+        int(set_id): int(beatmap_id)
+        for set_id, beatmap_id in (preset_beatmaps or {}).items()
+    }
     with store.connection() as conn:
-        total_row = conn.execute(
-            f"WITH base AS ({base}) "
-            f"SELECT COUNT(DISTINCT beatmapset_id) AS sets, "
-            f"COUNT(*) AS difficulties FROM base "
-            f"WHERE {where} AND {state}",
-            params,
-        ).fetchone()
-        total_sets = int(total_row["sets"] or 0)
-        total_difficulties = int(total_row["difficulties"] or 0)
-        pages = max(1, (total_sets + per_page - 1) // per_page)
-        page = max(1, min(int(filters.page), pages))
-        offset = (page - 1) * per_page
-        set_rows = conn.execute(
-            f"WITH base AS ({base}) "
-            "SELECT beatmapset_id, COUNT(*) AS difficulties, "
-            "MAX(stars) AS max_stars, MIN(stars) AS min_stars, "
-            "MAX(COALESCE(bpm, set_bpm)) AS max_bpm, "
-            "MAX(COALESCE(total_length, hit_length, 0)) AS max_length, "
-            "MAX(analyzed_at) AS last_analyzed, "
-            "MAX(ranked_date) AS ranked_date, "
-            "MIN(LOWER(COALESCE(NULLIF(artist_unicode,''), artist))) "
-            "AS artist_key, "
-            "MIN(LOWER(COALESCE(NULLIF(title_unicode,''), title))) "
-            "AS title_key "
-            f"FROM base WHERE {where} AND {state} "
-            "GROUP BY beatmapset_id "
-            f"ORDER BY {sort_sql} "
-            "LIMIT :limit OFFSET :offset",
-            {**params, "limit": per_page, "offset": offset},
-        ).fetchall()
-        set_ids = [int(row["beatmapset_id"]) for row in set_rows]
-        entries_by_set: dict[int, list[LibraryEntry]] = {
-            set_id: [] for set_id in set_ids
-        }
-        if set_ids:
-            placeholders = ",".join(
-                f":entry_{index}" for index in range(len(set_ids))
-            )
-            entry_params = {
-                **params,
-                **{
-                    f"entry_{index}": set_id
-                    for index, set_id in enumerate(set_ids)
-                },
-            }
-            entry_rows = conn.execute(
+        if preset_mode or shuffle_seed is not None:
+            # Preset fit and shuffle need the whole eligible collection, not
+            # just the SQL page, so ordering and pagination are deterministic.
+            raw_rows = conn.execute(
                 f"WITH base AS ({base}) "
-                f"SELECT * FROM base WHERE {where} AND {state} "
-                f"AND beatmapset_id IN ({placeholders}) "
-                "ORDER BY beatmapset_id, stars DESC, version",
-                entry_params,
+                "SELECT beatmapset_id, COUNT(*) AS difficulties, "
+                "MAX(stars) AS max_stars, MIN(stars) AS min_stars, "
+                "MAX(COALESCE(bpm, set_bpm)) AS max_bpm, "
+                "MAX(COALESCE(total_length, hit_length, 0)) AS max_length, "
+                "MAX(analyzed_at) AS last_analyzed, "
+                "MAX(ranked_date) AS ranked_date, "
+                "MIN(LOWER(COALESCE(NULLIF(artist_unicode,''), artist))) "
+                "AS artist_key, "
+                "MIN(LOWER(COALESCE(NULLIF(title_unicode,''), title))) "
+                "AS title_key "
+                f"FROM base WHERE {where} AND {state} "
+                "GROUP BY beatmapset_id",
+                params,
             ).fetchall()
-            for row in entry_rows:
-                entry = _entry_from_row(row)
-                entries_by_set.setdefault(entry.beatmapset_id, []).append(
-                    entry
+            rows = [dict(row) for row in raw_rows]
+            if preset_mode:
+                allowed = set(order_map)
+                rows = [
+                    row
+                    for row in rows
+                    if int(row["beatmapset_id"]) in allowed
+                ]
+                if preset_map:
+                    valid_rep_sets: set[int] = set()
+                    representative_ids = list(
+                        dict.fromkeys(
+                            preset_map[set_id]
+                            for set_id in order_map
+                            if set_id in preset_map
+                        )
+                    )
+                    for start in range(0, len(representative_ids), 400):
+                        chunk = representative_ids[start : start + 400]
+                        rep_params = {
+                            **params,
+                            **{
+                                f"rep_{index}": beatmap_id
+                                for index, beatmap_id in enumerate(chunk)
+                            },
+                        }
+                        placeholders = ",".join(
+                            f":rep_{index}" for index in range(len(chunk))
+                        )
+                        rep_rows = conn.execute(
+                            f"WITH base AS ({base}) "
+                            f"SELECT DISTINCT beatmapset_id FROM base "
+                            f"WHERE {where} AND {state} "
+                            f"AND beatmap_id IN ({placeholders})",
+                            rep_params,
+                        ).fetchall()
+                        valid_rep_sets.update(
+                            int(row["beatmapset_id"]) for row in rep_rows
+                        )
+                    rows = [
+                        row
+                        for row in rows
+                        if int(row["beatmapset_id"]) in valid_rep_sets
+                    ]
+                if shuffle_seed is not None:
+                    rows.sort(
+                        key=lambda row: _shuffle_key(
+                            shuffle_seed, int(row["beatmapset_id"])
+                        )
+                    )
+                elif filters.sort == "preset_fit":
+                    rows.sort(key=lambda row: order_map[int(row["beatmapset_id"])])
+                else:
+                    rows = _sort_rows(rows, filters.sort)
+                total_difficulties = sum(
+                    int(row["difficulties"]) for row in rows
                 )
+            else:
+                rows.sort(
+                    key=lambda row: _shuffle_key(
+                        shuffle_seed, int(row["beatmapset_id"])
+                    )
+                )
+                total_difficulties = sum(
+                    int(row["difficulties"]) for row in rows
+                )
+            total_sets = len(rows)
+            pages = max(1, (total_sets + per_page - 1) // per_page)
+            page = max(1, min(int(filters.page), pages))
+            offset = (page - 1) * per_page
+            set_rows = rows[offset : offset + per_page]
+            set_ids = [int(row["beatmapset_id"]) for row in set_rows]
+            entries_by_set: dict[int, list[LibraryEntry]] = {
+                set_id: [] for set_id in set_ids
+            }
+            if set_ids:
+                placeholders = ",".join(
+                    f":entry_{index}" for index in range(len(set_ids))
+                )
+                entry_params = {
+                    **params,
+                    **{
+                        f"entry_{index}": set_id
+                        for index, set_id in enumerate(set_ids)
+                    },
+                }
+                entry_rows = conn.execute(
+                    f"WITH base AS ({base}) "
+                    f"SELECT * FROM base WHERE {where} AND {state} "
+                    f"AND beatmapset_id IN ({placeholders}) "
+                    "ORDER BY beatmapset_id, stars DESC, version",
+                    entry_params,
+                ).fetchall()
+                for row in entry_rows:
+                    entry = _entry_from_row(row)
+                    entries_by_set.setdefault(entry.beatmapset_id, []).append(
+                        entry
+                    )
+        else:
+            total_row = conn.execute(
+                f"WITH base AS ({base}) "
+                f"SELECT COUNT(DISTINCT beatmapset_id) AS sets, "
+                f"COUNT(*) AS difficulties FROM base "
+                f"WHERE {where} AND {state}",
+                params,
+            ).fetchone()
+            total_sets = int(total_row["sets"] or 0)
+            total_difficulties = int(total_row["difficulties"] or 0)
+            pages = max(1, (total_sets + per_page - 1) // per_page)
+            page = max(1, min(int(filters.page), pages))
+            offset = (page - 1) * per_page
+            sort_sql = _SORT_SQL.get(filters.sort, _SORT_SQL["recent_analysis"])
+            set_rows = conn.execute(
+                f"WITH base AS ({base}) "
+                "SELECT beatmapset_id, COUNT(*) AS difficulties, "
+                "MAX(stars) AS max_stars, MIN(stars) AS min_stars, "
+                "MAX(COALESCE(bpm, set_bpm)) AS max_bpm, "
+                "MAX(COALESCE(total_length, hit_length, 0)) AS max_length, "
+                "MAX(analyzed_at) AS last_analyzed, "
+                "MAX(ranked_date) AS ranked_date, "
+                "MIN(LOWER(COALESCE(NULLIF(artist_unicode,''), artist))) "
+                "AS artist_key, "
+                "MIN(LOWER(COALESCE(NULLIF(title_unicode,''), title))) "
+                "AS title_key "
+                f"FROM base WHERE {where} AND {state} "
+                "GROUP BY beatmapset_id "
+                f"ORDER BY {sort_sql} "
+                "LIMIT :limit OFFSET :offset",
+                {**params, "limit": per_page, "offset": offset},
+            ).fetchall()
+            set_ids = [int(row["beatmapset_id"]) for row in set_rows]
+            entries_by_set: dict[int, list[LibraryEntry]] = {
+                set_id: [] for set_id in set_ids
+            }
+            if set_ids:
+                placeholders = ",".join(
+                    f":entry_{index}" for index in range(len(set_ids))
+                )
+                entry_params = {
+                    **params,
+                    **{
+                        f"entry_{index}": set_id
+                        for index, set_id in enumerate(set_ids)
+                    },
+                }
+                entry_rows = conn.execute(
+                    f"WITH base AS ({base}) "
+                    f"SELECT * FROM base WHERE {where} AND {state} "
+                    f"AND beatmapset_id IN ({placeholders}) "
+                    "ORDER BY beatmapset_id, stars DESC, version",
+                    entry_params,
+                ).fetchall()
+                for row in entry_rows:
+                    entry = _entry_from_row(row)
+                    entries_by_set.setdefault(entry.beatmapset_id, []).append(
+                        entry
+                    )
     sets: list[LibrarySet] = []
     for set_id in set_ids:
         entries = entries_by_set.get(set_id, [])

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from io import BytesIO
 from pathlib import Path
 
@@ -1660,6 +1661,85 @@ def test_gameplay_preview_renders_inside_the_selected_card(
     assert any(button.key == "close_gameplay_preview" for button in card.button)
 
 
+def _visible_library_ids(at: AppTest) -> set[int]:
+    text = "\n".join(str(item.value) for item in at.markdown)
+    return {
+        int(value)
+        for value in re.findall(r"beatmapsets/(\d+)", text)
+    }
+
+
+def _make_library_preset(
+    store: Storage,
+    name: str,
+    *,
+    stars_min: float | None = None,
+    stars_max: float | None = None,
+    duration_max: int | None = None,
+    statuses: list[str] | None = None,
+) -> None:
+    cfg = presets.default_config(name)
+    cfg.description = name
+    cfg.filters.star_mode = (
+        "strict" if stars_min is not None or stars_max is not None else "off"
+    )
+    cfg.filters.stars_min = stars_min
+    cfg.filters.stars_max = stars_max
+    cfg.filters.duration_max = duration_max
+    cfg.filters.statuses = list(
+        statuses or ["ranked", "loved", "qualified"]
+    )
+    cfg.filters.modes = ["osu"]
+    cfg.ranking.relevance_targets = []
+    cfg.ranking.skill_weights = {}
+    cfg.ranking.trait_targets = {}
+    presets.validate_preset_config(cfg)
+    store.create_preset(cfg)
+
+
+def _seed_library_sets(
+    store: Storage,
+    *,
+    count: int = 10,
+    stars: float = 5.0,
+) -> list[int]:
+    ids: list[int] = []
+    for index in range(1, count + 1):
+        beatmap = make_beatmap(
+            1000 + index,
+            index,
+            stars=stars + (index - 1) * 0.01,
+            version=f"Library {index}",
+        )
+        store.save_beatmapset(
+            make_beatmapset(
+                index,
+                title=f"Shuffle Song {index:02d}",
+                artist=f"Artist {index}",
+                creator=f"Mapper {index}",
+                beatmaps=(beatmap,),
+            )
+        )
+        sequence = SequenceAnalysis(
+            analyzed_notes=100,
+            total_notes=100,
+            labels=("jump_aim",),
+            analyzer_version=patterns.ANALYZER_VERSION,
+        )
+        store.save_analysis(
+            beatmap.id,
+            status="measured",
+            source="cache",
+            analyzer_version=patterns.ANALYZER_VERSION,
+            file_mtime_ns=1,
+            file_size=1,
+            scope="",
+            sequence_json=analysis.sequence_to_json(sequence),
+        )
+        ids.append(beatmap.id)
+    return ids
+
+
 def _seed_app_library(store: Storage, count: int = 2) -> list[int]:
     ids: list[int] = []
     for index in range(1, count + 1):
@@ -1815,6 +1895,161 @@ def _library_entry_for_test(store: Storage, set_id: int):
     return page.sets[0].entries[0]
 
 
+def _seed_preset_library(app_env) -> Storage:
+    store = Storage(app_env)
+    presets.ensure_builtin_presets(store)
+    rows = (
+        (1, "Wide Song", 4.2, 120, "ranked"),
+        (2, "High Song", 6.5, 100, "ranked"),
+        (3, "Long Song", 5.5, 200, "ranked"),
+        (4, "Qualified Song", 5.0, 120, "qualified"),
+    )
+    for set_id, title, stars, duration, status in rows:
+        beatmap = make_beatmap(
+            1000 + set_id,
+            set_id,
+            stars=stars,
+            total_length=duration,
+            status=status,
+        )
+        store.save_beatmapset(
+            make_beatmapset(
+                set_id,
+                title=title,
+                status=status,
+                beatmaps=(beatmap,),
+            )
+        )
+        sequence = SequenceAnalysis(
+            analyzed_notes=100,
+            total_notes=100,
+            labels=("jump_aim",),
+            analyzer_version=patterns.ANALYZER_VERSION,
+        )
+        store.save_analysis(
+            beatmap.id,
+            status="measured",
+            source="cache",
+            analyzer_version=patterns.ANALYZER_VERSION,
+            file_mtime_ns=1,
+            file_size=1,
+            scope="",
+            sequence_json=analysis.sequence_to_json(sequence),
+        )
+    _make_library_preset(
+        store,
+        "Wide UI",
+        stars_min=3.5,
+        stars_max=7.0,
+        duration_max=300,
+        statuses=["ranked", "qualified"],
+    )
+    _make_library_preset(
+        store,
+        "Narrow UI",
+        stars_min=5.5,
+        stars_max=6.9,
+        duration_max=150,
+        statuses=["ranked"],
+    )
+    return store
+
+
+def test_library_preset_switch_changes_real_results(app_env) -> None:
+    _seed_preset_library(app_env)
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.run()
+    at.sidebar.selectbox[0].select("Wide UI").run()
+    at.session_state["nav"] = "library"
+    at.run()
+    assert not at.exception, _texts(at)
+    assert _visible_library_ids(at) == {1, 2, 3, 4}
+
+    at.sidebar.selectbox[0].select("Narrow UI").run()
+    assert not at.exception, _texts(at)
+    assert at.session_state["library_page"] == 1
+    assert _visible_library_ids(at) == {2}
+    assert "Wide Song" not in _texts(at)
+    assert "Qualified Song" not in _texts(at)
+
+
+def test_library_filter_change_resets_pagination(app_env) -> None:
+    store = Storage(app_env)
+    _seed_library_sets(store, count=10)
+    _make_library_preset(
+        store,
+        "Wide Paging",
+        statuses=["ranked", "qualified"],
+    )
+    _make_library_preset(
+        store,
+        "Narrow Paging",
+        stars_min=5.0,
+        stars_max=5.05,
+        duration_max=150,
+        statuses=["ranked"],
+    )
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.run()
+    at.sidebar.selectbox[0].select("Wide Paging").run()
+    at.session_state["nav"] = "library"
+    at.run()
+    assert not at.exception, _texts(at)
+    at.session_state["library_page"] = 2
+    at.run()
+    assert at.session_state["library_page"] == 2
+
+    statuses = next(
+        item for item in at.multiselect if item.key == "library_statuses"
+    )
+    statuses.set_value(["ranked"]).run()
+    assert not at.exception, _texts(at)
+    assert at.session_state["library_page"] == 1
+    page_ids = _visible_library_ids(at)
+    assert len(page_ids) == 8
+    assert page_ids <= set(range(1, 11))
+
+    at.session_state["library_page"] = 2
+    at.run()
+    assert at.session_state["library_page"] == 2
+    at.sidebar.selectbox[0].select("Narrow Paging").run()
+    assert not at.exception, _texts(at)
+    assert at.session_state["library_page"] == 1
+    assert len(_visible_library_ids(at)) == 6
+
+
+def test_library_shuffle_button_is_stable_across_pages(app_env) -> None:
+    store = Storage(app_env)
+    _seed_library_sets(store, count=10, stars=5.0)
+    _make_library_preset(store, "Wide Shuffle")
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.run()
+    at.sidebar.selectbox[0].select("Wide Shuffle").run()
+    at.session_state["nav"] = "library"
+    at.run()
+    assert not at.exception, _texts(at)
+    _button(at, "library_shuffle").click().run()
+    assert not at.exception, _texts(at)
+    seed = at.session_state["library_shuffle_seed"]
+    assert isinstance(seed, int)
+    assert at.session_state["library_page"] == 1
+    first_ids = _visible_library_ids(at)
+
+    at.run()
+    assert at.session_state["library_shuffle_seed"] == seed
+    assert _visible_library_ids(at) == first_ids
+
+    at.session_state["library_page"] = 2
+    at.run()
+    second_ids = _visible_library_ids(at)
+    assert second_ids
+    assert not (first_ids & second_ids)
+
+    _button(at, "library_shuffle").click().run()
+    assert at.session_state["library_shuffle_seed"] != seed
+    assert at.session_state["library_page"] == 1
+
+
 def test_library_preview_uses_cache_without_network(app_env, monkeypatch):
     store = Storage(app_env)
     _seed_app_library(store, 1)
@@ -1836,6 +2071,10 @@ def test_library_preview_uses_cache_without_network(app_env, monkeypatch):
     at.session_state["nav"] = "library"
     at.session_state["library_query"] = "Library Song 1"
     at.session_state["library_preview_entry"] = entry
+    # This test is about the cached .osu preview, not preset eligibility. The
+    # test worker may rewrite the synthetic analysis from the cached .osu, so
+    # keep the manual full-catalog view stable.
+    at.session_state["library_preset_mode"] = False
     at.run()
     assert not at.exception, _texts(at)
     text = _texts(at)

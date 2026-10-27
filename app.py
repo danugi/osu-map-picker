@@ -28,6 +28,7 @@ import appearance
 import catalog
 import config
 import library
+import library_preset
 import evidence
 import gameplay
 import pattern_filters
@@ -3496,6 +3497,8 @@ def _render_library_entry(
     store: Storage,
     entry: library.LibraryEntry,
     current_scores: dict[int, ScoredCandidate],
+    *,
+    preset_selected: bool = False,
 ) -> None:
     stars = f"{entry.stars:.2f}★" if entry.stars is not None else "★ ?"
     bpm = f"{entry.effective_bpm:.0f}" if entry.effective_bpm else "?"
@@ -3523,7 +3526,12 @@ def _render_library_entry(
         f"<span class='library-diff-stars'>{html.escape(stars)}</span>"
         f"<span class='library-diff-version'>{html.escape(entry.version or 'unknown')}</span>"
         f"<span class='library-diff-mode'>{html.escape(entry.mode)}</span>"
-        f"<span class='library-state {tone}'>{html.escape(entry.short_state)}</span>"
+        + (
+            "<span class='library-preset-pick'>выбрана пресетом</span>"
+            if preset_selected
+            else ""
+        )
+        + f"<span class='library-state {tone}'>{html.escape(entry.short_state)}</span>"
         "</div>"
         f"<div class='library-diff-meta'>BPM {bpm} · AR {ar} · OD {od} · "
         f"{length}</div>"
@@ -3577,6 +3585,8 @@ def _render_library_set(
     store: Storage,
     set_item: library.LibrarySet,
     current_scores: dict[int, ScoredCandidate],
+    *,
+    preset_beatmap_id: int | None = None,
 ) -> None:
     with st.container(border=True, key=f"library_set_{set_item.beatmapset_id}"):
         st.markdown(
@@ -3602,7 +3612,12 @@ def _render_library_set(
         visible = set_item.entries[:3]
         hidden = set_item.entries[3:]
         for entry in visible:
-            _render_library_entry(store, entry, current_scores)
+            _render_library_entry(
+                store,
+                entry,
+                current_scores,
+                preset_selected=entry.beatmap_id == preset_beatmap_id,
+            )
         if hidden:
             with st.expander(
                 f"Ещё {len(hidden)} сложностей",
@@ -3610,7 +3625,12 @@ def _render_library_set(
                 key=f"library_more_{set_item.beatmapset_id}",
             ):
                 for entry in hidden:
-                    _render_library_entry(store, entry, current_scores)
+                    _render_library_entry(
+                        store,
+                        entry,
+                        current_scores,
+                        preset_selected=entry.beatmap_id == preset_beatmap_id,
+                    )
 
 
 @st.dialog("Детали сложности", width="large")
@@ -3761,6 +3781,40 @@ def _library_counts_html(counts: dict[str, int]) -> str:
     )
 
 
+def _library_preset_evaluation(
+    store: Storage, cfg: PresetConfig
+) -> library_preset.LibraryPresetResult:
+    key = library_preset.preset_cache_signature(store, cfg)
+    cache = st.session_state.get("_library_preset_cache")
+    if (
+        isinstance(cache, dict)
+        and cache.get("key") == key
+        and isinstance(cache.get("value"), library_preset.LibraryPresetResult)
+    ):
+        return cache["value"]
+    with st.spinner("Применяю активный пресет к локальному каталогу…"):
+        value = library_preset.evaluate_preset(store, cfg)
+    st.session_state["_library_preset_cache"] = {
+        "key": key,
+        "value": value,
+    }
+    return value
+
+
+def _library_clear_manual_filters() -> None:
+    for key in (
+        "library_query",
+        "library_statuses",
+        "library_other_patterns",
+        "library_mode",
+        "library_stars",
+        "library_bpm",
+        "library_length",
+        "library_page",
+    ):
+        st.session_state.pop(key, None)
+
+
 def page_library(store: Storage, cfg: PresetConfig) -> None:
     _page_intro(
         "LOCAL LIBRARY",
@@ -3793,31 +3847,82 @@ def page_library(store: Storage, cfg: PresetConfig) -> None:
         key="library_scope",
     )
     scope = scope or "analyzed"
+    preset_scope_supported = scope in {"analyzed", "all", "partial"}
+    preset_row = st.columns([1.35, 3.65])
+    preset_mode = preset_row[0].toggle(
+        "Под активный пресет",
+        value=True,
+        key="library_preset_mode",
+        help="Применяет hard filters, целевой гейт и ранжирование текущего "
+        "пресета к локальному каталогу. API не используется.",
+    )
+    effective_preset = bool(preset_mode and preset_scope_supported)
+    config_digest = hashlib.sha256(
+        json.dumps(
+            cfg.to_dict(), ensure_ascii=False, sort_keys=True
+        ).encode("utf-8")
+    ).hexdigest()
+    preset_filter_lines = active_filter_summary(cfg.filters)
+    preset_filter_summary = "; ".join(preset_filter_lines[:4])
+    if effective_preset:
+        preset_row[1].caption(
+            f"Пресет «{cfg.name}» · {preset_filter_summary}"
+        )
+    elif preset_mode and not preset_scope_supported:
+        preset_row[1].caption(
+            "Для очереди, недоступных источников и ошибок анализа пресетный "
+            "гейт не применяется: показан ручной режим."
+        )
+    else:
+        preset_row[1].caption("Ручной режим: показан локальный каталог.")
+
+    if st.session_state.get("_library_last_effective_preset") != effective_preset:
+        st.session_state["_library_last_effective_preset"] = effective_preset
+        st.session_state["library_sort"] = (
+            "preset_fit" if effective_preset else "recent_analysis"
+        )
+        st.session_state["library_page"] = 1
+
     relevant_patterns = pattern_filters.relevant_patterns(
         cfg.ranking.skill_weights, cfg.ranking.trait_targets
     )
+    pattern_scope = scope in {"analyzed", "all", "partial"}
     default_patterns = (
         list(relevant_patterns)
-        if scope in {"analyzed", "all", "partial"}
+        if effective_preset and pattern_scope
         else []
     )
-    pattern_scope = scope in {"analyzed", "all", "partial"}
     signature = (
         st.session_state.get("active_preset_id"),
         cfg.name,
+        config_digest,
         pattern_scope,
+        effective_preset,
         tuple(relevant_patterns),
     )
     if st.session_state.get("_library_pattern_signature") != signature:
         st.session_state["_library_pattern_signature"] = signature
         st.session_state["library_preset_patterns"] = default_patterns
-        st.session_state.pop("library_other_patterns", None)
         st.session_state.pop("library_patterns", None)
+        if not pattern_scope:
+            st.session_state.pop("library_other_patterns", None)
+        st.session_state["library_page"] = 1
     st.session_state.setdefault(
         "library_preset_patterns", default_patterns
     )
+
+    sort_options = list(library.SORT_OPTIONS)
+    sort_labels = dict(library.SORT_LABELS)
+    if effective_preset:
+        sort_options = ["preset_fit", *sort_options]
+        sort_labels = {"preset_fit": "Соответствие пресету", **sort_labels}
+    if st.session_state.get("library_sort") not in sort_options:
+        st.session_state["library_sort"] = (
+            "preset_fit" if effective_preset else "recent_analysis"
+        )
+    shuffle_seed = st.session_state.get("library_shuffle_seed")
     with st.container(key="library_toolbar"):
-        top = st.columns([2.3, 1.15, 0.9])
+        top = st.columns([2.3, 1.15, 0.9, 1.2])
         query = top[0].text_input(
             "Поиск по библиотеке",
             key="library_query",
@@ -3825,22 +3930,37 @@ def page_library(store: Storage, cfg: PresetConfig) -> None:
         )
         sort = top[1].selectbox(
             "Сортировка",
-            options=list(library.SORT_OPTIONS),
-            format_func=lambda value: library.SORT_LABELS[value],
+            options=sort_options,
+            format_func=lambda value: sort_labels[value],
             key="library_sort",
+            disabled=shuffle_seed is not None,
         )
         top[2].caption("Локально")
         top[2].caption("0 API-запросов")
+        if top[3].button(
+            "Перемешать заново" if shuffle_seed is not None else "Перемешать",
+            key="library_shuffle",
+            use_container_width=True,
+            help="Случайный порядок всей подходящей локальной коллекции. "
+            "Seed сохраняется между страницами и rerun.",
+        ):
+            st.session_state["library_shuffle_seed"] = secrets.randbits(64)
+            st.session_state["library_page"] = 1
+            st.rerun()
         pattern_row = st.columns([2.6, 1.4])
         preset_patterns = pattern_row[0].multiselect(
-            "Паттерны пресета",
+            "Паттерны пресета" if effective_preset else "Паттерны",
             options=list(relevant_patterns),
             format_func=pattern_filters.pattern_name,
             key="library_preset_patterns",
             placeholder=(
                 "Любые паттерны"
                 if not relevant_patterns
-                else "Выберите паттерны пресета"
+                else (
+                    "Выберите паттерны пресета"
+                    if effective_preset
+                    else "Выберите паттерны"
+                )
             ),
             disabled=not relevant_patterns or not pattern_scope,
             help="Показаны только метки, которые текущий анализатор .osu "
@@ -3856,6 +3976,26 @@ def page_library(store: Storage, cfg: PresetConfig) -> None:
             if pattern_scope
             else "Для очереди и ошибок паттерновый фильтр недоступен."
         )
+        if shuffle_seed is not None:
+            shuffle_cols = st.columns([1.2, 0.9, 3.0])
+            if shuffle_cols[0].button(
+                "Обычная сортировка",
+                key="library_clear_shuffle",
+                use_container_width=True,
+            ):
+                st.session_state.pop("library_shuffle_seed", None)
+                st.session_state["library_page"] = 1
+                st.rerun()
+            shuffle_cols[1].caption("Случайный порядок")
+            shuffle_cols[2].caption(
+                f"Seed {int(shuffle_seed)} · порядок стабилен между страницами "
+                "и rerun, пока вы не перемешаете снова."
+            )
+        else:
+            st.caption(
+                "Сортировка применяется ко всей отфильтрованной коллекции; "
+                "«Перемешать» задаёт стабильный локальный порядок."
+            )
 
     with st.expander("Фильтры библиотеки", expanded=False):
         filter_cols = st.columns([1.0, 1.0, 1.0])
@@ -3877,6 +4017,11 @@ def page_library(store: Storage, cfg: PresetConfig) -> None:
             for label in pattern_filters.all_pattern_options()
             if label not in relevant_patterns
         ]
+        if "library_other_patterns" in st.session_state:
+            current_other = st.session_state.get("library_other_patterns") or []
+            st.session_state["library_other_patterns"] = [
+                item for item in current_other if item in other_options
+            ]
         other_patterns = filter_cols[2].multiselect(
             "Другие паттерны",
             options=other_options,
@@ -3917,25 +4062,34 @@ def page_library(store: Storage, cfg: PresetConfig) -> None:
             key="library_length",
         )
         if st.button("Сбросить фильтры", key="library_clear_filters"):
-            for key in (
-                "library_query",
-                "library_statuses",
-                "library_other_patterns",
-                "library_mode",
-                "library_stars",
-                "library_bpm",
-                "library_length",
-                "library_page",
-            ):
-                st.session_state.pop(key, None)
+            _library_clear_manual_filters()
             st.session_state["library_preset_patterns"] = list(
-                relevant_patterns
+                default_patterns
             )
+            st.session_state["library_page"] = 1
             st.rerun()
 
     selected_patterns = tuple(
         dict.fromkeys((*preset_patterns, *other_patterns))
     )
+    criteria_signature = (
+        query,
+        scope,
+        tuple(statuses),
+        selected_patterns,
+        modes,
+        tuple(stars_range),
+        tuple(bpm_range),
+        tuple(length_range),
+        sort,
+        effective_preset,
+        st.session_state.get("active_preset_id"),
+        config_digest,
+        shuffle_seed,
+    )
+    if st.session_state.get("_library_criteria_signature") != criteria_signature:
+        st.session_state["_library_criteria_signature"] = criteria_signature
+        st.session_state["library_page"] = 1
     filters = library.LibraryFilters(
         query=query,
         scope=scope,
@@ -3951,9 +4105,44 @@ def page_library(store: Storage, cfg: PresetConfig) -> None:
         sort=sort,
         page=int(st.session_state.get("library_page", 1)),
         per_page=8,
+        shuffle_seed=shuffle_seed,
     )
+    preset_eval = (
+        _library_preset_evaluation(store, cfg)
+        if effective_preset
+        else None
+    )
+    if preset_eval is not None:
+        gate_text = (
+            f"целевой гейт — {preset_eval.result.passed_relevance}"
+            if preset_eval.target_gate
+            else "целевой гейт не задан"
+        )
+        st.caption(
+            f"Пресет «{cfg.name}»: hard filters — "
+            f"{preset_eval.result.passed_filters}; {gate_text}. "
+            + preset_eval.limitation
+        )
+        if preset_eval.missing_evidence:
+            st.caption(
+                f"{preset_eval.missing_evidence} карт не были оценены из-за "
+                "недостатка анализа; это не подтверждённое несоответствие. "
+                "Отключите «Под активный пресет», чтобы увидеть их в ручном "
+                "режиме."
+            )
     try:
-        page = library.query_sets(store, filters)
+        page = library.query_sets(
+            store,
+            filters,
+            preset_order=(
+                preset_eval.set_order if preset_eval is not None else None
+            ),
+            preset_beatmaps=(
+                preset_eval.beatmap_by_set
+                if preset_eval is not None
+                else None
+            ),
+        )
     except StorageError as exc:
         st.error(f"Библиотека не загрузилась: {exc}")
         return
@@ -3973,6 +4162,10 @@ def page_library(store: Storage, cfg: PresetConfig) -> None:
         if isinstance(current, DiscoveryResult)
         else {}
     )
+    if preset_eval is not None:
+        # Do not leak scores from an unrelated Overview search into preset
+        # mode. Other difficulties remain browsable but are not given a score.
+        current_scores = dict(preset_eval.scored_by_beatmap)
     st.markdown(
         "<div class='library-result-head'>"
         f"<strong>{page.total_sets:,}</strong> "
@@ -3983,30 +4176,101 @@ def page_library(store: Storage, cfg: PresetConfig) -> None:
         "</div>".replace(",", " "),
         unsafe_allow_html=True,
     )
+    if preset_eval is not None:
+        gate_phrase = (
+            " и целевой гейт" if preset_eval.target_gate else ""
+        )
+        st.caption(
+            f"Показаны beatmapsets, прошедшие hard filters{gate_phrase} "
+            "пресета; на карточках — реальные score, coverage и недостающие "
+            "факторы. Это не вероятность."
+        )
+    if shuffle_seed is not None:
+        st.caption(
+            "Активно стабильное перемешивание всей подходящей коллекции. "
+            "Порядок не меняется при переходе по страницам."
+        )
     if not page.sets:
+        active_lines = []
+        if preset_eval is not None:
+            active_lines.append(
+                f"пресет «{cfg.name}»: {preset_eval.limitation}"
+            )
+        elif preset_mode:
+            active_lines.append(
+                "режим «Под активный пресет» не применяется к этой коллекции"
+            )
+        active_lines.append(f"коллекция: {library.SCOPE_LABELS[scope]}")
+        if query:
+            active_lines.append(f"поиск: «{query}»")
+        if selected_patterns:
+            active_lines.append(
+                "паттерны: "
+                + ", ".join(
+                    pattern_filters.pattern_name(item)
+                    for item in selected_patterns
+                )
+            )
+        if modes != "all":
+            active_lines.append(f"режим карт: {modes}")
+        if statuses:
+            active_lines.append("статусы: " + ", ".join(statuses))
+        if stars_range != (0.0, 12.0):
+            active_lines.append(
+                f"звёзды: {stars_range[0]:g}..{stars_range[1]:g}"
+            )
+        if bpm_range != (0.0, 400.0):
+            active_lines.append(
+                f"BPM: {bpm_range[0]:g}..{bpm_range[1]:g}"
+            )
+        if length_range != (0, 600):
+            active_lines.append(
+                f"длина: {length_range[0]}..{length_range[1]} с"
+            )
         st.info(
             "По этим фильтрам в локальном каталоге ничего нет. "
-            "Измените коллекцию или сбросьте фильтры."
+            "Активные ограничения: " + "; ".join(active_lines) + "."
         )
-        if st.button("Сбросить фильтры", key="library_empty_reset"):
-            for key in (
-                "library_query",
-                "library_statuses",
-                "library_patterns",
-                "library_mode",
-                "library_stars",
-                "library_bpm",
-                "library_length",
-                "library_page",
-            ):
-                st.session_state.pop(key, None)
+        empty_actions = st.columns([1.2, 1.2, 2.6])
+        if empty_actions[0].button(
+            "Сбросить ручные фильтры",
+            key="library_empty_reset",
+            use_container_width=True,
+        ):
+            _library_clear_manual_filters()
+            st.session_state["library_preset_patterns"] = list(
+                default_patterns
+            )
+            st.session_state["library_page"] = 1
             st.rerun()
+        if empty_actions[1].button(
+            "Показать без пресета",
+            key="library_empty_disable_preset",
+            disabled=not preset_mode,
+            use_container_width=True,
+        ):
+            st.session_state["library_preset_mode"] = False
+            st.session_state["library_page"] = 1
+            st.rerun()
+        empty_actions[2].caption(
+            "Если карты не проходят целевой гейт, отключите пресет: "
+            "недостаток анализа не считается подтверждённым несоответствием."
+        )
         return
     for start in range(0, len(page.sets), 2):
         columns = st.columns(2, gap="large")
         for offset, set_item in enumerate(page.sets[start : start + 2]):
             with columns[offset]:
-                _render_library_set(store, set_item, current_scores)
+                _render_library_set(
+                    store,
+                    set_item,
+                    current_scores,
+                    preset_beatmap_id=(
+                        preset_eval.beatmap_by_set.get(set_item.beatmapset_id)
+                        if preset_eval is not None
+                        else None
+                    ),
+                )
     navigation = st.columns([1.0, 1.0, 2.5, 1.0, 1.0])
     if navigation[0].button(
         "← Назад",
