@@ -132,6 +132,8 @@ def test_successful_search_and_auth_header() -> None:
     assert beatmapset.beatmaps[0].ar == 9.3
     assert beatmapset.beatmaps[0].od == 8.5
     assert beatmapset.beatmaps[0].url == "https://osu.ppy.sh/b/421"
+    assert api.token_requests == 1
+    assert api.http_attempts == 2
 
     search_request = [r for r in seen if r.url.path.endswith("/search")][0]
     assert search_request.url.params["m"] == "0"
@@ -243,6 +245,8 @@ def test_429_exhausts_retries() -> None:
     api, _ = client_with(handler, max_retries=1)
     with pytest.raises(OsuRateLimitError):
         api.search_beatmapsets(SearchQuery())
+    assert api.http_attempts == 3
+    assert api.token_requests == 1
 
 
 def test_5xx_retried_then_succeeds() -> None:
@@ -261,6 +265,8 @@ def test_5xx_retried_then_succeeds() -> None:
     page = api.search_beatmapsets(SearchQuery())
     assert page.beatmapsets[0].id == 3
     assert len(sleeps) == 2
+    assert api.http_attempts == 4
+    assert api.token_requests == 1
 
 
 def test_5xx_exhausts_retries() -> None:
@@ -283,6 +289,8 @@ def test_network_error_is_wrapped() -> None:
     api, _ = client_with(handler, max_retries=0)
     with pytest.raises(OsuNetworkError):
         api.search_beatmapsets(SearchQuery())
+    assert api.http_attempts == 2
+    assert api.token_requests == 1
 
 
 def test_missing_beatmapsets_field_is_schema_error() -> None:

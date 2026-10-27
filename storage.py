@@ -570,10 +570,32 @@ class Storage:
             ).fetchone()
             return dict(row) if row else None
 
-    def all_attributes(self) -> dict[int, dict[str, Any]]:
+    def all_attributes(
+        self, beatmap_ids: Iterable[int] | None = None
+    ) -> dict[int, dict[str, Any]]:
+        """Return stored attributes, optionally bounded to the needed ids."""
+
+        if beatmap_ids is None:
+            with self.connection() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM beatmap_attributes"
+                ).fetchall()
+            return {int(row["beatmap_id"]): dict(row) for row in rows}
+
+        wanted = list(dict.fromkeys(int(value) for value in beatmap_ids))
+        result: dict[int, dict[str, Any]] = {}
         with self.connection() as conn:
-            rows = conn.execute("SELECT * FROM beatmap_attributes").fetchall()
-        return {int(row["beatmap_id"]): dict(row) for row in rows}
+            for start in range(0, len(wanted), 400):
+                chunk = wanted[start : start + 400]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    "SELECT * FROM beatmap_attributes "
+                    f"WHERE beatmap_id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    result[int(row["beatmap_id"])] = dict(row)
+        return result
 
     # -- search cache ------------------------------------------------------
     def cache_get(self, key: str) -> dict[str, Any] | None:

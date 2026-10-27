@@ -894,6 +894,11 @@ class DiscoveryResult:
     requests_succeeded: int = 0
     requests_failed: int = 0
     pages_attempted: int = 0
+    # Actual HTTP attempts inside the client (including retries and transport
+    # failures) and token-endpoint calls. A logical API call can be several
+    # HTTP attempts, so these are reported separately from the budget counter.
+    http_attempts: int = 0
+    oauth_requests: int = 0
     cache_hits: int = 0
     # Why discovery stopped: complete, request_budget, page_limit, deadline,
     # network_failure, rate_limit, forbidden, request_failed, candidate_limit.

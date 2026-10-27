@@ -147,6 +147,50 @@ def test_selection_weight_lets_skill_fit_outweigh_a_higher_general_score() -> No
     )
 
 
+def _named(
+    beatmapset_id: int, artist: str, creator: str = "Mapper"
+) -> ScoredCandidate:
+    beatmapset = make_beatmapset(
+        beatmapset_id,
+        artist=artist,
+        creator=creator,
+        beatmaps=(make_beatmap(beatmapset_id * 10 + 1, beatmapset_id),),
+    )
+    return ScoredCandidate(
+        Candidate(beatmapset, beatmapset.beatmaps[0]),
+        0.7,
+        (),
+    )
+
+
+def test_artist_cap_improves_diversity_without_shortfall() -> None:
+    items = [_named(index, "Same Artist") for index in range(1, 5)]
+    items += [
+        _named(index, f"Artist {index}") for index in range(5, 12)
+    ]
+    selection = select_random_subset(
+        items,
+        6,
+        seed=11,
+        max_per_artist=1,
+        max_per_mapper=2,
+    )
+    assert selection.count == 6
+    assert len({item.beatmapset.display_artist for item in selection.items}) == 6
+    assert "Same Artist" in {
+        item.beatmapset.display_artist for item in selection.items
+    }
+
+
+def test_artist_cap_is_soft_when_the_pool_cannot_satisfy_it() -> None:
+    items = [_named(index, "Only Artist") for index in range(1, 7)]
+    selection = select_random_subset(
+        items, 6, seed=12, max_per_artist=1
+    )
+    assert selection.count == 6
+    assert len({item.beatmapset.id for item in selection.items}) == 6
+
+
 def test_shuffle_changes_order_without_dropping_ids() -> None:
     ids = [5, 7, 11, 13, 17, 19]
     shuffled = shuffled_ids(ids, seed=9, previous=ids)

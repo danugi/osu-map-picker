@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import pytest
 
 import gameplay
@@ -153,3 +155,39 @@ def test_sequence_features_report_truncated_analysis() -> None:
 
     assert analysis.truncated is True
     assert analysis.total_notes == gameplay.MAX_PREVIEW_OBJECTS
+
+
+def test_cached_analysis_is_reused_until_the_file_changes(
+    tmp_path, monkeypatch
+) -> None:
+    patterns._cached_analysis.cache_clear()
+    path = tmp_path / "42.osu"
+    path.write_text(
+        make_osu([(1000 + index * 125, 100, 100) for index in range(10)]),
+        encoding="utf-8",
+    )
+    calls = 0
+    real_loader = gameplay.load_cached_preview
+
+    def counting_loader(beatmap_id, cache_dir):
+        nonlocal calls
+        calls += 1
+        return real_loader(beatmap_id, cache_dir)
+
+    monkeypatch.setattr(gameplay, "load_cached_preview", counting_loader)
+    first = patterns.load_analysis(42, tmp_path, allow_download=False)
+    second = patterns.load_analysis(42, tmp_path, allow_download=False)
+    assert first == second
+    assert calls == 1
+
+    # Replacing the file must invalidate the process cache.
+    path.write_text(
+        make_osu([(2000 + index * 125, 100, 100) for index in range(10)]),
+        encoding="utf-8",
+    )
+    stat = path.stat()
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+    third = patterns.load_analysis(42, tmp_path, allow_download=False)
+    assert calls == 2
+    assert third.analyzed_notes == first.analyzed_notes
+    assert third.stream_chains[0].start_ms == 2000

@@ -344,6 +344,9 @@ def _random_scope_key(cfg: PresetConfig) -> str:
         {
             "preset": cfg.name,
             "filters": cfg.filters.to_dict(),
+            # A skillset/weights/relevance/diversity change changes the scores
+            # and the sampler, so the no-repeat session must start fresh too.
+            "ranking": cfg.ranking.to_dict(),
         },
         sort_keys=True,
         ensure_ascii=False,
@@ -1844,9 +1847,18 @@ def _render_card(
         _feedback_form(store, beatmapset.id)
 
 
-def _local_result(store: Storage, cfg: PresetConfig) -> DiscoveryResult:
+def _local_result(
+    store: Storage,
+    cfg: PresetConfig,
+    *,
+    all_candidates: bool = False,
+) -> DiscoveryResult:
     engine = DiscoveryEngine(None, store, copy.deepcopy(cfg.discovery))
-    return engine.rerank_stored(cfg.filters, cfg.ranking)
+    return engine.rerank_stored(
+        cfg.filters,
+        cfg.ranking,
+        all_candidates=all_candidates,
+    )
 
 
 def _remember_result(
@@ -2033,7 +2045,10 @@ def _collect_random_pool(
 
     try:
         catalog_size = store.beatmapset_count()
-        local = _local_result(store, cfg)
+        # The randomizer needs the whole eligible universe, not just the first
+        # screen of top-ranked cards. Ranking still influences sampling
+        # weights, but the display cap no longer truncates the pool.
+        local = _local_result(store, cfg, all_candidates=True)
     except (StorageError, ValueError) as exc:
         raise ValueError(f"Локальный каталог недоступен: {exc}") from exc
 
@@ -2191,12 +2206,19 @@ def _execute_random_selection(store: Storage, cfg: PresetConfig) -> None:
         st.error(f"Случайная подборка не собрана: {exc}")
         return
 
+    diversity_active = cfg.ranking.diversity > 0
     selection = randomizer.select_random_subset(
         pool.result.scored,
         desired,
         seed=seed,
         avoid_ids=avoid_ids,
         skill_weights=cfg.ranking.skill_weights,
+        max_per_artist=(
+            cfg.ranking.max_per_artist if diversity_active else None
+        ),
+        max_per_mapper=(
+            cfg.ranking.max_per_mapper if diversity_active else None
+        ),
     )
     st.session_state["random_round"] = pool_round
     seen_ids = set(session_seen)
@@ -2255,9 +2277,19 @@ def _execute_random_selection(store: Storage, cfg: PresetConfig) -> None:
         item.beatmapset.id for item in selection.items
     ]
     st.session_state["random_meta"] = meta
-    st.session_state["random_notice"] = (
-        selection.note if selection.shortfall else None
-    )
+    notice: str | None = None
+    if selection.shortfall:
+        notice = (
+            f"{selection.note} Чтобы расширить каталог, нажмите «Искать»."
+        )
+    elif selection.available <= selection.requested:
+        # The batch consumed the whole eligible pool. Say so instead of
+        # presenting a reordered copy of the same maps as a fresh selection.
+        notice = (
+            f"{selection.note} Это все доступные карты: следующий набор "
+            "потребует явного поиска или изменения фильтров."
+        )
+    st.session_state["random_notice"] = notice
     _flash(
         f"Случайная подборка: {selection.count} карт; пул "
         f"{selection.pool_size}, доступно новых {selection.available}."
@@ -2345,7 +2377,9 @@ def _render_result(store: Storage, result: DiscoveryResult) -> None:
         f"{result.count} карт · источник: {source} · сетевых запросов: "
         f"{result.api_requests} (успешно "
         f"{getattr(result, 'requests_succeeded', 0)}, ошибок "
-        f"{getattr(result, 'requests_failed', 0)}) · страниц: "
+        f"{getattr(result, 'requests_failed', 0)}) · HTTP-попыток: "
+        f"{getattr(result, 'http_attempts', 0)} (с retries) · OAuth: "
+        f"{getattr(result, 'oauth_requests', 0)} · страниц: "
         f"{getattr(result, 'pages_attempted', 0)} · кэш-хитов поиска: "
         f"{result.cache_hits}. Recommendation score — внутренний порядок "
         "0–100, не вероятность."
@@ -2874,6 +2908,9 @@ def _search_advanced_filters(cfg: PresetConfig) -> None:
             value=int(discovery.max_candidates),
             step=10,
             key=_ck("dsc_candidates"),
+            help="Ограничивает число карточек в выдаче поиска. Случайная "
+            "подборка получает весь подходящий локальный каталог и этим "
+            "лимитом не обрезается.",
         )
     )
     discovery.fetch_sequences_limit = int(
@@ -2915,8 +2952,10 @@ def _search_advanced_filters(cfg: PresetConfig) -> None:
         "Стратегии: recent по статусам + oldest/rating/favourites + до трёх "
         "запросов по вашим положительным оценкам. Это относится только к "
         "явной кнопке «Искать»: случайная подборка не углубляет пагинацию и "
-        "не делает сетевых запросов. Streams/Bursts оцениваются только по "
-        "найденным в .osu цепочкам: длиннее 9 нот — stream, 5–9 нот — burst."
+        "не делает сетевых запросов. Онлайн-поиск также ограничен общим "
+        "дедлайном discovery (120 с), который проверяется между запросами. "
+        "Streams/Bursts оцениваются только по найденным в .osu цепочкам: "
+        "длиннее 9 нот — stream, 5–9 нот — burst."
     )
 
 
@@ -2953,6 +2992,15 @@ def page_search(store: Storage, cfg: PresetConfig) -> None:
         else "Навыки не выбраны: фактор соответствия навыкам не участвует."
     )
     st.caption(f"Пресет «{cfg.name}» · {skills_text}")
+    try:
+        catalog_size = store.beatmapset_count()
+    except StorageError:
+        catalog_size = 0
+    st.caption(
+        f"Локальный каталог SQLite: {catalog_size} карт. «Случайная подборка» "
+        "использует весь подходящий каталог, а не только текущую выдачу; "
+        "«Искать» пополняет каталог."
+    )
 
     query_text = st.text_input(
         "Что искать",
@@ -3037,6 +3085,9 @@ def page_search(store: Storage, cfg: PresetConfig) -> None:
         type="primary",
         key="run_search",
         use_container_width=True,
+        help="Явный поиск в osu! API. Ограничен числом запросов, страниц на "
+        "стратегию и общим дедлайном discovery; частичный результат и причина "
+        "остановки показываются под выдачей.",
     ):
         if _execute_search(
             store,

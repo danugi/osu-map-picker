@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import pytest
 from conftest import make_beatmap, make_beatmapset
@@ -10,6 +11,7 @@ from features import derive_features
 from ranking import (
     RankingConfigError,
     RankingContext,
+    candidate_similarity,
     diversify,
     evaluate_candidate,
     explain,
@@ -443,6 +445,98 @@ def test_diversification_relaxation_is_reported() -> None:
     result = diversify(scored, settings, notes=notes)
     assert len(result) == 3
     assert any("ослаблены" in note for note in notes)
+
+
+def test_incremental_diversification_matches_reference_order() -> None:
+    scored = [
+        evaluate_candidate(
+            candidate(
+                i,
+                artist=f"Artist {i % 3}",
+                creator=f"Mapper {i % 2}",
+                stars=4.8 + (i % 4) * 0.2,
+            ),
+            context(),
+        )
+        for i in range(1, 10)
+    ]
+    settings = RankingSettings()
+    settings.diversity = 0.7
+    settings.max_per_artist = 2
+    settings.max_per_mapper = 3
+
+    def reference(items, limit):
+        target = len(items) if limit is None else max(0, min(limit, len(items)))
+        diversity = max(0.0, min(1.0, settings.diversity))
+        artist_cap = settings.max_per_artist
+        mapper_cap = settings.max_per_mapper
+        remaining = sorted(
+            items,
+            key=lambda s: (-s.score, s.beatmapset.id, s.beatmap.id),
+        )
+        selected = []
+        caps_relaxed = False
+        while remaining and len(selected) < target:
+            artist_counts = {}
+            mapper_counts = {}
+            for chosen in selected:
+                artist_counts[chosen.beatmapset.display_artist] = (
+                    artist_counts.get(chosen.beatmapset.display_artist, 0) + 1
+                )
+                mapper_counts[chosen.beatmapset.creator] = (
+                    mapper_counts.get(chosen.beatmapset.creator, 0) + 1
+                )
+            best = None
+            best_value = -1e9
+            best_index = -1
+            for index, item in enumerate(remaining):
+                if (
+                    artist_counts.get(item.beatmapset.display_artist, 0)
+                    >= artist_cap
+                ):
+                    continue
+                if mapper_counts.get(item.beatmapset.creator, 0) >= mapper_cap:
+                    continue
+                similarity = 0.0
+                for chosen in selected:
+                    similarity = max(
+                        similarity,
+                        candidate_similarity(
+                            item.candidate, chosen.candidate
+                        ),
+                    )
+                value = item.score - diversity * similarity
+                if value > best_value + 1e-12 or (
+                    abs(value - best_value) <= 1e-12
+                    and best is not None
+                    and item.beatmapset.id < best.beatmapset.id
+                ):
+                    best_value = value
+                    best = item
+                    best_index = index
+            if best is None:
+                if caps_relaxed:
+                    break
+                caps_relaxed = True
+                artist_cap = mapper_cap = 10_000
+                continue
+            remaining.pop(best_index)
+            selected.append(
+                replace(
+                    best,
+                    diversified_score=max(0.0, min(1.0, best_value)),
+                )
+            )
+        return selected
+
+    expected = reference(scored, 7)
+    actual = diversify(scored, settings, limit=7)
+    assert [item.beatmapset.id for item in actual] == [
+        item.beatmapset.id for item in expected
+    ]
+    assert [item.diversified_score for item in actual] == [
+        item.diversified_score for item in expected
+    ]
 
 
 def test_explanation_is_transparent_and_not_probability() -> None:

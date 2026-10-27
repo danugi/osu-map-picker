@@ -47,6 +47,8 @@ class StubApi:
         self.attributes = attributes or {}
         self.search_calls: list[SearchQuery] = []
         self.attribute_calls: list[int] = []
+        self.http_attempts = 0
+        self.token_requests = 0
 
     def search_beatmapsets(self, query: SearchQuery) -> SearchPage:
         self.search_calls.append(query)
@@ -197,6 +199,27 @@ def test_failed_page_attempts_consume_the_request_budget(storage: Storage) -> No
     assert result.complete is False
     assert result.stop_reason == "request_budget"
     assert result.errors
+
+
+def test_result_reports_http_retries_and_oauth_separately(
+    storage: Storage,
+) -> None:
+    class RetryingApi(StubApi):
+        def search_beatmapsets(self, query: SearchQuery) -> SearchPage:
+            # One logical API call, three actual HTTP attempts inside the
+            # client, plus one token request.
+            self.http_attempts += 3
+            self.token_requests += 1
+            return super().search_beatmapsets(query)
+
+    api = RetryingApi(
+        lambda query: SearchPage(beatmapsets=(make_beatmapset(1),))
+    )
+    engine = DiscoveryEngine(api, storage, settings(max_requests=1))
+    result = engine.run(Filters(statuses=["ranked"]), RankingSettings())
+    assert result.api_requests == 1
+    assert result.http_attempts == 3
+    assert result.oauth_requests == 1
 
 
 def test_persistent_network_failure_fails_fast_across_strategies(
@@ -484,6 +507,22 @@ def test_engine_records_search_run(storage: Storage) -> None:
     assert last["complete"] == 1
 
 
+def test_successive_searches_accumulate_the_persistent_catalog(
+    storage: Storage,
+) -> None:
+    def responder(query: SearchQuery) -> SearchPage:
+        set_id = 1 if query.status == "ranked" else 2
+        return SearchPage(beatmapsets=(make_beatmapset(set_id),))
+
+    api = StubApi(responder)
+    engine = DiscoveryEngine(api, storage, settings())
+    engine.run(Filters(statuses=["ranked"]), RankingSettings())
+    engine.run(Filters(statuses=["loved"]), RankingSettings())
+    assert storage.beatmapset_count() == 2
+    assert storage.get_beatmapset(1) is not None
+    assert storage.get_beatmapset(2) is not None
+
+
 def test_stored_candidates_can_be_reranked_without_api(storage: Storage) -> None:
     beatmapsets = [make_beatmapset(index) for index in range(1, 13)]
     storage.save_beatmapsets(beatmapsets)
@@ -497,6 +536,24 @@ def test_stored_candidates_can_be_reranked_without_api(storage: Storage) -> None
     assert result.count == 12
     assert all(item.score >= 0 for item in result.scored)
     assert any("Локальный кеш" in note for note in result.notes)
+
+
+def test_rerank_all_candidates_keeps_the_whole_eligible_pool(
+    storage: Storage,
+) -> None:
+    storage.save_beatmapsets(
+        [make_beatmapset(index) for index in range(1, 61)]
+    )
+    engine = DiscoveryEngine(None, storage, settings(max_candidates=10))
+    capped = engine.rerank_stored(Filters(), RankingSettings())
+    broad = engine.rerank_stored(
+        Filters(), RankingSettings(), all_candidates=True
+    )
+    assert capped.count == 10
+    assert broad.count == 60
+    assert broad.passed_relevance == 60
+    assert any("обрезки до топ-N нет" in note for note in broad.notes)
+    assert not any("ограничен 10" in note for note in broad.notes)
 
 
 def test_stored_rerank_honours_strict_filters(storage: Storage) -> None:

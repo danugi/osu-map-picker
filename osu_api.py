@@ -307,7 +307,12 @@ class OsuApiClient:
         self._token_expires_at: float = 0.0
         self._next_request_at: float = 0.0
         self.last_error: str | None = None
+        # Responses received. Kept for existing diagnostics.
         self.requests_made: int = 0
+        # Every HTTP attempt, including retries and transport failures.
+        self.http_attempts: int = 0
+        # Token endpoint calls, including refreshes and failures.
+        self.token_requests: int = 0
 
     # -- lifecycle ---------------------------------------------------------
     def close(self) -> None:
@@ -348,6 +353,8 @@ class OsuApiClient:
             "Content-Type": "application/x-www-form-urlencoded",
         }
         url = self._config.token_url
+        self.http_attempts += 1
+        self.token_requests += 1
         try:
             response = self._client.post(url, data=payload, headers=headers)
         except httpx.HTTPError as exc:
@@ -417,6 +424,7 @@ class OsuApiClient:
             token = self._get_token()
             self._wait_for_slot()
             headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+            self.http_attempts += 1
             try:
                 response = self._client.request(
                     method, url, params=params, json=json_body, headers=headers

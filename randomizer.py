@@ -106,8 +106,16 @@ def _weighted_sample(
     count: int,
     seed: int,
     skill_weights: Mapping[str, float] | None,
+    *,
+    max_per_artist: int | None = None,
+    max_per_mapper: int | None = None,
 ) -> list[ScoredCandidate]:
-    """Weighted sampling without replacement (Efraimidis-Spirakis keys)."""
+    """Weighted sampling without replacement (Efraimidis-Spirakis keys).
+
+    Optional artist/mapper caps improve diversity. If the caps would prevent
+    filling the requested batch, the deferred candidates are added instead of
+    silently returning a short batch.
+    """
 
     rng = random.Random(int(seed))
     keyed: list[tuple[float, int, ScoredCandidate]] = []
@@ -118,7 +126,64 @@ def _weighted_sample(
         # Larger keys are selected first; the index keeps ties deterministic.
         keyed.append((key, -index, item))
     keyed.sort(key=lambda row: (row[0], row[1]), reverse=True)
-    chosen = [row[2] for row in keyed[:count]]
+
+    artist_cap = (
+        max(1, int(max_per_artist)) if max_per_artist is not None else None
+    )
+    mapper_cap = (
+        max(1, int(max_per_mapper)) if max_per_mapper is not None else None
+    )
+    chosen: list[ScoredCandidate] = []
+    deferred: list[ScoredCandidate] = []
+    artist_counts: dict[str, int] = {}
+    mapper_counts: dict[str, int] = {}
+    for _, _, item in keyed:
+        artist = item.beatmapset.display_artist
+        mapper = item.beatmapset.creator
+        if artist_cap is not None and artist_counts.get(artist, 0) >= artist_cap:
+            deferred.append(item)
+            continue
+        if mapper_cap is not None and mapper_counts.get(mapper, 0) >= mapper_cap:
+            deferred.append(item)
+            continue
+        chosen.append(item)
+        artist_counts[artist] = artist_counts.get(artist, 0) + 1
+        mapper_counts[mapper] = mapper_counts.get(mapper, 0) + 1
+        if len(chosen) >= count:
+            break
+    if len(chosen) < count and deferred:
+        # Diversity caps are soft: fill the batch rather than return a
+        # misleading shortfall when the pool has enough distinct mapsets.
+        # Relax one dimension at a time so a large shared mapper/artist does
+        # not erase the other diversity signal.
+        added_ids = {item.beatmapset.id for item in chosen}
+
+        def fill(artist_limit: int | None, mapper_limit: int | None) -> None:
+            for item in deferred:
+                if len(chosen) >= count:
+                    return
+                if item.beatmapset.id in added_ids:
+                    continue
+                artist = item.beatmapset.display_artist
+                mapper = item.beatmapset.creator
+                if (
+                    artist_limit is not None
+                    and artist_counts.get(artist, 0) >= artist_limit
+                ):
+                    continue
+                if (
+                    mapper_limit is not None
+                    and mapper_counts.get(mapper, 0) >= mapper_limit
+                ):
+                    continue
+                chosen.append(item)
+                added_ids.add(item.beatmapset.id)
+                artist_counts[artist] = artist_counts.get(artist, 0) + 1
+                mapper_counts[mapper] = mapper_counts.get(mapper, 0) + 1
+
+        fill(artist_cap, None)
+        fill(None, mapper_cap)
+        fill(None, None)
     # Sampling keys decide membership; display order must not leak the
     # recommendation ranking back into the random result.
     return _display_order(chosen, seed)
@@ -131,12 +196,15 @@ def select_random_subset(
     seed: int,
     avoid_ids: Iterable[int] = (),
     skill_weights: Mapping[str, float] | None = None,
+    max_per_artist: int | None = None,
+    max_per_mapper: int | None = None,
 ) -> RandomSelection:
     """Select a new subset from already filtered and ranked candidates.
 
     ``avoid_ids`` normally contains recently shown beatmapsets. The function
     never relaxes filters and never invents fallback cards: when too few maps
-    remain, it returns the honest shortfall.
+    remain, it returns the honest shortfall. Artist/mapper caps are soft and
+    only influence which of the eligible cards are sampled.
     """
 
     requested = max(0, int(count))
@@ -176,7 +244,12 @@ def select_random_subset(
         shortfall = available < requested
     else:
         chosen = _weighted_sample(
-            available_items, requested, seed, skill_weights
+            available_items,
+            requested,
+            seed,
+            skill_weights,
+            max_per_artist=max_per_artist,
+            max_per_mapper=max_per_mapper,
         )
         note = (
             f"Случайная подвыборка {len(chosen)} из {available} новых "

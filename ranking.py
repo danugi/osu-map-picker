@@ -749,17 +749,16 @@ def diversify(
     remaining = sorted(
         scored, key=lambda s: (-s.score, s.beatmapset.id, s.beatmap.id)
     )
+    # ``max_similarity[i]`` is the highest similarity between ``remaining[i]``
+    # and anything selected so far. Updating it only when a new card is chosen
+    # keeps the same greedy semantics as recomputing every pair on every step,
+    # but turns the selection from cubic work into roughly quadratic work.
+    max_similarity = [0.0] * len(remaining)
     selected: list[ScoredCandidate] = []
+    artist_counts: dict[str, int] = {}
+    mapper_counts: dict[str, int] = {}
     caps_relaxed = False
     while remaining and len(selected) < target:
-        artist_counts: dict[str, int] = {}
-        mapper_counts: dict[str, int] = {}
-        for item in selected:
-            artist = item.beatmapset.display_artist
-            mapper = item.beatmapset.creator
-            artist_counts[artist] = artist_counts.get(artist, 0) + 1
-            mapper_counts[mapper] = mapper_counts.get(mapper, 0) + 1
-
         best: ScoredCandidate | None = None
         best_value = -1e9
         best_index = -1
@@ -770,12 +769,7 @@ def diversify(
                 continue
             if mapper_counts.get(mapper, 0) >= mapper_cap:
                 continue
-            similarity = 0.0
-            for chosen in selected:
-                similarity = max(
-                    similarity, candidate_similarity(item.candidate, chosen.candidate)
-                )
-            value = item.score - diversity * similarity
+            value = item.score - diversity * max_similarity[index]
             if not math.isfinite(value):
                 value = item.score
             if value > best_value + 1e-12 or (
@@ -798,9 +792,18 @@ def diversify(
                 )
             continue
         remaining.pop(best_index)
+        max_similarity.pop(best_index)
+        artist = best.beatmapset.display_artist
+        mapper = best.beatmapset.creator
+        artist_counts[artist] = artist_counts.get(artist, 0) + 1
+        mapper_counts[mapper] = mapper_counts.get(mapper, 0) + 1
         selected.append(
             replace(best, diversified_score=max(0.0, min(1.0, best_value)))
         )
+        for index, item in enumerate(remaining):
+            similarity = candidate_similarity(item.candidate, best.candidate)
+            if similarity > max_similarity[index]:
+                max_similarity[index] = similarity
     return selected
 
 

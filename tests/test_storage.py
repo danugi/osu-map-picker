@@ -64,6 +64,28 @@ def test_beatmapset_roundtrip_with_unicode(storage: Storage) -> None:
     assert len(loaded.beatmaps) == 2
 
 
+def test_attributes_can_be_loaded_only_for_needed_beatmaps(
+    storage: Storage,
+) -> None:
+    storage.save_beatmapsets(
+        [
+            make_beatmapset(
+                1, beatmaps=(make_beatmap(11, 1),)
+            ),
+            make_beatmapset(
+                2, beatmaps=(make_beatmap(21, 2),)
+            ),
+        ]
+    )
+    storage.save_attributes(11, {"star_rating": 5.0})
+    storage.save_attributes(21, {"star_rating": 6.0})
+    assert set(storage.all_attributes()) == {11, 21}
+    only = storage.all_attributes([11, 11])
+    assert set(only) == {11}
+    assert only[11]["star_rating"] == 5.0
+    assert storage.all_attributes([]) == {}
+
+
 def test_balanced_catalog_listing_spreads_across_ids(storage: Storage) -> None:
     storage.save_beatmapsets(
         [make_beatmapset(index) for index in range(1, 101)]

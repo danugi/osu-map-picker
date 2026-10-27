@@ -1034,6 +1034,59 @@ def test_collect_random_pool_reads_only_filtered_local_catalog(
     assert "Сетевых запросов нет" in pool.source_note
 
 
+def test_random_scope_reacts_to_ranking_and_filter_changes() -> None:
+    cfg = presets.builtin_by_name("Mixed Aim")
+    assert cfg is not None
+    baseline = app_module._random_scope_key(cfg)
+    cfg.filters.stars_min = 5.0
+    filters_key = app_module._random_scope_key(cfg)
+    assert filters_key != baseline
+    cfg.ranking.skill_weights = {"aim_classic": 2.0}
+    ranking_key = app_module._random_scope_key(cfg)
+    assert ranking_key != filters_key
+
+
+def test_random_pool_is_not_truncated_to_the_display_cap(app_env) -> None:
+    store = Storage(app_env)
+    _seed_many_cached_maps(store, 450)
+    cfg = presets.builtin_by_name("Mixed Aim")
+    assert cfg is not None
+    cfg.filters.duration_min = None
+    cfg.filters.duration_max = None
+    cfg.discovery.max_candidates = 400
+
+    pool = app_module._collect_random_pool(store, cfg)
+    assert pool.result.passed_filters == 450
+    assert pool.result.count == 450
+    assert pool.result.count > cfg.discovery.max_candidates
+
+    first = app_module.randomizer.select_random_subset(
+        pool.result.scored, 12, seed=17
+    )
+    second = app_module.randomizer.select_random_subset(
+        pool.result.scored,
+        12,
+        seed=18,
+        avoid_ids={item.beatmapset.id for item in first.items},
+    )
+    first_ids = {item.beatmapset.id for item in first.items}
+    second_ids = {item.beatmapset.id for item in second.items}
+    assert len(first_ids) == 12
+    assert len(second_ids) == 12
+    assert first_ids.isdisjoint(second_ids)
+
+    # At least one sampled map must come from outside the old 400-card
+    # display slice; the pool is genuinely broader than the result page.
+    positions = {
+        index: item.beatmapset.id
+        for index, item in enumerate(pool.result.scored)
+    }
+    chosen_positions = [
+        index for index, set_id in positions.items() if set_id in first_ids
+    ]
+    assert any(index >= 400 for index in chosen_positions)
+
+
 def test_empty_random_message_explains_local_catalog_limits() -> None:
     empty_selection = RandomSelection(
         items=(),
@@ -1348,6 +1401,9 @@ def test_random_avoid_seen_off_allows_repeating_the_last_selection(app_env) -> N
     repeated = _search_result(at)
     assert repeated is not None
     assert {item.beatmapset.id for item in repeated.scored} == first_ids
+    # With only three eligible maps and a three-card batch, membership cannot
+    # change; the UI must say so instead of pretending this is a new pool.
+    assert "это все доступные карты" in _texts(at).casefold()
 
 
 def test_random_session_resets_when_filters_change(app_env) -> None:

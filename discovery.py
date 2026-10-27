@@ -865,6 +865,8 @@ class DiscoveryEngine:
             raise ValueError("Для нового API-поиска нужен osu! API client.")
         started_perf = time.perf_counter()
         started = now_iso()
+        http_before = int(getattr(self.api, "http_attempts", 0))
+        oauth_before = int(getattr(self.api, "token_requests", 0))
         deadline_at = started_perf + self.deadline_seconds
         errors: list[str] = []
         notes: list[str] = []
@@ -1251,6 +1253,13 @@ class DiscoveryEngine:
             requests_succeeded=int(budget.get("succeeded", 0)),
             requests_failed=int(budget.get("failed", 0)),
             pages_attempted=int(budget.get("pages", 0)),
+            http_attempts=max(
+                0, int(getattr(self.api, "http_attempts", 0)) - http_before
+            ),
+            oauth_requests=max(
+                0,
+                int(getattr(self.api, "token_requests", 0)) - oauth_before,
+            ),
             cache_hits=cache_hits[0],
             stop_reason=stop_reason,
             deadline_seconds=self.deadline_seconds,
@@ -1287,6 +1296,7 @@ class DiscoveryEngine:
         ranking_settings: RankingSettings,
         *,
         limit: int | None = None,
+        all_candidates: bool = False,
     ) -> DiscoveryResult:
         """Re-rank stored beatmapsets without making an API request.
 
@@ -1294,6 +1304,10 @@ class DiscoveryEngine:
         marked ``origin="local_cache"`` and never claims to be an exhaustive
         osu! search. The caller decides whether the local pool is large enough
         or whether a real discovery run should extend it.
+
+        ``all_candidates=True`` keeps every candidate that passed the strict
+        filters and relevance gate. The randomizer uses that broad pool instead
+        of the display cap, so lower-ranked maps remain reachable.
         """
 
         validate_filters(filters)
@@ -1340,7 +1354,10 @@ class DiscoveryEngine:
                 },
             )
 
-        attributes = self.storage.all_attributes()
+        # Only attributes belonging to the sampled sets can be used below.
+        attributes = self.storage.all_attributes(
+            beatmap.id for item in stored for beatmap in item.beatmaps
+        )
         user = UserFilterData(
             seen=frozenset(seen_counts),
             played=played,
@@ -1440,15 +1457,47 @@ class DiscoveryEngine:
                 f"значения ({detail})."
             )
         candidate_limit = max(1, int(self.settings.max_candidates))
-        cap = candidate_limit if limit is None else max(1, int(limit))
+        if all_candidates:
+            cap = max(1, len(candidates))
+        elif limit is None:
+            cap = candidate_limit
+        else:
+            cap = max(1, int(limit))
         truncated = len(candidates) > cap
         if truncated:
             notes.append(
                 f"Локальный пул ограничен {cap} кандидатами из {len(candidates)} "
                 "прошедших фильтры."
             )
+        elif all_candidates and candidates:
+            notes.append(
+                f"Пул случайной подборки: все {len(candidates)} кандидатов, "
+                "прошедших фильтры и гейт; обрезки до топ-N нет, разнообразие "
+                "учитывается при взвешенной выборке."
+            )
         rank_started = time.perf_counter()
-        scored = rank_candidates(candidates, ctx, limit=cap if truncated else None)
+        if all_candidates:
+            # Random sampling needs every eligible candidate, not the greedy
+            # display ordering. Ranking still computes each score (including
+            # taste, skillsets and repeat penalty); diversity is applied later
+            # by the weighted sampler instead of an O(n^2) display pass.
+            scored = [
+                evaluate_candidate(candidate, ctx)
+                for candidate in candidates
+            ]
+            scored.sort(
+                key=lambda item: (
+                    -item.score,
+                    item.beatmapset.id,
+                    item.beatmap.id,
+                )
+            )
+        else:
+            scored = rank_candidates(
+                candidates,
+                ctx,
+                limit=cap if truncated else None,
+            )
         rank_elapsed = time.perf_counter() - rank_started
         return DiscoveryResult(
             scored=tuple(scored),

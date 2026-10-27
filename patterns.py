@@ -13,6 +13,7 @@ used here.
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 from pathlib import Path
 from statistics import median, pstdev
 from typing import Callable
@@ -228,6 +229,23 @@ def sequence_features(analysis: SequenceAnalysis) -> dict[str, float]:
     }
 
 
+@lru_cache(maxsize=256)
+def _cached_analysis(
+    cache_dir: str,
+    beatmap_id: int,
+    mtime_ns: int,
+    size: int,
+) -> SequenceAnalysis:
+    """Parse and analyze one unchanged cached ``.osu`` file.
+
+    The mtime/size pair is part of the key, so a replaced file is reparsed.
+    The bound keeps memory finite during long sessions.
+    """
+
+    preview = gameplay.load_cached_preview(beatmap_id, Path(cache_dir))
+    return analyze_sequences(preview)
+
+
 def load_analysis(
     beatmap_id: int,
     cache_dir: Path,
@@ -241,6 +259,17 @@ def load_analysis(
         preview = gameplay.load_preview(
             beatmap_id, cache_dir, fetcher=fetcher
         )
-    else:
+        return analyze_sequences(preview)
+    path = Path(cache_dir) / f"{int(beatmap_id)}.osu"
+    try:
+        stat = path.stat()
+    except OSError:
+        # Preserve the existing GameplayError wording for a missing file.
         preview = gameplay.load_cached_preview(beatmap_id, cache_dir)
-    return analyze_sequences(preview)
+        return analyze_sequences(preview)
+    return _cached_analysis(
+        str(Path(cache_dir).resolve()),
+        int(beatmap_id),
+        stat.st_mtime_ns,
+        stat.st_size,
+    )
