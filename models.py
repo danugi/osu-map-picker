@@ -888,8 +888,17 @@ class DiscoveryResult:
     errors: tuple[str, ...] = ()
     notes: tuple[str, ...] = ()
     complete: bool = False
+    # Network operations attempted, including failed attempts. Cache hits are
+    # counted in ``cache_hits`` and never consume a network-request slot.
     api_requests: int = 0
+    requests_succeeded: int = 0
+    requests_failed: int = 0
+    pages_attempted: int = 0
     cache_hits: int = 0
+    # Why discovery stopped: complete, request_budget, page_limit, deadline,
+    # network_failure, rate_limit, forbidden, request_failed, candidate_limit.
+    stop_reason: str = ""
+    deadline_seconds: float = 0.0
     strategies: tuple[str, ...] = ()
     started_at: str = field(default_factory=now_iso)
     finished_at: str = field(default_factory=now_iso)

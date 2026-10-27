@@ -45,7 +45,9 @@ from osu_api import (
     OsuApiError,
     OsuAuthError,
     OsuForbiddenError,
+    OsuNetworkError,
     OsuRateLimitError,
+    OsuServerError,
 )
 from ranking import RankingContext, evaluate_candidate, rank_candidates, validate_ranking
 from relevance import (
@@ -318,23 +320,35 @@ class DiscoveryEngine:
         *,
         sequence_loader: Callable[[int, bool], SequenceAnalysis] | None = None,
         sequence_cache_probe: Callable[[int], bool] | None = None,
+        deadline_seconds: float | None = None,
     ) -> None:
         self.api = api
         self.storage = storage
         self.settings = settings or DiscoverySettings()
         self.sequence_loader = sequence_loader
         self.sequence_cache_probe = sequence_cache_probe
+        # Checked between network operations, never inside an in-flight HTTP
+        # request. Zero means an immediate deadline; the default is fixed in
+        # config so this is an additional hard bound, not a preset limit that
+        # can be raised to compensate for empty results.
+        self.deadline_seconds = (
+            float(config.DEFAULT_DISCOVERY_DEADLINE_SECONDS)
+            if deadline_seconds is None
+            else max(0.0, float(deadline_seconds))
+        )
 
     # -- page fetching -----------------------------------------------------
     def _fetch_page(
         self,
         query: SearchQuery,
         *,
-        budget: dict[str, int],
+        budget: dict[str, Any],
         errors: list[str],
         notes: list[str],
         cache_hits: list[int],
+        deadline_at: float | None = None,
     ) -> SearchPage | None:
+        budget["pages"] = int(budget.get("pages", 0)) + 1
         key = _cache_key(query)
         cached = self.storage.cache_get(key)
         if cached is not None:
@@ -347,21 +361,47 @@ class DiscoveryEngine:
                 notes.append("Повреждённая запись кэша пропущена.")
         if budget["requests"] >= self.settings.max_requests:
             return None
+        if deadline_at is not None and time.perf_counter() >= deadline_at:
+            return None
+        # Count the attempt before the network operation. A timeout, server
+        # error or other failure consumes the same budget as a success, so a
+        # persistent failure cannot fan out across every search strategy.
+        budget["requests"] += 1
         try:
             page = self.api.search_beatmapsets(query)
         except OsuAuthError as exc:
+            budget["failed"] = int(budget.get("failed", 0)) + 1
             errors.append(exc.user_message())
             raise
         except OsuRateLimitError as exc:
+            budget["failed"] = int(budget.get("failed", 0)) + 1
             errors.append(exc.user_message())
-            budget["requests"] = self.settings.max_requests
+            budget["fatal"] = "rate_limit"
+            return None
+        except OsuForbiddenError as exc:
+            budget["failed"] = int(budget.get("failed", 0)) + 1
+            errors.append(
+                f"{query.status}/{query.sort}: {exc.user_message()}"
+            )
+            budget["fatal"] = "forbidden"
+            return None
+        except (OsuNetworkError, OsuServerError) as exc:
+            budget["failed"] = int(budget.get("failed", 0)) + 1
+            errors.append(
+                f"{query.status}/{query.sort}: {exc.user_message()}"
+            )
+            # The client already exhausted its finite retries for this
+            # operation; trying every remaining strategy would only repeat the
+            # same timeout/server cost.
+            budget["fatal"] = "network_failure"
             return None
         except OsuApiError as exc:
+            budget["failed"] = int(budget.get("failed", 0)) + 1
             errors.append(
                 f"{query.status}/{query.sort}: {exc.user_message()}"
             )
             return None
-        budget["requests"] += 1
+        budget["succeeded"] = int(budget.get("succeeded", 0)) + 1
         try:
             self.storage.cache_set(
                 key,
@@ -386,14 +426,19 @@ class DiscoveryEngine:
         candidates: list[Candidate],
         ctx: RankingContext,
         *,
-        budget: dict[str, int],
+        budget: dict[str, Any],
         notes: list[str],
         errors: list[str],
+        deadline_at: float | None = None,
     ) -> list[Candidate]:
         limit = self.settings.fetch_attributes_limit
         if limit <= 0 or not candidates:
             return candidates
         if not _needs_attribute_enrichment(ctx.settings):
+            return candidates
+        if budget.get("fatal"):
+            return candidates
+        if deadline_at is not None and time.perf_counter() >= deadline_at:
             return candidates
         # Preselect without computing the Recommendation score. For
         # specialized presets the target gate decides which cards deserve
@@ -458,9 +503,40 @@ class DiscoveryEngine:
                         "attributes; часть карт оценена по косвенным признакам."
                     )
                     break
+                if deadline_at is not None and time.perf_counter() >= deadline_at:
+                    break
+                # Attributes share the same hard counter as search pages.
+                budget["requests"] += 1
                 try:
                     attributes = self.api.get_beatmap_attributes(beatmap_id)
-                    budget["requests"] += 1
+                except OsuForbiddenError:
+                    budget["failed"] = int(budget.get("failed", 0)) + 1
+                    forbidden = True
+                    notes.append(
+                        "Difficulty attributes недоступны (HTTP 403). "
+                        "Aim-профиль использует только плотность, CS и теги."
+                    )
+                except (OsuNetworkError, OsuServerError) as exc:
+                    budget["failed"] = int(budget.get("failed", 0)) + 1
+                    budget["fatal"] = "network_failure"
+                    errors.append(
+                        f"attributes {beatmap_id}: {exc.user_message()}"
+                    )
+                    break
+                except OsuRateLimitError as exc:
+                    budget["failed"] = int(budget.get("failed", 0)) + 1
+                    budget["fatal"] = "rate_limit"
+                    errors.append(
+                        f"attributes {beatmap_id}: {exc.user_message()}"
+                    )
+                    break
+                except OsuApiError as exc:
+                    budget["failed"] = int(budget.get("failed", 0)) + 1
+                    errors.append(
+                        f"attributes {beatmap_id}: {exc.user_message()}"
+                    )
+                else:
+                    budget["succeeded"] = int(budget.get("succeeded", 0)) + 1
                     self.storage.save_attributes(
                         beatmap_id,
                         {
@@ -473,14 +549,6 @@ class DiscoveryEngine:
                             "fetched_at": attributes.fetched_at,
                         },
                     )
-                except OsuForbiddenError:
-                    forbidden = True
-                    notes.append(
-                        "Difficulty attributes недоступны (HTTP 403). "
-                        "Aim-профиль использует только плотность, CS и теги."
-                    )
-                except OsuApiError as exc:
-                    errors.append(f"attributes {beatmap_id}: {exc.user_message()}")
             if attributes is not None:
                 updated[beatmap_id] = replace(
                     candidate,
@@ -610,11 +678,19 @@ class DiscoveryEngine:
         *,
         allow_download: bool,
         notes: list[str],
+        deadline_at: float | None = None,
     ) -> tuple[list[Candidate], SequenceStats]:
         limit = int(self.settings.fetch_sequences_limit)
         required = _needs_sequence_analysis(ctx.settings)
         if not required or not candidates:
             return candidates, SequenceStats(required=required)
+        if deadline_at is not None and time.perf_counter() >= deadline_at:
+            return candidates, SequenceStats(
+                required=True,
+                unanalyzed=len(candidates),
+                limit=limit,
+                cached_only=limit <= 0 or not allow_download,
+            )
 
         cached_only = limit <= 0 or not allow_download
         analysis_limit = (
@@ -690,6 +766,8 @@ class DiscoveryEngine:
         for candidate in cached[:MAX_CACHED_SEQUENCE_ANALYSIS]:
             if analyzed >= analysis_limit:
                 break
+            if deadline_at is not None and time.perf_counter() >= deadline_at:
+                break
             attempted.add(candidate.beatmap.id)
             error, unexpected = attempt(candidate, False)
             if error is None:
@@ -704,6 +782,8 @@ class DiscoveryEngine:
         if not cached_only and analyzed < analysis_limit:
             for candidate in fair:
                 if analyzed >= analysis_limit:
+                    break
+                if deadline_at is not None and time.perf_counter() >= deadline_at:
                     break
                 beatmap_id = candidate.beatmap.id
                 if beatmap_id in updated:
@@ -785,10 +865,17 @@ class DiscoveryEngine:
             raise ValueError("Для нового API-поиска нужен osu! API client.")
         started_perf = time.perf_counter()
         started = now_iso()
+        deadline_at = started_perf + self.deadline_seconds
         errors: list[str] = []
         notes: list[str] = []
         cache_hits = [0]
-        budget = {"requests": 0}
+        budget: dict[str, Any] = {
+            "requests": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "pages": 0,
+            "fatal": "",
+        }
         # Do not let broad pagination consume the whole budget before the
         # optional difficulty attributes are requested. This keeps the first
         # search bounded without silently disabling measurable skillsets.
@@ -808,6 +895,28 @@ class DiscoveryEngine:
         strategies_used: list[str] = []
         total_fetched = 0
         complete = True
+        stop_reason = ""
+
+        def mark_incomplete(reason: str, *, override: bool = False) -> None:
+            nonlocal complete, stop_reason
+            complete = False
+            if not budget.get("fatal"):
+                stop_reason = reason if override else (stop_reason or reason)
+
+        def deadline_hit() -> bool:
+            nonlocal complete
+            if time.perf_counter() < deadline_at:
+                return False
+            complete = False
+            if not budget.get("fatal"):
+                budget["fatal"] = "deadline"
+                notes.append(
+                    f"Дедлайн discovery {self.deadline_seconds:g} с достигнут: "
+                    "новые сетевые операции остановлены; выдача может быть "
+                    "неполной. Уже начатый запрос мог завершиться после "
+                    "дедлайна."
+                )
+            return True
 
         feedback_by_set = self.storage.all_feedback()
         favorites = self.storage.favorite_ids()
@@ -838,8 +947,10 @@ class DiscoveryEngine:
         sources: dict[int, list[str]] = {}
 
         for strategy in strategies:
+            if budget.get("fatal") or deadline_hit():
+                break
             if budget["requests"] >= page_budget:
-                complete = False
+                mark_incomplete("request_budget", override=True)
                 notes.append(
                     f"Бюджет страниц ({page_budget} запросов из "
                     f"{resolved_requests}) исчерпан; выдача может быть неполной. "
@@ -857,8 +968,10 @@ class DiscoveryEngine:
             seen_cursors: set[str] = set()
             pages = 0
             while True:
+                if budget.get("fatal") or deadline_hit():
+                    break
                 if budget["requests"] >= page_budget:
-                    complete = False
+                    mark_incomplete("request_budget", override=True)
                     notes.append(
                         f"Бюджет страниц исчерпан в стратегии {strategy.name}."
                     )
@@ -869,9 +982,15 @@ class DiscoveryEngine:
                     errors=errors,
                     notes=notes,
                     cache_hits=cache_hits,
+                    deadline_at=deadline_at,
                 )
                 if page is None:
-                    complete = False
+                    if budget.get("fatal"):
+                        mark_incomplete(str(budget["fatal"]))
+                    elif budget["requests"] >= page_budget:
+                        mark_incomplete("request_budget", override=True)
+                    else:
+                        mark_incomplete("request_failed")
                     break
                 if page.error:
                     notes.append(
@@ -890,7 +1009,7 @@ class DiscoveryEngine:
                 pages += 1
                 if pages >= self.settings.max_pages_per_strategy:
                     if page.has_more:
-                        complete = False
+                        mark_incomplete("page_limit")
                         notes.append(
                             f"{strategy.name}: остановлено на "
                             f"{self.settings.max_pages_per_strategy} страницах."
@@ -997,14 +1116,18 @@ class DiscoveryEngine:
             budget=budget,
             notes=notes,
             errors=errors,
+            deadline_at=deadline_at,
         )
         attributes_elapsed = time.perf_counter() - attributes_started
         sequences_started = time.perf_counter()
         candidates, sequence_stats = self._enrich_sequences(
             candidates,
             ctx,
-            allow_download=True,
+            # A fatal network/deadline stop must not trigger more .osu
+            # downloads; cached files can still be analyzed locally.
+            allow_download=not bool(budget.get("fatal")),
             notes=notes,
+            deadline_at=deadline_at,
         )
         sequences_elapsed = time.perf_counter() - sequences_started
         strict_passed = len(candidates)
@@ -1036,13 +1159,16 @@ class DiscoveryEngine:
             notes=diversification_notes,
         )
         if truncated:
-            complete = False
+            mark_incomplete("candidate_limit")
             notes.append(
                 f"Показано не более {candidate_limit} кандидатов из "
                 f"{len(candidates)}; выдача ограничена настройкой "
                 "«Максимум кандидатов»."
             )
         notes.extend(diversification_notes[:3])
+        # A request chain may have crossed the deadline even when it started
+        # before it; reflect that in the final completeness flag.
+        deadline_hit()
         rank_elapsed = time.perf_counter() - rank_started
         total_elapsed = time.perf_counter() - started_perf
 
@@ -1087,8 +1213,26 @@ class DiscoveryEngine:
                 f"Дедупликация: {total_fetched} строк API → {len(known)} "
                 "уникальных beatmapsets."
             )
+        if budget["failed"]:
+            complete = False
+            if not budget.get("fatal"):
+                stop_reason = stop_reason or "request_failed"
+            notes.append(
+                "Сетевые запросы: успешно "
+                f"{budget.get('succeeded', 0)}, ошибок {budget['failed']}; "
+                "результат неполный."
+            )
+        if budget.get("fatal"):
+            stop_reason = str(budget["fatal"])
+        elif complete:
+            stop_reason = "complete"
+        elif not stop_reason:
+            stop_reason = "limits"
         if not complete and not any("неполн" in note for note in notes):
-            notes.append("Выдача может быть неполной: поиск остановлен по лимитам.")
+            notes.append(
+                "Выдача может быть неполной: "
+                f"discovery остановлен ({stop_reason})."
+            )
 
         finished = now_iso()
         result = DiscoveryResult(
@@ -1104,7 +1248,12 @@ class DiscoveryEngine:
             notes=tuple(dict.fromkeys(notes))[:MAX_NOTES],
             complete=complete,
             api_requests=budget["requests"],
+            requests_succeeded=int(budget.get("succeeded", 0)),
+            requests_failed=int(budget.get("failed", 0)),
+            pages_attempted=int(budget.get("pages", 0)),
             cache_hits=cache_hits[0],
+            stop_reason=stop_reason,
+            deadline_seconds=self.deadline_seconds,
             strategies=tuple(strategies_used),
             started_at=started,
             finished_at=finished,
@@ -1164,7 +1313,14 @@ class DiscoveryEngine:
         )
         feedback_sets = self.storage.get_beatmapsets(feedback_by_set.keys())
         limit_sets = max(1000, int(self.settings.max_candidates) * 4)
-        stored = self.storage.list_beatmapsets(limit=limit_sets)
+        # A deterministic newest-first slice would permanently starve older
+        # stored sets once the catalog exceeds the bound. Use a bounded,
+        # evenly spaced sample across the whole catalog instead.
+        stored = self.storage.list_beatmapsets(
+            limit=limit_sets,
+            balanced=True,
+        )
+        total_stored = self.storage.beatmapset_count()
         filter_started = time.perf_counter()
         if not stored:
             return DiscoveryResult(
@@ -1261,8 +1417,9 @@ class DiscoveryEngine:
         )
         relevance_passed = len(candidates)
         notes = [
-            f"Локальный кеш: {len(stored)} сохранённых карт, "
-            f"{strict_passed} прошли строгие фильтры, "
+            f"Локальный кеш SQLite: {total_stored} сохранённых карт; для "
+            f"переранжирования рассмотрено {len(stored)} (равномерная выборка "
+            f"по id, без сети). {strict_passed} прошли строгие фильтры, "
             f"{relevance_passed} прошли целевые теги. Это повторное "
             "ранжирование без нового API-поиска."
         ]

@@ -50,7 +50,6 @@ from models import (
     MODES,
     STATUSES,
     DiscoveryResult,
-    DiscoverySettings,
     FactorConfig,
     PresetConfig,
     ScoredCandidate,
@@ -2012,148 +2011,47 @@ def _execute_search(
     return True
 
 
-def _random_discovery_settings(
-    cfg: PresetConfig, _pool_round: int
-) -> DiscoverySettings:
-    # User request/page limits are hard limits.  Rotating the strategy order
-    # still changes which cached pages are useful, but randomization must not
-    # silently spend more network budget than an explicit search.
-    return copy.deepcopy(cfg.discovery)
-
-
 @dataclass(frozen=True)
 class RandomPool:
-    """One collected random pool and the provenance of its counters."""
+    """A candidate pool read from the persistent local catalog."""
 
     result: DiscoveryResult
     source_note: str
-    api: DiscoveryResult | None = None
-    local: DiscoveryResult | None = None
-    api_configured: bool = False
-    local_only: bool = False
-    api_error: str | None = None
-
-
-def _merge_random_pools(
-    primary: DiscoveryResult, local: DiscoveryResult | None
-) -> DiscoveryResult:
-    if local is None or not local.scored:
-        return primary
-    by_set: dict[int, ScoredCandidate] = {}
-    for item in (*primary.scored, *local.scored):
-        by_set.setdefault(item.beatmapset.id, item)
-    merged = sorted(
-        by_set.values(), key=lambda item: (-item.score, item.beatmapset.id)
-    )
-    api_ids = {item.beatmapset.id for item in primary.scored}
-    local_ids = {item.beatmapset.id for item in local.scored}
-    notes = list(primary.notes)
-    notes.append(
-        f"пул: {len(merged)} уникальных; API: {len(primary.scored)}; "
-        f"локально: {len(local.scored)}; пересечение: {len(api_ids & local_ids)}; "
-        f"строгие фильтры: API {primary.passed_filters}, локально "
-        f"{local.passed_filters}; после relevance: API "
-        f"{primary.passed_relevance}, локально {local.passed_relevance}."
-    )
-    # Deliberately keep the API counters and cache metrics intact.  The merged
-    # count describes the candidate pool, not how many maps the API fetched or
-    # how many strict-filter checks ran.
-    return replace(
-        primary,
-        scored=tuple(merged),
-        origin="mixed",
-        notes=tuple(dict.fromkeys(notes))[:12],
-    )
+    catalog_size: int = 0
 
 
 def _collect_random_pool(
     store: Storage,
     cfg: PresetConfig,
-    pool_round: int,
-    *,
-    local_only: bool,
 ) -> RandomPool:
-    """Collect a candidate pool without exceeding the user's request limits."""
+    """Collect candidates from SQLite only.
 
-    local: DiscoveryResult | None = None
+    Random selection is deliberately local-first: it never loads API
+    credentials, acquires a token, fetches search pages or downloads ``.osu``
+    files. Online discovery remains a separate, explicit user action.
+    """
+
     try:
+        catalog_size = store.beatmapset_count()
         local = _local_result(store, cfg)
-    except (StorageError, ValueError):
-        local = None
+    except (StorageError, ValueError) as exc:
+        raise ValueError(f"Локальный каталог недоступен: {exc}") from exc
 
-    if local_only:
-        if local is None:
-            raise ValueError("Локальный кеш недоступен.")
-        return RandomPool(
-            result=local,
-            source_note=(
-                "Локальный режим: API отключён пользователем; новые страницы "
-                "не запрашиваются."
-            ),
-            local=local,
-            local_only=True,
-            api_configured=False,
+    if catalog_size == 0:
+        source_note = (
+            "Локальный каталог SQLite пуст. Случайная подборка не запускает "
+            "онлайн-поиск и не подставляет фиктивные карты."
         )
-
-    try:
-        api_config = config.load_api_config()
-    except ValueError as exc:
-        raise ValueError(f"Конфигурация API некорректна: {exc}") from exc
-    if not api_config.configured:
-        if local is None or not local.scored:
-            raise ValueError(
-                "API не настроен, а в локальном кеше нет подходящих карт."
-            )
-        return RandomPool(
-            result=local,
-            source_note=(
-                "API не настроен; новые страницы не запрашиваются. "
-                "Показан локальный кеш."
-            ),
-            local=local,
-            api_configured=False,
+    else:
+        source_note = (
+            f"Локальный каталог SQLite: {catalog_size} сохранённых карт; "
+            f"для переранжирования рассмотрено {local.total_fetched}. "
+            "Сетевых запросов нет."
         )
-
-    try:
-        client = _get_api(api_config)
-        settings = _random_discovery_settings(cfg, pool_round)
-        engine = DiscoveryEngine(client, store, settings)
-        with st.spinner(
-            "Собираю кандидатов в пределах настроенных лимитов запросов…"
-        ):
-            result = engine.run(
-                cfg.filters,
-                cfg.ranking,
-                record=True,
-                strategy_offset=pool_round,
-            )
-    except OsuApiError as exc:
-        message = exc.user_message()
-        if local is not None and local.scored:
-            return RandomPool(
-                result=local,
-                source_note=(
-                    f"osu! API: {message}. Показан локальный кеш; новые "
-                    "страницы не запрашивались."
-                ),
-                local=local,
-                api_configured=True,
-                api_error=message,
-            )
-        raise
-    merged = _merge_random_pools(result, local)
-    local_count = len(local.scored) if local is not None else 0
-    source = (
-        "API-поиск выполнен в пределах настроенных лимитов: "
-        f"{len(result.scored)} уникальных из API, {local_count} из локального "
-        f"кеша; пул {len(merged.scored)}."
-    )
     return RandomPool(
-        result=merged,
-        source_note=source,
-        api=result,
-        local=local,
-        api_configured=True,
+        result=local,
+        source_note=source_note,
+        catalog_size=catalog_size,
     )
 
 
@@ -2161,59 +2059,40 @@ def _random_empty_message(
     selection: randomizer.RandomSelection,
     pool: RandomPool,
 ) -> str:
-    """Explain an empty random result without promising impossible pages."""
+    """Explain why a local-only random selection has no cards."""
 
     parts = [selection.note]
-    if selection.pool_size and selection.available == 0:
-        parts.append("В текущей random-сессии показаны все доступные карты.")
-        if pool.local_only:
-            parts.append(
-                "Локальный режим: API отключён пользователем, новые страницы "
-                "не запрашиваются."
-            )
-        elif not pool.api_configured:
-            parts.append("API не настроен, новые страницы не запрашиваются.")
-        elif pool.api_error:
-            parts.append(f"API недоступен: {pool.api_error}.")
-        elif pool.api is not None and not pool.api.complete:
-            parts.append(
-                "Лимит запросов или страниц исчерпан; поиск остановлен."
-            )
-        else:
-            parts.append(
-                "API не сообщил о новых уникальных картах в доступных "
-                "страницах."
-            )
+    considered = pool.result.total_fetched
+    if pool.catalog_size == 0:
         parts.append(
-            "Можно разрешить повторно показанные карты или изменить фильтры."
+            "Локальный каталог пуст: в SQLite нет сохранённых beatmapsets. "
+            "Случайная подборка никогда не запускает онлайн-поиск. Нажмите "
+            "«Искать», чтобы явно выполнить поиск в osu! API и заполнить "
+            "каталог, затем повторите."
         )
         return " ".join(parts)
 
-    if pool.local_only:
+    if selection.pool_size == 0:
         parts.append(
-            "Локальный режим: API отключён пользователем, новые страницы не "
-            "запрашиваются. Можно расширить локальный кеш или изменить фильтры."
+            f"В локальном каталоге {pool.catalog_size} карт (рассмотрено "
+            f"{considered}), но ни одна не прошла строгие фильтры и "
+            "обязательный гейт. Онлайн-поиск не запускался: измените фильтры "
+            "или нажмите «Искать», чтобы явно расширить каталог."
         )
-    elif not pool.api_configured:
+        return " ".join(parts)
+
+    if selection.available == 0:
         parts.append(
-            "API не настроен, новые страницы не запрашиваются. Можно "
-            "расширить локальный кеш или изменить фильтры."
+            "В текущей random-сессии показаны все доступные карты. Можно "
+            "разрешить повторно показанные карты, изменить фильтры или "
+            "нажать «Искать», чтобы явно расширить локальный каталог."
         )
-    elif pool.api_error:
-        parts.append(
-            f"API недоступен: {pool.api_error}. Новые страницы не "
-            "запрашивались."
-        )
-    elif pool.api is not None and not pool.api.complete:
-        parts.append(
-            "Лимит запросов или страниц исчерпан; поиск остановлен. "
-            "Увеличьте лимиты в настройках или измените фильтры."
-        )
-    else:
-        parts.append(
-            "API не нашёл уникальных карт, прошедших фильтры, в доступных "
-            "страницах."
-        )
+        return " ".join(parts)
+
+    parts.append(
+        f"Локальный каталог: {pool.catalog_size} карт; онлайн-поиск не "
+        "запускался. Чтобы расширить каталог, нажмите «Искать»."
+    )
     return " ".join(parts)
 
 
@@ -2227,8 +2106,7 @@ def _random_meta(
     session_seen: int,
     recent_history: int,
 ) -> dict[str, Any]:
-    api = pool.api
-    local = pool.local
+    local = pool.result
     return {
         "round": round_number,
         "pool": selection.pool_size,
@@ -2240,28 +2118,21 @@ def _random_meta(
         "seed": seed,
         "note": selection.note,
         "source": pool.source_note,
-        "origin": pool.result.origin,
-        "local_only": pool.local_only,
-        "api_configured": pool.api_configured,
-        "api_error": pool.api_error,
-        "api_unique": len(api.scored) if api is not None else 0,
-        "local_unique": len(local.scored) if local is not None else 0,
-        "api_strict_passed": api.passed_filters if api is not None else 0,
-        "local_strict_passed": (
-            local.passed_filters if local is not None else 0
-        ),
-        "api_relevance_passed": (
-            api.passed_relevance if api is not None else 0
-        ),
-        "local_relevance_passed": (
-            local.passed_relevance if local is not None else 0
-        ),
-        "local_considered": (
-            local.total_fetched if local is not None else 0
-        ),
-        "api_requests": pool.result.api_requests,
-        "cache_hits": pool.result.cache_hits,
-        "complete": bool(pool.result.complete),
+        "origin": local.origin,
+        "local_only": True,
+        "api_configured": False,
+        "api_error": None,
+        "api_unique": 0,
+        "local_unique": len(local.scored),
+        "api_strict_passed": 0,
+        "local_strict_passed": local.passed_filters,
+        "api_relevance_passed": 0,
+        "local_relevance_passed": local.passed_relevance,
+        "local_considered": local.total_fetched,
+        "catalog_size": pool.catalog_size,
+        "api_requests": 0,
+        "cache_hits": local.cache_hits,
+        "complete": bool(local.complete),
         "session_seen": session_seen,
         "recent_history": recent_history,
     }
@@ -2287,7 +2158,6 @@ def _execute_random_selection(store: Storage, cfg: PresetConfig) -> None:
         desired = 12
     desired = max(3, min(40, desired))
     avoid_seen = bool(st.session_state.get("random_avoid_seen", True))
-    local_only = bool(st.session_state.get("search_local_only", False))
     pool_round = max(1, int(st.session_state.get("random_round", 0)) + 1)
     last_ids = {
         int(value)
@@ -2316,12 +2186,7 @@ def _execute_random_selection(store: Storage, cfg: PresetConfig) -> None:
     seed = secrets.randbits(64)
 
     try:
-        pool = _collect_random_pool(
-            store, cfg, pool_round, local_only=local_only
-        )
-    except OsuApiError as exc:
-        st.error(f"Случайная подборка не собрана: {exc.user_message()}")
-        return
+        pool = _collect_random_pool(store, cfg)
     except (StorageError, ValueError) as exc:
         st.error(f"Случайная подборка не собрана: {exc}")
         return
@@ -2477,10 +2342,34 @@ def _render_result(store: Storage, result: DiscoveryResult) -> None:
         "local_cache": "локальный кеш",
     }.get(result.origin, result.origin)
     st.caption(
-        f"{result.count} карт · источник: {source} · API-запросов: "
-        f"{result.api_requests} · кэш-хитов поиска: {result.cache_hits}. "
-        "Recommendation score — внутренний порядок 0–100, не вероятность."
+        f"{result.count} карт · источник: {source} · сетевых запросов: "
+        f"{result.api_requests} (успешно "
+        f"{getattr(result, 'requests_succeeded', 0)}, ошибок "
+        f"{getattr(result, 'requests_failed', 0)}) · страниц: "
+        f"{getattr(result, 'pages_attempted', 0)} · кэш-хитов поиска: "
+        f"{result.cache_hits}. Recommendation score — внутренний порядок "
+        "0–100, не вероятность."
     )
+    if result.origin in {"api", "mixed"}:
+        raw_stop = getattr(result, "stop_reason", "") or "—"
+        stop_labels = {
+            "complete": "все стратегии завершены",
+            "request_budget": "бюджет запросов",
+            "page_limit": "лимит страниц",
+            "deadline": "дедлайн",
+            "network_failure": "сетевая ошибка/таймаут",
+            "rate_limit": "HTTP 429",
+            "forbidden": "HTTP 403",
+            "request_failed": "ошибка запроса",
+            "candidate_limit": "лимит кандидатов",
+            "limits": "лимиты",
+        }
+        stop = stop_labels.get(raw_stop, raw_stop)
+        deadline = getattr(result, "deadline_seconds", 0.0)
+        st.caption(
+            f"Discovery: дедлайн {deadline:g} с · остановка: "
+            f"{stop} · полнота: {'да' if result.complete else 'нет'}."
+        )
     if result.sequence_required:
         sequence_state = (
             "полный" if result.sequences_complete else "неполный"
@@ -2497,23 +2386,20 @@ def _render_result(store: Storage, result: DiscoveryResult) -> None:
     random_meta = st.session_state.get("random_meta")
     if isinstance(random_meta, dict):
         st.info(
-            f"🎲 Случайная подборка · раунд {random_meta.get('round', 1)} · "
+            f"🎲 Локальная подборка · раунд {random_meta.get('round', 1)} · "
             f"{random_meta.get('count', 0)} карт из "
             f"{random_meta.get('available', 0)} новых кандидатов "
-            f"(пул {random_meta.get('pool', 0)}: API "
-            f"{random_meta.get('api_unique', 0)}, локально "
-            f"{random_meta.get('local_unique', 0)}; в сессии показано "
+            f"(локальный пул {random_meta.get('pool', 0)}; в сессии показано "
             f"{random_meta.get('session_seen', 0)}; исключено "
             f"{random_meta.get('excluded', 0)})."
         )
         st.caption(
-            "Прошли проверки: API — "
-            f"{random_meta.get('api_strict_passed', 0)} строгих / "
-            f"{random_meta.get('api_relevance_passed', 0)} relevance; "
-            "локально — "
+            "Прошли проверки в локальном каталоге: "
             f"{random_meta.get('local_strict_passed', 0)} строгих / "
             f"{random_meta.get('local_relevance_passed', 0)} relevance "
-            f"(рассмотрено {random_meta.get('local_considered', 0)})."
+            f"(рассмотрено {random_meta.get('local_considered', 0)} из "
+            f"{random_meta.get('catalog_size', random_meta.get('local_considered', 0))} "
+            "сохранённых). Сетевых запросов: 0."
         )
         meta_note = random_meta.get("note")
         if meta_note:
@@ -2954,8 +2840,9 @@ def _search_advanced_filters(cfg: PresetConfig) -> None:
         "Только локальный кеш",
         value=bool(st.session_state.get("search_local_only", False)),
         key="search_local_only",
-        help="Не выполнять API-запросы. Поиск и случайная подборка будут "
-        "переранжировать сохранённые карты.",
+        help="Отключает сеть только для явной кнопки «Искать». Случайная "
+        "подборка всегда использует локальный каталог SQLite и не делает "
+        "API-запросов.",
     )
     discovery = cfg.discovery
     limit_cols = st.columns(4)
@@ -3026,10 +2913,10 @@ def _search_advanced_filters(cfg: PresetConfig) -> None:
     )
     st.caption(
         "Стратегии: recent по статусам + oldest/rating/favourites + до трёх "
-        "запросов по вашим положительным оценкам. Повторная случайная "
-        "подборка сама углубляет пагинацию и меняет порядок стратегий. "
-        "Streams/Bursts оцениваются только по найденным в .osu цепочкам: "
-        "длиннее 9 нот — stream, 5–9 нот — burst."
+        "запросов по вашим положительным оценкам. Это относится только к "
+        "явной кнопке «Искать»: случайная подборка не углубляет пагинацию и "
+        "не делает сетевых запросов. Streams/Bursts оцениваются только по "
+        "найденным в .osu цепочкам: длиннее 9 нот — stream, 5–9 нот — burst."
     )
 
 
@@ -3048,9 +2935,10 @@ def page_search(store: Storage, cfg: PresetConfig) -> None:
         st.error(f"Некорректная конфигурация API: {exc}")
     if not configured:
         st.info(
-            "OSU_CLIENT_ID / OSU_CLIENT_SECRET не заданы. Новый поиск в API "
-            "недоступен, но сохранённые карты можно переранжировать из "
-            "локального кеша. Секреты не показываются и не пишутся в SQLite."
+            "OSU_CLIENT_ID / OSU_CLIENT_SECRET не заданы. Новый онлайн-поиск "
+            "недоступен, но «🎲 Случайная подборка» работает по сохранённому "
+            "локальному каталогу SQLite. Секреты не показываются и не "
+            "пишутся в SQLite."
         )
 
     filters = cfg.filters
@@ -3160,8 +3048,9 @@ def page_search(store: Storage, cfg: PresetConfig) -> None:
         "🎲 Случайная подборка",
         key="random_selection",
         use_container_width=True,
-        help="Собирает новых кандидатов, исключает недавно показанные и "
-        "выбирает новый набор. Пресет, фильтры и навыки не меняются.",
+        help="Выбирает новых кандидатов из локального каталога SQLite, "
+        "исключает недавно показанные и не делает API-запросов. Пресет, "
+        "фильтры и навыки не меняются.",
     ):
         _execute_random_selection(store, cfg)
     actions[2].button(
@@ -4348,8 +4237,9 @@ def page_diagnostics(store: Storage, cfg: PresetConfig) -> None:
         st.info("Поисков ещё не было.")
     else:
         st.write(
-            f"Запросов: {last['requests']} · из кеша: {last['cache_hits']} · "
-            f"уникальных: {last['total_fetched']} · прошло фильтры: "
+            f"Запросов (попыток): {last['requests']} · из кеша: "
+            f"{last['cache_hits']} · уникальных: {last['total_fetched']} · "
+            f"прошло фильтры: "
             f"{last['passed_filters']} · результатов: {last['result_count']} · "
             f"полнота: {'да' if last['complete'] else 'нет'}"
         )
@@ -4430,8 +4320,9 @@ def page_diagnostics(store: Storage, cfg: PresetConfig) -> None:
     st.subheader("Честные ограничения")
     st.markdown(
         "- Поиск не является исчерпывающим: osu! API отдаёт страницы, а бюджет "
-        "запросов и лимит страниц явно ограничены. Случайная подборка "
-        "углубляет страницы по нажатию, но не гарантирует всю базу osu!.\n"
+        "запросов, лимит страниц и общий дедлайн discovery явно ограничены. "
+        "Случайная подборка работает только по локальному каталогу SQLite и "
+        "не углубляет пагинацию; каталог пополняется явной кнопкой «Искать».\n"
         "- Официальная документация `/beatmapsets/search` помечена как TODO; "
         "имена параметров изолированы в `osu_api.py` и могут потребовать "
         "правки при изменении API.\n"

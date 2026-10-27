@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import copy
 from io import BytesIO
@@ -11,9 +11,11 @@ from streamlit.testing.v1 import AppTest
 
 import app as app_module
 import appearance
+import discovery
 import gameplay
+import osu_api
 import presets
-from models import Candidate, DiscoveryResult, ScoredCandidate
+from models import DifficultyAttributes, DiscoveryResult, SearchPage
 from randomizer import RandomSelection
 from storage import Storage
 from skillsets import SKILL_IDS
@@ -961,61 +963,115 @@ def _seed_many_cached_maps(store: Storage, count: int = 30) -> None:
     store.save_beatmapsets(beatmapsets)
 
 
-def _pool_item(beatmapset_id: int, score: float = 0.7) -> ScoredCandidate:
-    beatmapset = make_beatmapset(
-        beatmapset_id,
-        beatmaps=(make_beatmap(beatmapset_id * 10 + 1, beatmapset_id),),
-    )
-    return ScoredCandidate(
-        Candidate(beatmapset, beatmapset.beatmaps[0]),
-        score,
-        (),
-    )
+class _FakeSearchApi:
+    """Deterministic online-search double used by explicit search tests."""
+
+    def __init__(self, beatmapsets) -> None:
+        self.beatmapsets = tuple(beatmapsets)
+        self.search_calls = 0
+
+    def search_beatmapsets(self, query):
+        self.search_calls += 1
+        return SearchPage(beatmapsets=self.beatmapsets)
+
+    def get_beatmap_attributes(self, beatmap_id: int):
+        return DifficultyAttributes(
+            beatmap_id=beatmap_id,
+            star_rating=5.3,
+            aim_difficulty=3.2,
+            speed_difficulty=1.5,
+            slider_factor=1.2,
+            max_combo=900,
+        )
 
 
-def test_merge_random_pools_keeps_source_counts_separate() -> None:
-    api = DiscoveryResult(
-        scored=(_pool_item(1), _pool_item(2)),
-        total_fetched=5,
-        passed_filters=4,
-        passed_relevance=3,
-        api_requests=2,
-        cache_hits=1,
-        complete=False,
+def test_collect_random_pool_reads_only_filtered_local_catalog(
+    app_env, monkeypatch
+) -> None:
+    store = Storage(app_env)
+    _seed_many_cached_maps(store, 5)
+    store.save_beatmapset(
+        make_beatmapset(
+            99,
+            title="Too hard for the active strict filter",
+            beatmaps=(
+                make_beatmap(
+                    991,
+                    99,
+                    stars=8.5,
+                    total_length=90,
+                    hit_length=85,
+                ),
+            ),
+        )
     )
-    local = DiscoveryResult(
-        scored=(_pool_item(2), _pool_item(3)),
-        total_fetched=7,
-        passed_filters=6,
-        passed_relevance=5,
-        origin="local_cache",
-    )
-    merged = app_module._merge_random_pools(api, local)
-    assert merged.count == 3
-    assert merged.total_fetched == 5
-    assert merged.passed_filters == 4
-    assert merged.passed_relevance == 3
-    assert merged.api_requests == 2
-    assert merged.cache_hits == 1
-    assert merged.origin == "mixed"
-    note = " ".join(merged.notes)
-    assert "API: 2" in note
-    assert "локально: 2" in note
-    assert "пул: 3" in note
-
-
-def test_random_selection_does_not_raise_user_request_limits() -> None:
     cfg = presets.builtin_by_name("Mixed Aim")
     assert cfg is not None
-    cfg.discovery.max_requests = 7
-    cfg.discovery.max_pages_per_strategy = 1
-    settings = app_module._random_discovery_settings(cfg, 5)
-    assert settings.max_requests == 7
-    assert settings.max_pages_per_strategy == 1
+
+    def fail(*args, **kwargs):
+        raise AssertionError("random pool must not touch the API")
+
+    monkeypatch.setattr(app_module.config, "load_api_config", fail)
+    monkeypatch.setattr(app_module, "_get_api", fail)
+    pool = app_module._collect_random_pool(store, cfg)
+    assert pool.catalog_size == 6
+    assert pool.result.origin == "local_cache"
+    assert pool.result.api_requests == 0
+    assert pool.result.strategies == ("local-cache",)
+    assert pool.result.passed_filters == 5
+    assert pool.result.count == 5
+    assert 99 not in {item.beatmapset.id for item in pool.result.scored}
+    assert all(item.score >= 0 for item in pool.result.scored)
+
+    selection = app_module.randomizer.select_random_subset(
+        pool.result.scored, 3, seed=7
+    )
+    assert selection.count == 3
+    assert {item.beatmapset.id for item in selection.items} <= {
+        item.beatmapset.id for item in pool.result.scored
+    }
+    assert "SQLite" in pool.source_note
+    assert "Сетевых запросов нет" in pool.source_note
 
 
-def test_empty_random_message_respects_local_mode_and_request_budget() -> None:
-    selection = RandomSelection(
+def test_empty_random_message_explains_local_catalog_limits() -> None:
+    empty_selection = RandomSelection(
+        items=(),
+        requested=12,
+        pool_size=0,
+        available=0,
+        excluded=0,
+        seed=1,
+        shortfall=True,
+        note="В текущем пуле нет карт, прошедших строгие фильтры.",
+    )
+    empty_pool = app_module.RandomPool(
+        result=DiscoveryResult(origin="local_cache", complete=False),
+        source_note="",
+        catalog_size=0,
+    )
+    empty_message = app_module._random_empty_message(
+        empty_selection, empty_pool
+    )
+    assert "Локальный каталог пуст" in empty_message
+    assert "Искать" in empty_message
+    assert "более глубокие страницы" not in empty_message.casefold()
+
+    filtered_pool = app_module.RandomPool(
+        result=DiscoveryResult(
+            origin="local_cache", total_fetched=10, complete=False
+        ),
+        source_note="",
+        catalog_size=10,
+    )
+    filtered_message = app_module._random_empty_message(
+        empty_selection, filtered_pool
+    )
+    assert "ни одна не прошла строгие фильтры" in filtered_message
+    assert "онлайн-поиск не запускался" in filtered_message.casefold()
+    assert "более глубокие страницы" not in filtered_message.casefold()
+
+    exhausted_selection = RandomSelection(
         items=(),
         requested=12,
         pool_size=5,
@@ -1025,25 +1081,12 @@ def test_empty_random_message_respects_local_mode_and_request_budget() -> None:
         shortfall=True,
         note="Нет новых подходящих карт.",
     )
-    local = app_module.RandomPool(
-        result=DiscoveryResult(origin="local_cache", complete=False),
-        source_note="",
-        local_only=True,
-        api_configured=False,
+    exhausted_message = app_module._random_empty_message(
+        exhausted_selection, filtered_pool
     )
-    local_message = app_module._random_empty_message(selection, local)
-    assert "Локальный режим" in local_message
-    assert "более глубокие страницы" not in local_message.casefold()
-
-    api = app_module.RandomPool(
-        result=DiscoveryResult(complete=False),
-        source_note="",
-        api=DiscoveryResult(complete=False),
-        api_configured=True,
-    )
-    api_message = app_module._random_empty_message(selection, api)
-    assert "лимит" in api_message.casefold()
-    assert "более глубокие страницы" not in api_message.casefold()
+    assert "random-сессии" in exhausted_message
+    assert "«Искать»" in exhausted_message
+    assert "более глубокие страницы" not in exhausted_message.casefold()
 
 
 def test_random_selection_ignores_plain_search_history_window(app_env) -> None:
@@ -1128,9 +1171,156 @@ def test_random_selection_uses_new_candidates_and_reports_shortfall(app_env) -> 
     assert "Нет новых подходящих карт" in _texts(at)
     empty_text = " ".join(str(item.value) for item in at.warning).casefold()
     assert "более глубокие страницы" not in empty_text
-    assert "api не настроен" in empty_text
+    assert "«искать»" in empty_text
+    assert "api не настроен" not in empty_text
     assert at.session_state["active_config"].to_dict() == before_config
     assert store.search_run_count() == 0
+
+
+def test_random_selection_is_local_only_with_configured_api(
+    app_env, monkeypatch
+) -> None:
+    store = Storage(app_env)
+    _seed_many_cached_maps(store, 30)
+    monkeypatch.setenv("OSU_CLIENT_ID", "test-client-id")
+    monkeypatch.setenv("OSU_CLIENT_SECRET", "test-client-secret")
+    calls: list[str] = []
+
+    def forbid(*args, **kwargs):
+        calls.append("network")
+        raise AssertionError("random selection must not use the osu! API")
+
+    # AppTest executes app.py in its own module, so patch the source modules
+    # that the script imports rather than the test-process app module.
+    monkeypatch.setattr(osu_api, "OsuApiClient", forbid)
+    monkeypatch.setattr(discovery.DiscoveryEngine, "run", forbid)
+
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.run()
+    _number(at, "random_size").set_value(12).run()
+    for _ in range(3):
+        _button(at, "random_selection").click().run()
+        assert not at.exception, _texts(at)
+        result = _search_result(at)
+        assert result is not None
+        assert result.origin == "local_cache"
+        assert result.api_requests == 0
+
+    assert calls == []
+    assert store.search_run_count() == 0
+    assert at.session_state["random_meta"]["api_requests"] == 0
+    assert at.session_state["random_meta"]["local_considered"] == 30
+
+
+def test_random_selection_empty_catalog_is_honest_and_prompt(
+    app_env, monkeypatch
+) -> None:
+    monkeypatch.setenv("OSU_CLIENT_ID", "test-client-id")
+    monkeypatch.setenv("OSU_CLIENT_SECRET", "test-client-secret")
+    calls: list[str] = []
+
+    def forbid(*args, **kwargs):
+        calls.append("network")
+        raise AssertionError("empty local catalog must not trigger discovery")
+
+    monkeypatch.setattr(osu_api, "OsuApiClient", forbid)
+    monkeypatch.setattr(discovery.DiscoveryEngine, "run", forbid)
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.run()
+    _button(at, "random_selection").click().run()
+
+    assert not at.exception, _texts(at)
+    text = _texts(at)
+    assert "Локальный каталог пуст" in text
+    assert "«Искать»" in text
+    assert "более глубокие страницы" not in text.casefold()
+    assert calls == []
+    store = Storage(app_env)
+    assert store.beatmapset_count() == 0
+    assert store.search_run_count() == 0
+
+
+def test_empty_local_catalog_without_credentials_is_honest(app_env) -> None:
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.run()
+    _button(at, "random_selection").click().run()
+    assert not at.exception, _texts(at)
+    text = _texts(at)
+    assert "Локальный каталог пуст" in text
+    assert "«Искать»" in text
+    store = Storage(app_env)
+    assert store.beatmapset_count() == 0
+    assert store.search_run_count() == 0
+
+
+def test_explicit_search_populates_catalog_for_later_local_random(
+    app_env, monkeypatch
+) -> None:
+    sets = tuple(
+        make_beatmapset(
+            500 + index,
+            title=f"Online map {index}",
+            beatmaps=(
+                make_beatmap(
+                    5000 + index,
+                    500 + index,
+                    stars=5.1 + index / 100,
+                    total_length=110,
+                    hit_length=100,
+                ),
+            ),
+        )
+        for index in range(1, 6)
+    )
+    monkeypatch.setenv("OSU_CLIENT_ID", "test-client-id")
+    monkeypatch.setenv("OSU_CLIENT_SECRET", "test-client-secret")
+
+    class FakeClient(_FakeSearchApi):
+        def __init__(self, api_config, *args, **kwargs):
+            super().__init__(sets)
+
+    monkeypatch.setattr(osu_api, "OsuApiClient", FakeClient)
+
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.run()
+    _button(at, "run_search").click().run()
+    assert not at.exception, _texts(at)
+    online = _search_result(at)
+    assert online is not None and online.origin == "api"
+    assert online.count == 5
+    assert online.api_requests > 0
+
+    store = Storage(app_env)
+    assert store.beatmapset_count() == 5
+    assert store.search_run_count() == 1
+
+    calls: list[str] = []
+
+    def forbid(*args, **kwargs):
+        calls.append("network")
+        raise AssertionError("random selection must stay local")
+
+    # The script imported the fake class into its own namespace; patch the
+    # class methods and the engine so any accidental network work is caught.
+    monkeypatch.setattr(FakeClient, "search_beatmapsets", forbid)
+    monkeypatch.setattr(FakeClient, "get_beatmap_attributes", forbid)
+    monkeypatch.setattr(discovery.DiscoveryEngine, "run", forbid)
+    _button(at, "random_selection").click().run()
+
+    assert not at.exception, _texts(at)
+    local = _search_result(at)
+    assert local is not None
+    assert local.origin == "local_cache"
+    assert local.api_requests == 0
+    assert {item.beatmapset.id for item in local.scored} == {
+        501,
+        502,
+        503,
+        504,
+        505,
+    }
+    assert calls == []
+    assert store.search_run_count() == 1
 
 
 def test_random_avoid_seen_off_allows_repeating_the_last_selection(app_env) -> None:
@@ -1242,6 +1432,9 @@ def test_random_selection_keeps_strict_filters(app_env) -> None:
     assert result.count == 2
     assert 99 not in {item.beatmapset.id for item in result.scored}
     assert result.origin == "local_cache"
+    assert result.api_requests == 0
+    assert at.session_state["random_meta"]["local_strict_passed"] == 2
+    assert store.search_run_count() == 0
 
 
 def test_random_pick_is_strict_and_repeatable_from_current_result(app_env) -> None:

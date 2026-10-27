@@ -456,32 +456,67 @@ class Storage:
                 result[set_id] = beatmapset
         return result
 
-    def list_beatmapsets(self, limit: int = 5000) -> list[Beatmapset]:
+    def list_beatmapsets(
+        self, limit: int = 5000, *, balanced: bool = False
+    ) -> list[Beatmapset]:
         """Return stored beatmapsets for offline re-ranking.
 
-        The result is newest-first and bounded. Beatmap rows are loaded once
-        and grouped in memory instead of issuing one query per set.
+        The default result is newest-first and bounded. ``balanced=True``
+        instead takes an evenly spaced deterministic sample across the whole
+        id range, so a catalog larger than ``limit`` is not permanently
+        represented by its newest slice only. Beatmap rows are loaded only for
+        the selected sets and in bounded chunks.
         """
         bounded = max(1, min(int(limit), 20000))
         with self.connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM beatmapsets ORDER BY fetched_at DESC, id DESC LIMIT ?",
-                (bounded,),
-            ).fetchall()
+            if balanced:
+                rows = conn.execute(
+                    """
+                    WITH ranked AS (
+                        SELECT *,
+                               ROW_NUMBER() OVER (ORDER BY id) - 1 AS _row,
+                               COUNT(*) OVER () AS _total
+                        FROM beatmapsets
+                    )
+                    SELECT * FROM ranked
+                    WHERE _total <= ?
+                       OR ((_row + 1) * ?) / _total >
+                          (_row * ?) / _total
+                    ORDER BY id
+                    LIMIT ?
+                    """,
+                    (bounded, bounded, bounded, bounded),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM beatmapsets "
+                    "ORDER BY fetched_at DESC, id DESC LIMIT ?",
+                    (bounded,),
+                ).fetchall()
             if not rows:
                 return []
-            selected = {int(row["id"]) for row in rows}
-            beatmap_rows = conn.execute(
-                "SELECT * FROM beatmaps "
-                "ORDER BY beatmapset_id, difficulty_rating IS NULL, difficulty_rating"
-            ).fetchall()
+            selected = [int(row["id"]) for row in rows]
             grouped: dict[int, list[sqlite3.Row]] = {}
-            for beatmap_row in beatmap_rows:
-                set_id = int(beatmap_row["beatmapset_id"])
-                if set_id in selected:
-                    grouped.setdefault(set_id, []).append(beatmap_row)
+            # SQLite builds allow a large parameter list, but chunking keeps
+            # this safe on older builds and bounds each statement.
+            for start in range(0, len(selected), 400):
+                chunk = selected[start : start + 400]
+                placeholders = ",".join("?" for _ in chunk)
+                beatmap_rows = conn.execute(
+                    "SELECT * FROM beatmaps "
+                    f"WHERE beatmapset_id IN ({placeholders}) "
+                    "ORDER BY beatmapset_id, difficulty_rating IS NULL, "
+                    "difficulty_rating",
+                    chunk,
+                ).fetchall()
+                for beatmap_row in beatmap_rows:
+                    grouped.setdefault(
+                        int(beatmap_row["beatmapset_id"]), []
+                    ).append(beatmap_row)
             return [
-                self._row_to_beatmapset(conn, row, grouped.get(int(row["id"]), []))
+                self._row_to_beatmapset(
+                    conn, row, grouped.get(int(row["id"]), [])
+                )
                 for row in rows
             ]
 

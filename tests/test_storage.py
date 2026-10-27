@@ -64,6 +64,23 @@ def test_beatmapset_roundtrip_with_unicode(storage: Storage) -> None:
     assert len(loaded.beatmaps) == 2
 
 
+def test_balanced_catalog_listing_spreads_across_ids(storage: Storage) -> None:
+    storage.save_beatmapsets(
+        [make_beatmapset(index) for index in range(1, 101)]
+    )
+    newest = storage.list_beatmapsets(limit=10)
+    balanced = storage.list_beatmapsets(limit=10, balanced=True)
+    newest_ids = [item.id for item in newest]
+    balanced_ids = [item.id for item in balanced]
+    assert len(balanced_ids) == 10
+    assert balanced_ids != newest_ids
+    # Newest-first would contain only ids 100..91; the balanced sample must
+    # reach the older part of the catalog as well.
+    assert min(balanced_ids) <= 10
+    assert max(balanced_ids) >= 90
+    assert all(item.beatmaps for item in balanced)
+
+
 def test_refetch_does_not_duplicate_and_keeps_user_data(storage: Storage) -> None:
     beatmapset = make_beatmapset(1, title="Old")
     storage.save_beatmapset(beatmapset)

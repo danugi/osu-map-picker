@@ -27,7 +27,12 @@ from models import (
     SearchQuery,
     SequenceAnalysis,
 )
-from osu_api import OsuForbiddenError, OsuServerError
+from osu_api import (
+    OsuApiError,
+    OsuForbiddenError,
+    OsuNetworkError,
+    OsuServerError,
+)
 from ranking import RankingContext
 from storage import Storage
 
@@ -173,6 +178,112 @@ def test_search_cache_avoids_second_network_request(storage: Storage) -> None:
     assert second.cache_hits == 3
     assert len(api.search_calls) == 3
     assert [item.beatmapset.id for item in second.scored] == [1]
+
+
+def test_failed_page_attempts_consume_the_request_budget(storage: Storage) -> None:
+    def fail(query: SearchQuery) -> SearchPage:
+        raise OsuApiError("simulated API error", 400)
+
+    api = StubApi(fail)
+    engine = DiscoveryEngine(api, storage, settings(max_requests=2))
+    result = engine.run(
+        Filters(statuses=["ranked", "loved", "qualified"]),
+        RankingSettings(),
+    )
+    assert len(api.search_calls) == 2
+    assert result.api_requests == 2
+    assert result.requests_failed == 2
+    assert result.requests_succeeded == 0
+    assert result.complete is False
+    assert result.stop_reason == "request_budget"
+    assert result.errors
+
+
+def test_persistent_network_failure_fails_fast_across_strategies(
+    storage: Storage,
+) -> None:
+    def fail(query: SearchQuery) -> SearchPage:
+        raise OsuNetworkError("simulated timeout")
+
+    api = StubApi(fail)
+    engine = DiscoveryEngine(api, storage, settings(max_requests=12))
+    result = engine.run(
+        Filters(statuses=["ranked", "loved", "qualified"]),
+        RankingSettings(),
+    )
+    # The first strategy already exhausted the client's finite retries. The
+    # remaining strategies must not repeat the same timeout cost.
+    assert len(api.search_calls) == 1
+    assert api.attribute_calls == []
+    assert result.api_requests == 1
+    assert result.requests_failed == 1
+    assert result.complete is False
+    assert result.stop_reason == "network_failure"
+    assert any("Сетевые запросы" in note for note in result.notes)
+
+
+def test_cache_hits_do_not_consume_a_tight_request_budget(
+    storage: Storage,
+) -> None:
+    api = StubApi(
+        lambda query: SearchPage(beatmapsets=(make_beatmapset(1),))
+    )
+    warm = DiscoveryEngine(api, storage, settings(max_requests=3))
+    first = warm.run(Filters(), RankingSettings())
+    assert first.api_requests == 3
+    assert len(api.search_calls) == 3
+
+    tight = DiscoveryEngine(api, storage, settings(max_requests=1))
+    second = tight.run(Filters(), RankingSettings())
+    assert second.api_requests == 0
+    assert second.requests_succeeded == 0
+    assert second.requests_failed == 0
+    assert second.cache_hits == 3
+    assert second.complete is True
+    assert len(api.search_calls) == 3
+
+
+def test_deadline_stops_before_network_work(storage: Storage) -> None:
+    api = StubApi(
+        lambda query: SearchPage(beatmapsets=(make_beatmapset(1),))
+    )
+    engine = DiscoveryEngine(
+        api,
+        storage,
+        settings(max_requests=10),
+        deadline_seconds=0,
+    )
+    result = engine.run(Filters(), RankingSettings())
+    assert api.search_calls == []
+    assert api.attribute_calls == []
+    assert result.api_requests == 0
+    assert result.complete is False
+    assert result.stop_reason == "deadline"
+    assert result.deadline_seconds == 0
+    assert any("Дедлайн" in note for note in result.notes)
+
+
+def test_failed_attribute_request_counts_against_budget(
+    storage: Storage,
+) -> None:
+    beatmapset = make_beatmapset(1)
+    beatmap_id = beatmapset.beatmaps[0].id
+    api = StubApi(
+        lambda query: SearchPage(beatmapsets=(beatmapset,)),
+        attributes={beatmap_id: OsuApiError("simulated 400", 400)},
+    )
+    engine = DiscoveryEngine(
+        api,
+        storage,
+        settings(max_requests=2, fetch_attributes_limit=1),
+    )
+    result = engine.run(Filters(), RankingSettings())
+    assert api.attribute_calls == [beatmap_id]
+    assert result.api_requests == 2
+    assert result.requests_succeeded == 1
+    assert result.requests_failed == 1
+    assert result.complete is False
+    assert result.stop_reason in {"request_budget", "request_failed"}
 
 
 def test_attribute_budget_is_reserved_before_pagination(storage: Storage) -> None:

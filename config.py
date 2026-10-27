@@ -31,6 +31,11 @@ DEFAULT_REQUEST_TIMEOUT = 20.0
 DEFAULT_MIN_REQUEST_INTERVAL = 1.1  # osu! asks for <= 60 requests/minute
 DEFAULT_MAX_RETRIES = 2
 DEFAULT_CACHE_TTL_MINUTES = 30
+# An explicit online search also has an overall time budget. The deadline is
+# checked between network operations, so it cannot interrupt an in-flight
+# request; worst-case overrun is bounded by one request chain (timeout and
+# retries) plus local ranking.
+DEFAULT_DISCOVERY_DEADLINE_SECONDS = 120.0
 
 # --- Filter defaults (the user's starting profile) ------------------------
 DEFAULT_MODES = ("osu",)
