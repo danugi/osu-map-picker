@@ -15,6 +15,7 @@ import app as app_module
 import appearance
 import discovery
 import gameplay
+import library
 import osu_api
 import patterns
 import presets
@@ -1747,6 +1748,126 @@ def test_library_pattern_filter_follows_active_preset(app_env) -> None:
         item for item in at.multiselect if item.key == "library_preset_patterns"
     )
     assert widget.options == ["Стримы", "Высокая плотность"]
+
+
+def test_library_preview_keeps_selection_and_library_state(app_env) -> None:
+    store = Storage(app_env)
+    beatmaps = tuple(
+        make_beatmap(3000 + index, 30, version=f"Hidden {index}")
+        for index in range(1, 6)
+    )
+    store.save_beatmapset(
+        make_beatmapset(30, title="Long Library Set", beatmaps=beatmaps)
+    )
+    sequence = SequenceAnalysis(
+        analyzed_notes=50,
+        total_notes=50,
+        labels=("streams",),
+    )
+    for beatmap in beatmaps:
+        store.save_analysis(
+            beatmap.id,
+            status="measured",
+            source="cache",
+            analyzer_version=patterns.ANALYZER_VERSION,
+            file_mtime_ns=1,
+            file_size=1,
+            scope="",
+            sequence_json=analysis.sequence_to_json(sequence),
+        )
+    hidden = beatmaps[-1]
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.run()
+    at.sidebar.selectbox[0].select("Discovery").run()
+    at.session_state["nav"] = "library"
+    at.run()
+    query = next(
+        item for item in at.text_input if item.key == "library_query"
+    )
+    query.set_value("Long Library Set").run()
+    assert not at.exception, _texts(at)
+    assert _button(at, f"library_preview_{hidden.id}") is not None
+    _button(at, f"library_preview_{hidden.id}").click().run()
+    assert not at.exception, _texts(at)
+    entry = at.session_state["library_preview_entry"]
+    assert entry.beatmap_id == hidden.id
+    assert entry.version == "Hidden 5"
+    assert at.session_state["library_query"] == "Long Library Set"
+    preset_id = at.session_state["active_preset_id"]
+    assert at.sidebar.selectbox[0] is not None
+    _button(at, "close_library_preview").click().run()
+    assert not at.exception, _texts(at)
+    assert "library_preview_entry" not in at.session_state
+    assert at.session_state["library_query"] == "Long Library Set"
+    assert at.session_state["active_preset_id"] == preset_id
+    assert at.sidebar.selectbox[0] is not None
+
+
+def _library_entry_for_test(store: Storage, set_id: int):
+    page = library.query_sets(
+        store,
+        library.LibraryFilters(
+            scope="all",
+            set_ids=(set_id,),
+            per_page=12,
+        ),
+    )
+    return page.sets[0].entries[0]
+
+
+def test_library_preview_uses_cache_without_network(app_env, monkeypatch):
+    store = Storage(app_env)
+    _seed_app_library(store, 1)
+    entry = _library_entry_for_test(store, 1)
+    cache = app_module._gameplay_cache_dir(store)
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / f"{entry.beatmap_id}.osu").write_text(
+        make_osu(
+            [(1000 + index * 125, 100, 100) for index in range(12)]
+        ),
+        encoding="utf-8",
+    )
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("cached preview attempted a network request")
+
+    monkeypatch.setattr(gameplay.httpx, "get", forbidden)
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.session_state["nav"] = "library"
+    at.session_state["library_query"] = "Library Song 1"
+    at.session_state["library_preview_entry"] = entry
+    at.run()
+    assert not at.exception, _texts(at)
+    text = _texts(at)
+    assert "локальном кэше" in text
+    assert "Library Song 1" in text
+    assert any(button.key == "close_library_preview" for button in at.button)
+
+
+def test_library_preview_error_does_not_destroy_browsing(
+    app_env, monkeypatch
+):
+    store = Storage(app_env)
+    _seed_app_library(store, 2)
+    entry = _library_entry_for_test(store, 1)
+    monkeypatch.setattr(
+        gameplay,
+        "load_preview",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            gameplay.GameplayError("osu! вернул HTTP 404.")
+        ),
+    )
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.session_state["nav"] = "library"
+    at.session_state["library_query"] = "Library Song 1"
+    at.session_state["library_preview_entry"] = entry
+    at.run()
+    assert not at.exception, _texts(at)
+    text = _texts(at)
+    assert "Превью недоступно" in text
+    assert "Library Song 1" in text
+    assert any(button.key == "close_library_preview" for button in at.button)
+    assert at.session_state["library_query"] == "Library Song 1"
 
 
 def test_library_scope_filter_is_database_backed(app_env) -> None:

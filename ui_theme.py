@@ -24,28 +24,28 @@ class ThemePalette:
 
 PALETTES = {
     "modern_glass": ThemePalette(
-        base="#17161B",
-        base_alt="#211F26",
-        panel_rgb=(33, 31, 38),
-        text="#F4F0F5",
-        muted="#B9B4C0",
-        border="rgba(255, 255, 255, 0.09)",
+        base="#19131F",
+        base_alt="#241A2B",
+        panel_rgb=(36, 26, 43),
+        text="#F7F0F8",
+        muted="#C4B4CC",
+        border="rgba(73, 54, 79, 0.78)",
     ),
     "osu_minimal": ThemePalette(
-        base="#141319",
-        base_alt="#1E1C23",
-        panel_rgb=(30, 28, 35),
-        text="#F4F0F5",
-        muted="#B9B4C0",
-        border="rgba(255, 255, 255, 0.08)",
+        base="#17111D",
+        base_alt="#211827",
+        panel_rgb=(33, 24, 39),
+        text="#F7F0F8",
+        muted="#C4B4CC",
+        border="rgba(73, 54, 79, 0.70)",
     ),
     "dark_clean": ThemePalette(
-        base="#17191F",
-        base_alt="#1F222A",
-        panel_rgb=(31, 34, 42),
-        text="#F2F4F8",
-        muted="#AEB4C0",
-        border="rgba(190, 200, 218, 0.10)",
+        base="#1B1620",
+        base_alt="#271D2E",
+        panel_rgb=(39, 29, 46),
+        text="#F7F0F8",
+        muted="#C4B4CC",
+        border="rgba(73, 54, 79, 0.68)",
     ),
 }
 
@@ -112,11 +112,12 @@ def build_theme_css(
   --osu-accent-rgb: {accent_rgb[0]}, {accent_rgb[1]}, {accent_rgb[2]};
   --osu-accent-text: {accent_text};
   --osu-accent-soft: {accent_soft};
+  --osu-lavender: #B9A3D0;
   --osu-bg: {palette.base};
   --osu-bg-alt: {palette.base_alt};
-  --osu-surface: #211F26;
-  --osu-surface-raised: #292730;
-  --osu-surface-input: #1E1C23;
+  --osu-surface: #241A2B;
+  --osu-surface-raised: #302239;
+  --osu-surface-input: #211827;
   --osu-panel: {panel};
   --osu-panel-strong: {panel_strong};
   --osu-panel-soft: {panel_soft};
@@ -263,7 +264,7 @@ section[data-testid="stSidebar"] [role="radiogroup"] label:hover {{
 }}
 .stButton > button:hover, .stDownloadButton > button:hover, .stLinkButton > a:hover,
 [data-testid="stFormSubmitButton"] > button:hover {{
-  background: #302D38 !important;
+  background: #3A2B44 !important;
   border-color: rgba(var(--osu-accent-rgb), 0.45) !important;
   color: var(--osu-text) !important;
 }}
@@ -281,7 +282,7 @@ section[data-testid="stSidebar"] [role="radiogroup"] label:hover {{
 .stButton > button:disabled,
 [data-testid="stFormSubmitButton"] > button:disabled {{
   opacity: 0.45 !important;
-  background: #221F27 !important;
+  background: #1B1520 !important;
   border-color: var(--osu-border) !important;
   color: var(--osu-muted) !important;
 }}
@@ -499,7 +500,7 @@ hr {{
   margin: 0.75rem 0 0.45rem;
 }}
 .osu-stat {{
-  background: rgba(8, 6, 11, 0.34);
+  background: rgba(48, 34, 57, 0.55);
   border: 1px solid var(--osu-border);
   border-radius: var(--osu-radius-sm);
   padding: 0.48rem 0.58rem;
@@ -558,7 +559,7 @@ hr {{
   bottom: 0.55rem;
   border-radius: 4px;
   padding: 0.18rem 0.45rem;
-  background: rgba(17, 16, 20, 0.86);
+  background: rgba(25, 19, 31, 0.90);
   border: 1px solid rgba(255,255,255,0.16);
   font-size: 0.7rem;
   font-weight: 650;
@@ -658,7 +659,82 @@ hr {{
 <style>
 /* Website shell and local-library layout. */
 [data-testid="stHeader"] {
+  display: block !important;
+  height: 0 !important;
+  min-height: 0 !important;
+  background: transparent !important;
+  pointer-events: none;
+}
+[data-testid="stMainMenu"],
+[data-testid="stDecoration"],
+[data-testid="stStatusWidget"],
+[data-testid="stToolbarActions"],
+[data-testid="stAppDeployButton"] {
   display: none !important;
+}
+[data-testid="stToolbar"] {
+  display: flex !important;
+  width: 0 !important;
+  height: 0 !important;
+  overflow: visible !important;
+  background: transparent !important;
+  pointer-events: none;
+}
+[data-testid="stSidebarCollapseButton"],
+[data-testid="stSidebarCollapseButton"] button {
+  visibility: visible !important;
+  opacity: 1 !important;
+}
+[data-testid="stSidebarCollapseButton"] button {
+  position: fixed !important;
+  top: 16px !important;
+  left: 228px !important;
+  z-index: 1000;
+  width: 34px !important;
+  height: 34px !important;
+  min-height: 34px !important;
+  padding: 0 !important;
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  background: var(--osu-surface-raised) !important;
+  color: var(--osu-text) !important;
+  border: 1px solid var(--osu-border-strong) !important;
+  border-radius: var(--osu-radius-btn) !important;
+  box-shadow: none !important;
+}
+[data-testid="stSidebarCollapseButton"] button:hover {
+  border-color: rgba(var(--osu-accent-rgb), 0.45) !important;
+}
+[data-testid="stHeader"] button[aria-label="Collapse sidebar"],
+[data-testid="stHeader"] button[aria-label="Expand sidebar"] {
+  pointer-events: auto;
+  position: fixed;
+  top: 16px;
+  z-index: 1000;
+  width: 34px;
+  height: 34px;
+  min-height: 34px;
+  padding: 0 !important;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--osu-surface-raised) !important;
+  color: var(--osu-text) !important;
+  border: 1px solid var(--osu-border-strong) !important;
+  border-radius: var(--osu-radius-btn) !important;
+  box-shadow: none !important;
+}
+[data-testid="stHeader"] button[aria-label="Collapse sidebar"] {
+  left: 228px;
+}
+[data-testid="stHeader"] button[aria-label="Expand sidebar"] {
+  left: 16px;
+}
+[data-testid="stHeader"] button[aria-label="Collapse sidebar"]:hover,
+[data-testid="stHeader"] button[aria-label="Expand sidebar"]:hover {
+  background: var(--osu-surface-raised) !important;
+  border-color: rgba(var(--osu-accent-rgb), 0.45) !important;
 }
 [data-testid="stAppViewContainer"] > .main {
   padding-top: 0 !important;
@@ -672,7 +748,7 @@ section[data-testid="stSidebar"] {
   width: 274px !important;
   min-width: 274px !important;
   border-right: 1px solid var(--osu-border) !important;
-  background: var(--osu-bg) !important;
+  background: var(--osu-surface) !important;
 }
 section[data-testid="stSidebar"] .block-container {
   padding: 1.25rem 1rem 2rem !important;
@@ -736,7 +812,7 @@ section[data-testid="stSidebar"] .block-container {
   border-color: var(--osu-border-strong) !important;
 }
 .stButton > button[kind="secondary"]:hover {
-  background: #302D38 !important;
+  background: #3A2B44 !important;
   border-color: rgba(var(--osu-accent-rgb), 0.40) !important;
 }
 .site-header {
@@ -771,7 +847,7 @@ section[data-testid="stSidebar"] .block-container {
   min-width: 0;
 }
 .site-brand-kicker {
-  color: var(--osu-muted);
+  color: var(--osu-lavender);
   font-size: 0.7rem;
   font-weight: 600;
 }
@@ -843,7 +919,7 @@ section[data-testid="stSidebar"] .block-container {
   border-color: rgba(var(--osu-accent-rgb), 0.28) !important;
 }
 .page-kicker {
-  color: var(--osu-accent);
+  color: var(--osu-lavender);
   font-size: 0.72rem;
   font-weight: 600;
   letter-spacing: 0.02em;
@@ -902,10 +978,37 @@ h2, [data-testid="stHeadingWithActionElements"] h2 {
 .library-result-head strong { color: var(--osu-text); font-size: 1.05rem; }
 .library-result-head span { margin-left: auto; color: var(--osu-muted); font-size: 0.75rem; }
 [class*="st-key-library_set_"] [data-testid="stVerticalBlockBorderWrapper"] {
-  background: rgba(17, 14, 22, 0.96) !important;
+  background: var(--osu-surface) !important;
   border-color: var(--osu-border) !important;
   border-radius: 9px !important;
   box-shadow: none !important;
+}
+[class*="st-key-library_preview_panel"] {
+  margin: 1rem 0 1.1rem;
+}
+[class*="st-key-library_preview_panel"] [data-testid="stVerticalBlockBorderWrapper"] {
+  background: var(--osu-surface) !important;
+  border-color: var(--osu-border) !important;
+}
+.preview-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+}
+.preview-kicker {
+  color: var(--osu-accent);
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+.preview-title {
+  color: var(--osu-text);
+  font-size: 1.08rem;
+  font-weight: 700;
+  line-height: 1.25;
+}
+.preview-sub {
+  color: var(--osu-muted);
+  font-size: 0.76rem;
 }
 .library-cover {
   display: block;
@@ -957,7 +1060,7 @@ h2, [data-testid="stHeadingWithActionElements"] h2 {
   gap: 0.4rem;
 }
 .library-status, .library-count {
-  background: rgba(17, 16, 20, 0.88);
+  background: rgba(25, 19, 31, 0.92);
   border: 1px solid rgba(255,255,255,0.14);
   border-radius: 4px;
   color: #fff;

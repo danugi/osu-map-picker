@@ -144,10 +144,18 @@ def test_three_themes_have_distinct_stylesheets() -> None:
     }
     assert set(css) == {"modern_glass", "osu_minimal", "dark_clean"}
     assert "osu! Minimal" in ui_theme.THEME_LABELS["osu_minimal"]
-    assert "--osu-bg: #141319" in css["osu_minimal"]
-    assert "--osu-bg: #17191F" in css["dark_clean"]
-    assert "--osu-bg: #17161B" in css["modern_glass"]
+    assert "--osu-bg: #17111D" in css["osu_minimal"]
+    assert "--osu-bg: #1B1620" in css["dark_clean"]
+    assert "--osu-bg: #19131F" in css["modern_glass"]
     assert len(set(css.values())) == 3
+
+
+def test_theme_keeps_sidebar_open_control_visible() -> None:
+    css = ui_theme.build_theme_css(AppearanceSettings(), None)
+    assert 'button[aria-label="Expand sidebar"]' in css
+    assert 'button[aria-label="Collapse sidebar"]' in css
+    assert '[data-testid="stSidebarCollapseButton"]' in css
+    assert '[data-testid="stToolbar"] {\n  display: flex !important;' in css
 
 
 def test_delete_and_reset_remove_local_files(storage: Storage) -> None:

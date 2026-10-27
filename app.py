@@ -3484,6 +3484,14 @@ def _library_patterns_html(entry: library.LibraryEntry) -> str:
     return f"<div class='library-patterns muted'>{text}</div>"
 
 
+def _set_library_preview(entry: library.LibraryEntry) -> None:
+    st.session_state["library_preview_entry"] = entry
+
+
+def _clear_library_preview() -> None:
+    st.session_state.pop("library_preview_entry", None)
+
+
 def _render_library_entry(
     store: Storage,
     entry: library.LibraryEntry,
@@ -3538,7 +3546,7 @@ def _render_library_entry(
             use_container_width=True,
         ):
             _library_details_dialog(entry)
-        if actions[1].button(
+        actions[1].button(
             "▶",
             key=f"library_preview_{entry.beatmap_id}",
             help=(
@@ -3548,15 +3556,23 @@ def _render_library_entry(
             ),
             disabled=entry.mode != "osu",
             use_container_width=True,
-        ):
-            _library_preview_dialog(store, entry)
+            on_click=_set_library_preview,
+            args=(entry,),
+        )
         actions[2].link_button(
             "osu!",
             entry.beatmap_url,
             use_container_width=True,
         )
+    selected_preview = st.session_state.get("library_preview_entry")
+    if (
+        isinstance(selected_preview, library.LibraryEntry)
+        and selected_preview.beatmap_id == entry.beatmap_id
+    ):
+        _render_library_preview_panel(store, entry)
 
 
+@st.fragment
 def _render_library_set(
     store: Storage,
     set_item: library.LibrarySet,
@@ -3588,7 +3604,11 @@ def _render_library_set(
         for entry in visible:
             _render_library_entry(store, entry, current_scores)
         if hidden:
-            with st.expander(f"Ещё {len(hidden)} сложностей", expanded=False):
+            with st.expander(
+                f"Ещё {len(hidden)} сложностей",
+                expanded=False,
+                key=f"library_more_{set_item.beatmapset_id}",
+            ):
                 for entry in hidden:
                     _render_library_entry(store, entry, current_scores)
 
@@ -3672,31 +3692,60 @@ def _library_details_dialog(entry: library.LibraryEntry) -> None:
     st.link_button("Открыть difficulty на osu!", entry.beatmap_url)
 
 
-@st.dialog("Превью геймплея", width="large")
-def _library_preview_dialog(
+def _render_library_preview_panel(
     store: Storage, entry: library.LibraryEntry
 ) -> None:
-    st.caption(
-        f"{entry.display_title} · [{entry.version}] · "
-        f"{entry.stars or '?'}★. Загружается публичный .osu именно этой "
-        "difficulty."
-    )
-    try:
-        with st.spinner("Загружаю .osu для превью…"):
-            preview = gameplay.load_preview(
-                entry.beatmap_id, _gameplay_cache_dir(store)
-            )
-    except gameplay.GameplayError as exc:
-        st.error(f"Превью недоступно: {exc}")
-        st.caption(
-            "Файл мог быть удалён или скрыт. Приложение не подменяет "
-            "геймплей обложкой или случайными нотами."
+    """Stable page-level preview; never covers navigation or the library."""
+
+    with st.container(border=True, key="library_preview_panel"):
+        heading = st.columns([5.0, 1.0])
+        heading[0].markdown(
+            "<div class='preview-heading'>"
+            "<div class='preview-kicker'>ПРЕВЬЮ ГЕЙМПЛЕЯ</div>"
+            f"<div class='preview-title'>{html.escape(entry.display_title)}"
+            f" · [{html.escape(entry.version or 'unknown')}]</div>"
+            f"<div class='preview-sub'>{html.escape(entry.display_artist)} · "
+            f"{entry.stars:.2f}★ · {entry.beatmap_id}</div>"
+            "</div>",
+            unsafe_allow_html=True,
         )
-        return
-    st.html(
-        gameplay.preview_html(preview),
-        unsafe_allow_javascript=True,
-    )
+        heading[1].button(
+            "×",
+            key="close_library_preview",
+            help="Закрыть превью и вернуться к библиотеке",
+            use_container_width=True,
+            on_click=_clear_library_preview,
+        )
+        cache_path = (
+            _gameplay_cache_dir(store) / f"{int(entry.beatmap_id)}.osu"
+        )
+        if cache_path.exists():
+            st.caption(
+                "Файл уже есть в локальном кэше: повторная загрузка и "
+                "API-поиск не выполняются."
+            )
+        else:
+            st.caption(
+                "Публичный .osu будет загружен один раз и сохранён в "
+                "локальном кэше для следующих превью."
+            )
+        try:
+            with st.spinner("Загружаю .osu для превью…"):
+                preview = gameplay.load_preview(
+                    entry.beatmap_id, _gameplay_cache_dir(store)
+                )
+        except gameplay.GameplayError as exc:
+            st.error(f"Превью недоступно: {exc}")
+            st.caption(
+                "Файл мог быть удалён или скрыт. Library, фильтры и "
+                "остальные карточки не затронуты."
+            )
+            st.link_button("Открыть difficulty на osu!", entry.beatmap_url)
+            return
+        st.html(
+            gameplay.preview_html(preview),
+            unsafe_allow_javascript=True,
+        )
 
 
 def _library_counts_html(counts: dict[str, int]) -> str:
@@ -3909,6 +3958,15 @@ def page_library(store: Storage, cfg: PresetConfig) -> None:
         st.error(f"Библиотека не загрузилась: {exc}")
         return
     st.session_state["library_page"] = page.page
+    preview_entry = st.session_state.get("library_preview_entry")
+    if isinstance(preview_entry, library.LibraryEntry):
+        visible_ids = {
+            entry.beatmap_id
+            for set_item in page.sets
+            for entry in set_item.entries
+        }
+        if preview_entry.beatmap_id not in visible_ids:
+            st.session_state.pop("library_preview_entry", None)
     current = st.session_state.get("result")
     current_scores = (
         {item.beatmap.id: item for item in current.scored}
@@ -5440,6 +5498,8 @@ def main() -> None:
 
     _sidebar(store)
     page = _site_header(store)
+    if page != "library":
+        st.session_state.pop("library_preview_entry", None)
     cfg: PresetConfig = _active_config(store)
 
     flash = st.session_state.pop("_flash", None)
