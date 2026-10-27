@@ -16,8 +16,14 @@ import appearance
 import discovery
 import gameplay
 import osu_api
+import patterns
 import presets
-from models import DifficultyAttributes, DiscoveryResult, SearchPage
+from models import (
+    DifficultyAttributes,
+    DiscoveryResult,
+    SearchPage,
+    SequenceAnalysis,
+)
 from randomizer import RandomSelection
 from storage import Storage
 from skillsets import SKILL_IDS
@@ -26,17 +32,19 @@ from test_patterns import make_osu
 APP = str(Path(__file__).resolve().parents[1] / "app.py")
 NAV = (
     "search",
+    "library",
     "analysis",
     "favorites",
     "history",
     "settings",
 )
 HEADERS = (
-    "🔎 Поиск карт",
-    "🧪 Анализ и фоновая очередь",
-    "⭐ Избранное",
-    "🕘 История",
-    "⚙️ Настройки",
+    "Обзор карт",
+    "Библиотека карт",
+    "Анализ и очередь",
+    "Избранное",
+    "История",
+    "Настройки",
 )
 SETTINGS_SECTIONS = (
     "presets",
@@ -70,7 +78,7 @@ def test_app_starts_without_credentials_and_does_not_search(app_env) -> None:
     at = AppTest.from_file(APP, default_timeout=60)
     at.run()
     assert not at.exception
-    assert any("Personal osu! Map Picker" == title.value for title in at.title)
+    assert "Map Picker" in _texts(at)
     text = _texts(at)
     assert "OSU_CLIENT_ID" in text
     assert "не настроен" in text
@@ -136,7 +144,7 @@ def test_every_settings_section_renders(app_env, section: str) -> None:
     at.session_state["settings_section"] = section
     at.run()
     assert not at.exception, f"{section}: {[e.value for e in at.exception]}"
-    assert "⚙️ Настройки" in [item.value for item in at.header]
+    assert "Настройки" in [item.value for item in at.header]
     assert _versioned(at.selectbox, "settings_section").value == section
 
 
@@ -673,18 +681,18 @@ def test_navigation_is_compact_and_switches_pages(app_env) -> None:
     at.run()
     for page_id in NAV:
         assert _button(at, f"nav_{page_id}") is not None
-    assert len(NAV) == 5
+    assert len(NAV) == 6
     assert _button(at, "nav_search").proto.type == "primary"
     assert _button(at, "nav_settings").proto.type == "secondary"
     assert not any(item.key == "nav_presets" for item in at.button)
     assert not any(item.key == "nav_filters" for item in at.button)
 
     _go(at, "settings")
-    assert "⚙️ Настройки" in [header.value for header in at.header]
+    assert "Настройки" in [header.value for header in at.header]
     _versioned(at.selectbox, "settings_section").set_value("filters").run()
     assert "🧰 Фильтры" in [header.value for header in at.header]
     _go(at, "search")
-    assert "🔎 Поиск карт" in [header.value for header in at.header]
+    assert "Обзор карт" in [header.value for header in at.header]
 
 
 def test_sequential_preset_switching_loads_each_configuration(app_env) -> None:
@@ -841,7 +849,7 @@ def test_analysis_queue_processes_cached_file_and_page_reports_it(
     at.session_state["nav"] = "analysis"
     at.run()
     assert not at.exception, _texts(at)
-    assert "🧪 Анализ и фоновая очередь" in [
+    assert "Анализ и очередь" in [
         header.value for header in at.header
     ]
     labels = {metric.label for metric in at.metric}
@@ -1649,6 +1657,121 @@ def test_gameplay_preview_renders_inside_the_selected_card(
         subheader.value for subheader in card.subheader
     ]
     assert any(button.key == "close_gameplay_preview" for button in card.button)
+
+
+def _seed_app_library(store: Storage, count: int = 2) -> list[int]:
+    ids: list[int] = []
+    for index in range(1, count + 1):
+        beatmap = make_beatmap(
+            100 + index,
+            index,
+            stars=4.0 + index / 10,
+            version=f"Library {index}",
+            bpm=160 + index,
+        )
+        store.save_beatmapset(
+            make_beatmapset(
+                index,
+                title=f"Library Song {index}",
+                artist=f"Library Artist {index}",
+                creator=f"Library Mapper {index}",
+                beatmaps=(beatmap,),
+            )
+        )
+        sequence = SequenceAnalysis(
+            analyzed_notes=100,
+            total_notes=100,
+            labels=("streams", "jump_aim") if index == 1 else ("bursts",),
+        )
+        store.save_analysis(
+            beatmap.id,
+            status="measured" if index == 1 else "partial",
+            source="download",
+            analyzer_version=patterns.ANALYZER_VERSION,
+            file_mtime_ns=1,
+            file_size=1,
+            scope="" if index == 1 else "preview limit",
+            sequence_json=analysis.sequence_to_json(sequence),
+        )
+        ids.append(beatmap.id)
+    return ids
+
+
+def test_library_page_shows_database_cards_and_analysis_state(
+    app_env,
+) -> None:
+    store = Storage(app_env)
+    _seed_app_library(store, 2)
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.session_state["nav"] = "library"
+    at.run()
+    assert not at.exception, _texts(at)
+    assert "Библиотека карт" in [header.value for header in at.header]
+    text = _texts(at)
+    assert "Library Song 1" in text
+    assert "Library Song 2" in text
+    assert "streams" in text.casefold() or "стримы" in text
+    assert "частичный анализ" in text.casefold()
+    assert any(
+        button.key == "library_details_101" for button in at.button
+    )
+
+
+def test_library_scope_filter_is_database_backed(app_env) -> None:
+    store = Storage(app_env)
+    _seed_app_library(store, 2)
+    pending = make_beatmap(202, 20, version="Queued")
+    store.save_beatmapset(
+        make_beatmapset(20, title="Queued Library", beatmaps=(pending,))
+    )
+    store.enqueue_analysis([(202, 100, "test")])
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.session_state["nav"] = "library"
+    at.run()
+    assert "Library Song 1" in _texts(at)
+    assert "Queued Library" not in _texts(at)
+    at.session_state["library_scope"] = "pending"
+    at.run()
+    assert "Queued Library" in _texts(at)
+    assert "Library Song 1" not in _texts(at)
+
+
+def test_library_pagination_moves_between_local_sets(app_env) -> None:
+    store = Storage(app_env)
+    _seed_app_library(store, 14)
+    at = AppTest.from_file(APP, default_timeout=120)
+    at.session_state["nav"] = "library"
+    at.run()
+    assert not at.exception, _texts(at)
+    assert int(at.session_state["library_page"]) == 1
+    _button(at, "library_next").click().run()
+    assert not at.exception, _texts(at)
+    assert int(at.session_state["library_page"]) == 2
+    assert "Страница 2" in _texts(at)
+
+
+def test_library_empty_catalog_explains_next_step(app_env) -> None:
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.session_state["nav"] = "library"
+    at.run()
+    assert not at.exception
+    assert "Локальный каталог пуст" in _texts(at)
+
+
+def test_library_works_without_network(app_env, monkeypatch) -> None:
+    store = Storage(app_env)
+    _seed_app_library(store, 1)
+    monkeypatch.setattr(
+        "httpx.get",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("library used network")
+        ),
+    )
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.session_state["nav"] = "library"
+    at.run()
+    assert not at.exception
+    assert "Library Song 1" in _texts(at)
 
 
 def test_gameplay_preview_error_offers_the_original_mapset(

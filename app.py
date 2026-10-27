@@ -27,6 +27,7 @@ import analysis_worker
 import appearance
 import catalog
 import config
+import library
 import evidence
 import gameplay
 import presets
@@ -108,17 +109,19 @@ PATTERN_LABELS = {
 }
 NAV_ITEMS = (
     "search",
+    "library",
     "analysis",
     "favorites",
     "history",
     "settings",
 )
 NAV_LABELS = {
-    "search": "🔎 Поиск",
-    "analysis": "🧪 Анализ",
-    "favorites": "⭐ Избранное",
-    "history": "🕘 История",
-    "settings": "⚙️ Настройки",
+    "search": "Обзор",
+    "library": "Библиотека",
+    "analysis": "Анализ",
+    "favorites": "Избранное",
+    "history": "История",
+    "settings": "Настройки",
 }
 NAV_GROUPS = (("Приложение", NAV_ITEMS),)
 SETTINGS_SECTIONS = (
@@ -141,6 +144,7 @@ SETTINGS_LABELS = {
 }
 NAV_ALIASES = {
     "🔎 Поиск / Discovery": "search",
+    "Библиотека": "library",
     "🎯 Навыки": "settings",
     "🧰 Фильтры": "settings",
     "⚖️ Ранжирование": "settings",
@@ -517,8 +521,12 @@ def _normalise_nav() -> str:
 
 
 def _sidebar(store: Storage) -> str:
-    st.sidebar.title("osu! Map Picker")
-    st.sidebar.caption("Личный подбор карт, а не гарантия «меты».")
+    st.sidebar.markdown(
+        "<div class='rail-heading'>Пресет</div>"
+        "<div class='rail-caption'>Фильтры, навыки и discovery загружаются "
+        "одним профилем.</div>",
+        unsafe_allow_html=True,
+    )
 
     all_presets = store.list_presets()
     if not all_presets:
@@ -623,17 +631,6 @@ def _sidebar(store: Storage) -> str:
 
     st.sidebar.divider()
     page = _normalise_nav()
-    for page_id in NAV_ITEMS:
-        if st.sidebar.button(
-            NAV_LABELS[page_id],
-            key=f"nav_{page_id}",
-            type="primary" if page == page_id else "secondary",
-            use_container_width=True,
-        ):
-            st.session_state["nav"] = page_id
-            st.rerun()
-
-    st.sidebar.divider()
     try:
         worker = analysis_worker.worker_status(store)
     except Exception:  # noqa: BLE001 - sidebar must never block browsing
@@ -660,6 +657,69 @@ def _sidebar(store: Storage) -> str:
     )
     st.sidebar.caption(f"БД: {store.path.name}")
     return page
+
+
+def _site_header(store: Storage) -> str:
+    page = _normalise_nav()
+    try:
+        counts = library.counts(store)
+    except StorageError:
+        counts = {
+            "total": 0,
+            "analyzed": 0,
+            "partial": 0,
+            "pending": 0,
+            "failed": 0,
+            "unavailable": 0,
+        }
+    try:
+        configured = bool(config.load_api_config().configured)
+    except ValueError:
+        configured = False
+    analyzed = counts.get("analyzed", 0)
+    partial = counts.get("partial", 0)
+    total = counts.get("total", 0)
+    mode_text = "API онлайн" if configured else "только локально"
+    total_text = f"{total:,}".replace(",", " ")
+    analyzed_text = f"{analyzed + partial:,}".replace(",", " ")
+    st.markdown(
+        "<div class='site-header'>"
+        "<div class='site-brand'>"
+        "<span class='site-mark'>osu!</span>"
+        "<span class='site-brand-copy'>"
+        "<span class='site-brand-kicker'>beatmap discovery</span>"
+        "<span class='site-brand-name'>Map Picker</span>"
+        "</span></div>"
+        "<div class='site-header-meta'>"
+        f"<span class='site-stat'><strong>{total_text}</strong> difficulty</span>"
+        f"<span class='site-stat'><strong>{analyzed_text}</strong> "
+        "с анализом</span>"
+        f"<span class='site-pill {'online' if configured else 'local'}'>"
+        f"{mode_text}</span>"
+        "</div></div>",
+        unsafe_allow_html=True,
+    )
+    with st.container(key="site_nav"):
+        columns = st.columns([1.15, 1.15, 1.0, 1.0, 1.0, 1.0])
+        for index, page_id in enumerate(NAV_ITEMS):
+            if columns[index].button(
+                NAV_LABELS[page_id],
+                key=f"nav_{page_id}",
+                type="primary" if page == page_id else "secondary",
+                use_container_width=True,
+            ):
+                st.session_state["nav"] = page_id
+                st.rerun()
+    return page
+
+
+def _page_intro(kicker: str, title: str, subtitle: str) -> None:
+    st.markdown(
+        f"<div class='page-kicker'>{html.escape(kicker)}</div>",
+        unsafe_allow_html=True,
+    )
+    st.header(title)
+    st.caption(subtitle)
 
 
 # ---------------------------------------------------------------------------
@@ -1807,13 +1867,14 @@ def _render_card(
     creator = html.escape(beatmapset.creator or "неизвестно", quote=False)
     version = html.escape(beatmap.version or "unknown", quote=False)
     safe_url = html.escape(url, quote=True)
-    safe_bm_url = html.escape(bm_url, quote=True)
     cover_html = (
         "<div class='osu-cover'>"
         + (f"<img src='{cover}' alt='cover' loading='lazy' "
            "onerror=\"this.style.display='none'\">" if cover else "")
         + f"<div class='osu-cover-fallback'>{fallback}</div>"
         + f"<span class='osu-cover-badge'>★ {html.escape(stars_text)}</span>"
+        + f"<a class='osu-cover-link' href='{safe_url}' target='_blank' "
+        "rel='noopener noreferrer' aria-label='Открыть beatmapset'></a>"
         + "</div>"
     )
     header_html = (
@@ -1836,11 +1897,6 @@ def _render_card(
         f"<div class='osu-stat'><div class='k'>Length</div><div class='v'>{html.escape(length)}</div></div>"
         f"<div class='osu-stat'><div class='k'>AR / OD</div><div class='v'>{html.escape(ar)} / {html.escape(od)}</div></div>"
         f"</div>"
-        f"<div class='osu-config-line'>Как известная сложность: "
-        f"<a href='{safe_bm_url}' target='_blank' rel='noopener noreferrer'>"
-        f"{version}</a> · BPM {html.escape(bpm_text)} · "
-        f"длина {html.escape(length)} · CS {beatmap.cs if beatmap.cs is not None else '?'} "
-        f"· HP {beatmap.hp if beatmap.hp is not None else '?'}</div>"
     )
     with st.container(border=True):
         st.markdown(cover_html, unsafe_allow_html=True)
@@ -1879,6 +1935,11 @@ def _render_card(
             st.caption("Цели пресета: " + " · ".join(skill_lines))
 
         with st.expander("Почему эта карта здесь", expanded=False):
+            st.caption(
+                f"CS {beatmap.cs if beatmap.cs is not None else '?'} · "
+                f"HP {beatmap.hp if beatmap.hp is not None else '?'} · "
+                f"diff {version} · BPM {bpm_text} · длина {length}"
+            )
             _render_target_gate(scored)
             traits = scored.candidate.traits
             if traits.notes:
@@ -2552,69 +2613,62 @@ def _render_result(store: Storage, result: DiscoveryResult) -> None:
         "local_cache": "локальный кеш",
     }.get(result.origin, result.origin)
     st.caption(
-        f"{result.count} карт · источник: {source} · сетевых запросов: "
-        f"{result.api_requests} (успешно "
-        f"{getattr(result, 'requests_succeeded', 0)}, ошибок "
-        f"{getattr(result, 'requests_failed', 0)}) · HTTP-попыток: "
-        f"{getattr(result, 'http_attempts', 0)} (с retries) · OAuth: "
-        f"{getattr(result, 'oauth_requests', 0)} · страниц: "
-        f"{getattr(result, 'pages_attempted', 0)} · кэш-хитов поиска: "
-        f"{result.cache_hits}. Recommendation score — внутренний порядок "
-        "0–100, не вероятность."
+        f"{result.count} карт · {source} · {result.api_requests} API-запросов"
+        f" · Recommendation — внутренний порядок 0–100, не вероятность."
     )
-    if result.origin in {"api", "mixed"}:
-        raw_stop = getattr(result, "stop_reason", "") or "—"
-        stop_labels = {
-            "complete": "все стратегии завершены",
-            "request_budget": "бюджет запросов",
-            "page_limit": "лимит страниц",
-            "deadline": "дедлайн",
-            "network_failure": "сетевая ошибка/таймаут",
-            "rate_limit": "HTTP 429",
-            "forbidden": "HTTP 403",
-            "request_failed": "ошибка запроса",
-            "candidate_limit": "лимит кандидатов",
-            "limits": "лимиты",
-        }
-        stop = stop_labels.get(raw_stop, raw_stop)
-        deadline = getattr(result, "deadline_seconds", 0.0)
+    with st.expander("Детали выдачи", expanded=False):
         st.caption(
-            f"Discovery: дедлайн {deadline:g} с · остановка: "
-            f"{stop} · полнота: {'да' if result.complete else 'нет'}."
+            f"Запросов: {result.api_requests} (успешно "
+            f"{getattr(result, 'requests_succeeded', 0)}, ошибок "
+            f"{getattr(result, 'requests_failed', 0)}) · HTTP-попыток: "
+            f"{getattr(result, 'http_attempts', 0)} · OAuth: "
+            f"{getattr(result, 'oauth_requests', 0)} · страниц: "
+            f"{getattr(result, 'pages_attempted', 0)} · кэш-хитов: "
+            f"{result.cache_hits}."
         )
-    if result.sequence_required:
-        sequence_state = (
-            "полный" if result.sequences_complete else "неполный"
-        )
-        st.caption(
-            "Sequence-анализ: "
-            f"{result.sequence_analyzed} проанализировано "
-            f"({result.sequence_partial} частично), "
-            f"{result.sequence_not_analyzed} не анализировалось, "
-            f"{result.sequence_source_unavailable} без .osu, "
-            f"{result.sequence_failed} с ошибкой · "
-            f".osu скачано: {result.sequence_downloads} · "
-            f"из локального кэша/БД: {result.sequence_cache_hits} · "
-            f"полнота sequence-данных: {sequence_state}."
-        )
+        if result.origin in {"api", "mixed"}:
+            raw_stop = getattr(result, "stop_reason", "") or "—"
+            stop_labels = {
+                "complete": "все стратегии завершены",
+                "request_budget": "бюджет запросов",
+                "page_limit": "лимит страниц",
+                "deadline": "дедлайн",
+                "network_failure": "сетевая ошибка/таймаут",
+                "rate_limit": "HTTP 429",
+                "forbidden": "HTTP 403",
+                "request_failed": "ошибка запроса",
+                "candidate_limit": "лимит кандидатов",
+                "limits": "лимиты",
+            }
+            stop = stop_labels.get(raw_stop, raw_stop)
+            deadline = getattr(result, "deadline_seconds", 0.0)
+            st.caption(
+                f"Discovery: дедлайн {deadline:g} с · остановка: "
+                f"{stop} · полнота: {'да' if result.complete else 'нет'}."
+            )
+        if result.sequence_required:
+            sequence_state = (
+                "полный" if result.sequences_complete else "неполный"
+            )
+            st.caption(
+                "Sequence-анализ: "
+                f"{result.sequence_analyzed} проанализировано "
+                f"({result.sequence_partial} частично), "
+                f"{result.sequence_not_analyzed} не анализировалось, "
+                f"{result.sequence_source_unavailable} без .osu, "
+                f"{result.sequence_failed} с ошибкой · "
+                f".osu скачано: {result.sequence_downloads} · "
+                f"из локального кэша/БД: {result.sequence_cache_hits} · "
+                f"полнота sequence-данных: {sequence_state}."
+            )
 
     random_meta = st.session_state.get("random_meta")
     if isinstance(random_meta, dict):
         st.info(
-            f"🎲 Локальная подборка · раунд {random_meta.get('round', 1)} · "
+            f"Локальная подборка · раунд {random_meta.get('round', 1)} · "
             f"{random_meta.get('count', 0)} карт из "
-            f"{random_meta.get('available', 0)} новых кандидатов "
-            f"(локальный пул {random_meta.get('pool', 0)}; в сессии показано "
-            f"{random_meta.get('session_seen', 0)}; исключено "
-            f"{random_meta.get('excluded', 0)})."
-        )
-        st.caption(
-            "Прошли проверки в локальном каталоге: "
-            f"{random_meta.get('local_strict_passed', 0)} строгих / "
-            f"{random_meta.get('local_relevance_passed', 0)} relevance "
-            f"(рассмотрено {random_meta.get('local_considered', 0)} из "
-            f"{random_meta.get('catalog_size', random_meta.get('local_considered', 0))} "
-            "сохранённых). Сетевых запросов: 0."
+            f"{random_meta.get('available', 0)} новых кандидатов · "
+            f"пул {random_meta.get('pool', 0)} · сетевых запросов 0."
         )
         meta_note = random_meta.get("note")
         if meta_note:
@@ -2844,11 +2898,11 @@ def _render_result(store: Storage, result: DiscoveryResult) -> None:
             weights,
         )
     else:
-        # osu!-style discovery grid: two compact cards per row on desktop;
+        # osu!-style discovery grid: three compact cards per row on desktop;
         # Streamlit stacks the columns on narrow screens.
-        for start in range(0, len(shown), 2):
-            columns = st.columns(2, gap="medium")
-            for offset, item in enumerate(shown[start : start + 2]):
+        for start in range(0, len(shown), 3):
+            columns = st.columns(3, gap="medium")
+            for offset, item in enumerate(shown[start : start + 3]):
                 with columns[offset]:
                     _render_card(
                         store,
@@ -3154,11 +3208,12 @@ def _search_advanced_filters(cfg: PresetConfig) -> None:
 
 
 def page_search(store: Storage, cfg: PresetConfig) -> None:
-    st.header("🔎 Поиск карт")
-    st.caption(
-        "Выберите пресет в панели слева, задайте сложность и длительность, "
-        "затем ищите или собирайте случайную подборку. Строгие фильтры "
-        "применяются до ранжирования и никогда не ослабляются случайно."
+    _page_intro(
+        "DISCOVERY",
+        "Обзор карт",
+        "Соберите подборку по пресету и строгим фильтрам. Поиск в osu! API "
+        "запускается только кнопкой; локальная библиотека остаётся доступна "
+        "офлайн.",
     )
     try:
         api_config = config.load_api_config()
@@ -3167,11 +3222,9 @@ def page_search(store: Storage, cfg: PresetConfig) -> None:
         configured = False
         st.error(f"Некорректная конфигурация API: {exc}")
     if not configured:
-        st.info(
-            "OSU_CLIENT_ID / OSU_CLIENT_SECRET не заданы. Новый онлайн-поиск "
-            "недоступен, но «🎲 Случайная подборка» работает по сохранённому "
-            "локальному каталогу SQLite. Секреты не показываются и не "
-            "пишутся в SQLite."
+        st.warning(
+            "Онлайн-поиск недоступен без OSU_CLIENT_ID / OSU_CLIENT_SECRET. "
+            "Обзор и библиотека работают по локальному каталогу SQLite."
         )
 
     filters = cfg.filters
@@ -3180,37 +3233,41 @@ def page_search(store: Storage, cfg: PresetConfig) -> None:
         for key, value in cfg.ranking.skill_weights.items()
         if value > 0
     ]
-    skills_text = (
-        "Навыки: " + " · ".join(selected_skills)
-        if selected_skills
-        else "Навыки не выбраны: фактор соответствия навыкам не участвует."
-    )
-    st.caption(f"Пресет «{cfg.name}» · {skills_text}")
     try:
+        counts = library.counts(store)
         catalog_size = store.beatmapset_count()
     except StorageError:
+        counts = {"total": 0, "analyzed": 0, "partial": 0, "pending": 0}
         catalog_size = 0
-    st.caption(
-        f"Локальный каталог SQLite: {catalog_size} карт. «Случайная подборка» "
-        "использует весь подходящий каталог, а не только текущую выдачу; "
-        "«Искать» пополняет каталог."
-    )
+    def local_number(value: int) -> str:
+        return f"{value:,}".replace(",", " ")
+
     st.markdown(
-        "<div class='osu-discovery-hero'>"
-        "<div class='osu-discovery-copy'>"
-        "<div class='osu-eyebrow'>beatmap discovery</div>"
-        f"<div class='osu-discovery-title'>{html.escape(cfg.name)}</div>"
-        "<div class='osu-discovery-sub'>"
-        f"{catalog_size} карт в локальном каталоге · "
-        f"{len(selected_skills)} активных навыков · "
-        "строгие фильтры остаются строгими"
-        "</div></div>"
-        "<div class='osu-discovery-orbit' aria-hidden='true'>"
-        "<span></span><span></span><span></span>"
-        "</div></div>",
+        "<div class='discovery-stats'>"
+        f"<div><strong>{local_number(counts.get('total', 0))}</strong>"
+        "<span>difficulty в локальном каталоге</span></div>"
+        f"<div><strong>{local_number(counts.get('analyzed', 0) + counts.get('partial', 0))}</strong>"
+        "<span>с анализом .osu</span></div>"
+        f"<div><strong>{local_number(counts.get('pending', 0))}</strong>"
+        "<span>ждут анализа</span></div>"
+        f"<div><strong>{local_number(catalog_size)}</strong>"
+        "<span>beatmapsets</span></div>"
+        "</div>",
         unsafe_allow_html=True,
     )
+    st.caption(
+        f"Активный профиль: «{cfg.name}» · "
+        + (
+            " · ".join(selected_skills)
+            if selected_skills
+            else "навыки не выбраны"
+        )
+    )
 
+    st.markdown(
+        "<div class='section-label'>Поиск и быстрые фильтры</div>",
+        unsafe_allow_html=True,
+    )
     query_text = st.text_input(
         "Что искать",
         value=filters.query or "",
@@ -3305,7 +3362,7 @@ def page_search(store: Storage, cfg: PresetConfig) -> None:
         ):
             st.rerun()
     if actions[1].button(
-        "🎲 Случайная подборка",
+        "Случайная подборка",
         key="random_selection",
         use_container_width=True,
         help="Выбирает новых кандидатов из локального каталога SQLite, "
@@ -3314,7 +3371,7 @@ def page_search(store: Storage, cfg: PresetConfig) -> None:
     ):
         _execute_random_selection(store, cfg)
     actions[2].button(
-        "🔀 Перемешать",
+        "Перемешать",
         key="shuffle_results",
         on_click=_shuffle_results,
         disabled=not has_result,
@@ -3322,7 +3379,7 @@ def page_search(store: Storage, cfg: PresetConfig) -> None:
         help="Меняет только порядок текущей выдачи. API-запросов нет.",
     )
     actions[3].button(
-        "🎯 Выбрать случайную карту",
+        "Случайная карта",
         key="random_pick",
         on_click=_pick_random_result,
         args=(store,),
@@ -3358,8 +3415,7 @@ def page_search(store: Storage, cfg: PresetConfig) -> None:
         _render_result(store, result)
     else:
         st.info(
-            "Результатов пока нет. Нажмите «Искать» или «🎲 Случайная "
-            "подборка»."
+            "Результатов пока нет. Нажмите «Искать» или «Случайная подборка»."
         )
 
 
@@ -3368,12 +3424,492 @@ def page_search(store: Storage, cfg: PresetConfig) -> None:
 # ---------------------------------------------------------------------------
 
 
-def page_analysis(store: Storage, cfg: PresetConfig) -> None:
-    st.header("🧪 Анализ и фоновая очередь")
+def _library_cover_html(
+    *,
+    cover_url: str,
+    title: str,
+    status: str,
+    difficulties: int,
+    url: str,
+) -> str:
+    fallback = html.escape((title or "osu!")[:2].upper())
+    cover = html.escape(cover_url, quote=True)
+    return (
+        "<div class='library-cover'>"
+        + f"<div class='library-cover-fallback'>{fallback}</div>"
+        + (
+            f"<img src='{cover}' alt='' loading='lazy' "
+            "onerror=\"this.style.display='none'\">"
+            if cover
+            else ""
+        )
+        + "<div class='library-cover-top'>"
+        f"<span class='library-status'>{html.escape(STATUS_RU.get(status, status))}</span>"
+        + (
+            f"<span class='library-count'>{difficulties} diff</span>"
+            if difficulties > 0
+            else ""
+        )
+        + "</div>"
+        f"<a class='library-cover-link' href='{html.escape(url, quote=True)}' "
+        "target='_blank' rel='noopener noreferrer' aria-label='Открыть на osu!'></a>"
+        "</div>"
+    )
+
+
+def _library_patterns_html(entry: library.LibraryEntry) -> str:
+    labels = entry.labels[:6]
+    if labels:
+        chips = "".join(
+            f"<span class='pattern-chip'>{html.escape(PATTERN_LABELS.get(label, label))}</span>"
+            for label in labels
+        )
+        return f"<div class='library-patterns'>{chips}</div>"
+    if entry.state in {library.ANALYZED, library.PARTIAL}:
+        text = "выраженных паттернов не найдено"
+    else:
+        text = "паттерны недоступны до анализа .osu"
+    return f"<div class='library-patterns muted'>{text}</div>"
+
+
+def _render_library_entry(
+    store: Storage,
+    entry: library.LibraryEntry,
+    current_scores: dict[int, ScoredCandidate],
+) -> None:
+    stars = f"{entry.stars:.2f}★" if entry.stars is not None else "★ ?"
+    bpm = f"{entry.effective_bpm:.0f}" if entry.effective_bpm else "?"
+    length = _format_seconds(entry.effective_length)
+    ar = f"{entry.ar:g}" if entry.ar is not None else "?"
+    od = f"{entry.od:g}" if entry.od is not None else "?"
+    tone = library.STATE_TONE.get(entry.state, "muted")
+    scored = current_scores.get(entry.beatmap_id)
+    match_html = ""
+    if scored is not None:
+        match = _match_factor(scored)
+        match_text = (
+            "—" if match is None or match.value is None else f"{round(match.value * 100)}%"
+        )
+        match_html = (
+            "<div class='library-match'>"
+            f"<span>Match <strong>{match_text}</strong></span>"
+            f"<span>Recommendation <strong>{scored.display_score}</strong></span>"
+            f"<span>Evidence <strong>{round(scored.coverage * 100)}%</strong></span>"
+            "</div>"
+        )
+    st.markdown(
+        "<div class='library-diff'>"
+        "<div class='library-diff-head'>"
+        f"<span class='library-diff-stars'>{html.escape(stars)}</span>"
+        f"<span class='library-diff-version'>{html.escape(entry.version or 'unknown')}</span>"
+        f"<span class='library-diff-mode'>{html.escape(entry.mode)}</span>"
+        f"<span class='library-state {tone}'>{html.escape(entry.short_state)}</span>"
+        "</div>"
+        f"<div class='library-diff-meta'>BPM {bpm} · AR {ar} · OD {od} · "
+        f"{length}</div>"
+        + _library_patterns_html(entry)
+        + match_html
+        + (
+            "<div class='library-partial'>Результат покрывает только часть "
+            "карты.</div>"
+            if entry.is_partial
+            else ""
+        )
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+    with st.container(key=f"library_actions_{entry.beatmap_id}"):
+        actions = st.columns([1.0, 0.72, 1.0])
+        if actions[0].button(
+            "Детали",
+            key=f"library_details_{entry.beatmap_id}",
+            use_container_width=True,
+        ):
+            _library_details_dialog(entry)
+        if actions[1].button(
+            "▶",
+            key=f"library_preview_{entry.beatmap_id}",
+            help=(
+                "Открыть реальное превью этой difficulty"
+                if entry.mode == "osu"
+                else "Превью поддерживается только для osu!standard"
+            ),
+            disabled=entry.mode != "osu",
+            use_container_width=True,
+        ):
+            _library_preview_dialog(store, entry)
+        actions[2].link_button(
+            "osu!",
+            entry.beatmap_url,
+            use_container_width=True,
+        )
+
+
+def _render_library_set(
+    store: Storage,
+    set_item: library.LibrarySet,
+    current_scores: dict[int, ScoredCandidate],
+) -> None:
+    with st.container(border=True, key=f"library_set_{set_item.beatmapset_id}"):
+        st.markdown(
+            _library_cover_html(
+                cover_url=set_item.cover_url,
+                title=set_item.display_title,
+                status=set_item.set_status,
+                difficulties=len(set_item.entries),
+                url=set_item.set_url,
+            ),
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            "<div class='library-set-copy'>"
+            f"<div class='library-set-title'><a href='{html.escape(set_item.set_url, quote=True)}' "
+            f"target='_blank' rel='noopener noreferrer'>"
+            f"{html.escape(set_item.display_title)}</a></div>"
+            f"<div class='library-set-artist'>{html.escape(set_item.display_artist)}</div>"
+            f"<div class='library-set-mapper'>mapped by {html.escape(set_item.creator or 'неизвестно')}</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        visible = set_item.entries[:3]
+        hidden = set_item.entries[3:]
+        for entry in visible:
+            _render_library_entry(store, entry, current_scores)
+        if hidden:
+            with st.expander(f"Ещё {len(hidden)} сложностей", expanded=False):
+                for entry in hidden:
+                    _render_library_entry(store, entry, current_scores)
+
+
+@st.dialog("Difficulty details", width="large")
+def _library_details_dialog(entry: library.LibraryEntry) -> None:
+    st.markdown(
+        _library_cover_html(
+            cover_url=entry.cover_url,
+            title=entry.display_title,
+            status=entry.effective_status,
+            difficulties=0,
+            url=entry.beatmap_url,
+        ),
+        unsafe_allow_html=True,
+    )
+    st.subheader(f"{entry.display_title} · [{entry.version or 'unknown'}]")
     st.caption(
-        "Фоновый worker постепенно разбирает известный каталог: сначала "
-        "избранное, оценки и недавние карты, затем остальные. Сетевые "
-        "загрузки и разбор .osu выполняются вне пути отрисовки Streamlit."
+        f"{entry.display_artist} · mapped by {entry.creator or 'неизвестно'}"
+    )
+    metrics = st.columns(4)
+    metrics[0].metric(
+        "Stars", f"{entry.stars:.2f}★" if entry.stars is not None else "?"
+    )
+    metrics[1].metric(
+        "BPM", f"{entry.effective_bpm:.0f}" if entry.effective_bpm else "?"
+    )
+    metrics[2].metric("Length", _format_seconds(entry.effective_length))
+    metrics[3].metric(
+        "AR / OD",
+        f"{entry.ar:g} / {entry.od:g}"
+        if entry.ar is not None and entry.od is not None
+        else "?",
+    )
+    st.markdown(
+        f"**Состояние анализа:** {html.escape(entry.state_label)}  \n"
+        f"Источник: {html.escape(entry.analysis_source or '—')} · "
+        f"analyzer v{entry.analysis_version or '—'} · "
+        f"analyzed: {html.escape(entry.analyzed_at or '—')}  \n"
+        f"Queue: {html.escape(entry.queue_status or '—')} · "
+        f"attempts: {entry.analysis_attempts}/{entry.queue_attempts}"
+    )
+    if entry.analysis_scope:
+        st.caption(f"Scope: {entry.analysis_scope}")
+    if entry.queue_error:
+        st.warning(f"Queue error: {entry.queue_error}")
+    st.markdown(_library_patterns_html(entry), unsafe_allow_html=True)
+    sequence = entry.sequence
+    if sequence is not None:
+        st.markdown("**Измеренные признаки .osu**")
+        st.caption(
+            f"Объектов: {sequence.analyzed_notes}/{sequence.total_notes}"
+            + (" · анализ частичный" if sequence.truncated else "")
+            + f" · jump {sequence.jump_share:.0%} · wide "
+            f"{sequence.wide_jump_share:.0%} · flow {sequence.flow_share:.0%} · "
+            f"angle {sequence.angle_change_share:.0%} · slider "
+            f"{sequence.slider_share:.0%} · density "
+            f"{sequence.notes_per_second:.1f}/s"
+        )
+        if sequence.sections:
+            st.markdown("**Секции**")
+            for section in sequence.sections[:6]:
+                labels = ", ".join(
+                    PATTERN_LABELS.get(label, label)
+                    for label in section.labels
+                ) or "без выраженного паттерна"
+                st.caption(
+                    f"{_format_seconds(section.start_ms / 1000)}–"
+                    f"{_format_seconds(section.end_ms / 1000)} · "
+                    f"{labels} · объектов {section.object_count}"
+                )
+    else:
+        st.info(
+            "Для этой difficulty нет сохранённого sequence-анализа. "
+            "Это не означает, что паттернов нет."
+        )
+    st.link_button("Открыть difficulty на osu!", entry.beatmap_url)
+
+
+@st.dialog("Gameplay preview", width="large")
+def _library_preview_dialog(
+    store: Storage, entry: library.LibraryEntry
+) -> None:
+    st.caption(
+        f"{entry.display_title} · [{entry.version}] · "
+        f"{entry.stars or '?'}★. Загружается публичный .osu именно этой "
+        "difficulty."
+    )
+    try:
+        with st.spinner("Загружаю .osu для превью…"):
+            preview = gameplay.load_preview(
+                entry.beatmap_id, _gameplay_cache_dir(store)
+            )
+    except gameplay.GameplayError as exc:
+        st.error(f"Превью недоступно: {exc}")
+        st.caption(
+            "Файл мог быть удалён или скрыт. Приложение не подменяет "
+            "геймплей обложкой или случайными нотами."
+        )
+        return
+    st.html(
+        gameplay.preview_html(preview),
+        unsafe_allow_javascript=True,
+    )
+
+
+def _library_counts_html(counts: dict[str, int]) -> str:
+    return (
+        "<div class='library-summary'>"
+        f"<div><strong>{counts.get('total', 0):,}</strong><span>всего difficulty</span></div>"
+        f"<div><strong>{counts.get('analyzed', 0):,}</strong><span>полный анализ</span></div>"
+        f"<div><strong>{counts.get('partial', 0):,}</strong><span>частичный анализ</span></div>"
+        f"<div><strong>{counts.get('pending', 0):,}</strong><span>в очереди</span></div>"
+        f"<div><strong>{counts.get('failed', 0) + counts.get('unavailable', 0):,}</strong>"
+        "<span>проблемы источника</span></div>"
+        "</div>".replace(",", " ")
+    )
+
+
+def page_library(store: Storage, cfg: PresetConfig) -> None:
+    _page_intro(
+        "LOCAL LIBRARY",
+        "Библиотека карт",
+        "Всё, что уже сохранено в SQLite: фильтруйте, сортируйте и открывайте "
+        "анализ без обращения к osu! API. Обложки и превью — по требованию.",
+    )
+    try:
+        counts = library.counts(store)
+    except StorageError as exc:
+        st.error(f"Локальный каталог недоступен: {exc}")
+        return
+    if counts.get("total", 0) == 0:
+        st.info(
+            "Локальный каталог пуст. Выполните поиск в osu! API или "
+            "импортируйте данные — после этого карты появятся здесь."
+        )
+        return
+    st.markdown(_library_counts_html(counts), unsafe_allow_html=True)
+    st.caption(
+        "Источник: SQLite. Счётчики синхронизированы с analysis_queue; "
+        "фильтры и сортировка не делают сетевых запросов."
+    )
+
+    scope = st.segmented_control(
+        "Коллекция",
+        options=list(library.SCOPE_OPTIONS),
+        format_func=lambda value: library.SCOPE_LABELS[value],
+        default="analyzed",
+        key="library_scope",
+    )
+    scope = scope or "analyzed"
+    with st.container(key="library_toolbar"):
+        top = st.columns([2.3, 1.15, 0.9])
+        query = top[0].text_input(
+            "Поиск по библиотеке",
+            key="library_query",
+            placeholder="название, артист, маппер или difficulty",
+        )
+        sort = top[1].selectbox(
+            "Сортировка",
+            options=list(library.SORT_OPTIONS),
+            format_func=lambda value: library.SORT_LABELS[value],
+            key="library_sort",
+        )
+        top[2].caption("Локально")
+        top[2].caption("0 API-запросов")
+
+    with st.expander("Фильтры библиотеки", expanded=False):
+        filter_cols = st.columns([1.0, 1.0, 1.0])
+        statuses = filter_cols[0].multiselect(
+            "Статус",
+            options=list(library.known_statuses(store)),
+            format_func=lambda value: STATUS_RU.get(value, value),
+            key="library_statuses",
+            placeholder="Любой статус",
+        )
+        patterns = filter_cols[1].multiselect(
+            "Паттерны",
+            options=list(PATTERN_LABELS),
+            format_func=lambda value: PATTERN_LABELS[value],
+            key="library_patterns",
+            placeholder="Любые паттерны",
+        )
+        modes = filter_cols[2].selectbox(
+            "Режим",
+            options=["all", *library.known_modes(store)],
+            format_func=lambda value: "Все режимы" if value == "all" else value,
+            key="library_mode",
+        )
+        ranges = st.columns(3)
+        stars_range = ranges[0].slider(
+            "Звёзды",
+            0.0,
+            12.0,
+            (0.0, 12.0),
+            0.1,
+            key="library_stars",
+        )
+        bpm_range = ranges[1].slider(
+            "BPM",
+            0.0,
+            400.0,
+            (0.0, 400.0),
+            5.0,
+            key="library_bpm",
+        )
+        length_range = ranges[2].slider(
+            "Длина, секунд",
+            0,
+            600,
+            (0, 600),
+            15,
+            key="library_length",
+        )
+        if st.button("Сбросить фильтры", key="library_clear_filters"):
+            for key in (
+                "library_query",
+                "library_statuses",
+                "library_patterns",
+                "library_mode",
+                "library_stars",
+                "library_bpm",
+                "library_length",
+                "library_page",
+            ):
+                st.session_state.pop(key, None)
+            st.rerun()
+
+    filters = library.LibraryFilters(
+        query=query,
+        scope=scope,
+        statuses=tuple(statuses),
+        patterns=tuple(patterns),
+        mode=None if modes == "all" else modes,
+        stars_min=stars_range[0] if stars_range[0] > 0 else None,
+        stars_max=stars_range[1] if stars_range[1] < 12 else None,
+        bpm_min=bpm_range[0] if bpm_range[0] > 0 else None,
+        bpm_max=bpm_range[1] if bpm_range[1] < 400 else None,
+        length_min=length_range[0] if length_range[0] > 0 else None,
+        length_max=length_range[1] if length_range[1] < 600 else None,
+        sort=sort,
+        page=int(st.session_state.get("library_page", 1)),
+        per_page=8,
+    )
+    try:
+        page = library.query_sets(store, filters)
+    except StorageError as exc:
+        st.error(f"Библиотека не загрузилась: {exc}")
+        return
+    st.session_state["library_page"] = page.page
+    current = st.session_state.get("result")
+    current_scores = (
+        {item.beatmap.id: item for item in current.scored}
+        if isinstance(current, DiscoveryResult)
+        else {}
+    )
+    st.markdown(
+        "<div class='library-result-head'>"
+        f"<strong>{page.total_sets:,}</strong> beatmapsets · "
+        f"<strong>{page.total_difficulties:,}</strong> difficulty"
+        f"<span>Страница {page.page} из {page.pages}</span>"
+        "</div>".replace(",", " "),
+        unsafe_allow_html=True,
+    )
+    if not page.sets:
+        st.info(
+            "По этим фильтрам в локальном каталоге ничего нет. "
+            "Измените коллекцию или сбросьте фильтры."
+        )
+        if st.button("Сбросить фильтры", key="library_empty_reset"):
+            for key in (
+                "library_query",
+                "library_statuses",
+                "library_patterns",
+                "library_mode",
+                "library_stars",
+                "library_bpm",
+                "library_length",
+                "library_page",
+            ):
+                st.session_state.pop(key, None)
+            st.rerun()
+        return
+    for start in range(0, len(page.sets), 2):
+        columns = st.columns(2, gap="large")
+        for offset, set_item in enumerate(page.sets[start : start + 2]):
+            with columns[offset]:
+                _render_library_set(store, set_item, current_scores)
+    navigation = st.columns([1.0, 1.0, 2.5, 1.0, 1.0])
+    if navigation[0].button(
+        "← Назад",
+        key="library_prev",
+        disabled=page.page <= 1,
+        use_container_width=True,
+    ):
+        st.session_state["library_page"] = page.page - 1
+        st.rerun()
+    if navigation[1].button(
+        "Вперёд →",
+        key="library_next",
+        disabled=page.page >= page.pages,
+        use_container_width=True,
+    ):
+        st.session_state["library_page"] = page.page + 1
+        st.rerun()
+    navigation[2].caption(
+        f"Страница {page.page} из {page.pages} · "
+        f"{page.total_sets} beatmapsets / {page.total_difficulties} difficulty"
+    )
+    if navigation[3].button(
+        "В начало",
+        key="library_first",
+        disabled=page.page <= 1,
+        use_container_width=True,
+    ):
+        st.session_state["library_page"] = 1
+        st.rerun()
+    if navigation[4].button(
+        "В конец",
+        key="library_last",
+        disabled=page.page >= page.pages,
+        use_container_width=True,
+    ):
+        st.session_state["library_page"] = page.pages
+        st.rerun()
+
+
+def page_analysis(store: Storage, cfg: PresetConfig) -> None:
+    _page_intro(
+        "ANALYSIS",
+        "Анализ и очередь",
+        "Постоянный worker разбирает каталог в фоне. Здесь видны прогресс, "
+        "ошибки и управление очередью — без сетевой работы в rerun-пути.",
     )
     worker = analysis_worker.worker_status(store)
     queue = worker.get("queue", {})
@@ -4013,7 +4549,11 @@ def page_feedback(store: Storage) -> None:
 
 
 def page_settings(store: Storage, cfg: PresetConfig) -> None:
-    st.header("⚙️ Настройки")
+    _page_intro(
+        "WORKSPACE",
+        "Настройки",
+        "Пресеты, навыки, фильтры, ранжирование, оформление и диагностика.",
+    )
     st.caption(
         "Пресеты, навыки, строгие фильтры, ранжирование, ваши оценки, "
         "оформление и диагностика собраны здесь. Обычный экран поиска "
@@ -4071,59 +4611,70 @@ def _link_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _render_favorites(store: Storage) -> None:
     favorites = _link_rows(store.favorite_rows())
-    if favorites:
-        st.dataframe(
-            [
-                {
-                    "Карта": row["Карта"],
-                    "Маппер": row["creator"],
-                    "Статус": row["status"],
-                    "Добавлено": row["created_at"],
-                    "Ссылка": row["Ссылка"],
-                }
-                for row in favorites
-            ],
-            hide_index=True,
-            width="stretch",
-            column_config={
-                "Ссылка": st.column_config.LinkColumn("Ссылка", display_text="osu!")
-            },
+    if not favorites:
+        st.info(
+            "Избранного пока нет. Добавляйте карты на карточках обзора или "
+            "библиотеки."
         )
-        fav_ids = [int(row["beatmapset_id"]) for row in favorites]
-        remove_id = st.selectbox(
-            "Убрать из избранного",
-            options=fav_ids,
-            format_func=lambda sid: next(
-                (row["Карта"] for row in favorites if row["beatmapset_id"] == sid),
-                str(sid),
-            ),
-            key="history_remove_favorite",
-        )
-        if st.button("Убрать выбранное из избранного", key="history_remove_fav_btn"):
-            try:
-                store.set_favorite(remove_id, False)
-                _flash("Удалено из избранного.")
-                st.rerun()
-            except StorageError as exc:
-                st.error(str(exc))
+        return
+    fav_ids = [int(row["beatmapset_id"]) for row in favorites]
+    current = st.session_state.get("result")
+    current_scores = (
+        {item.beatmap.id: item for item in current.scored}
+        if isinstance(current, DiscoveryResult)
+        else {}
+    )
+    page = library.query_sets(
+        store,
+        library.LibraryFilters(
+            scope="all",
+            set_ids=tuple(fav_ids),
+            per_page=48,
+            sort="stars_desc",
+        ),
+    )
+    if page.sets:
+        for start in range(0, len(page.sets), 2):
+            columns = st.columns(2, gap="large")
+            for offset, set_item in enumerate(page.sets[start : start + 2]):
+                with columns[offset]:
+                    _render_library_set(store, set_item, current_scores)
     else:
-        st.info("Избранного пока нет. Добавляйте карты на карточках поиска.")
+        st.info("В избранном есть наборы, но в локальном каталоге нет их difficulty.")
+    remove_id = st.selectbox(
+        "Убрать из избранного",
+        options=fav_ids,
+        format_func=lambda sid: next(
+            (row["Карта"] for row in favorites if row["beatmapset_id"] == sid),
+            str(sid),
+        ),
+        key="history_remove_favorite",
+    )
+    if st.button("Убрать выбранное из избранного", key="history_remove_fav_btn"):
+        try:
+            store.set_favorite(remove_id, False)
+            _flash("Удалено из избранного.")
+            st.rerun()
+        except StorageError as exc:
+            st.error(str(exc))
 
 
 def page_favorites(store: Storage) -> None:
-    st.header("⭐ Избранное")
-    st.caption(
+    _page_intro(
+        "YOUR PICKS",
+        "Избранное",
         "Сохранённые карты не смешиваются с оценками и не удаляются при "
-        "очистке кеша."
+        "очистке кеша.",
     )
     _render_favorites(store)
 
 
 def page_history(store: Storage) -> None:
-    st.header("🕘 История")
-    st.caption(
+    _page_intro(
+        "ACTIVITY",
+        "История",
         "Просмотренные карты и показанные результаты. История не удаляется "
-        "при очистке кеша и не влияет на строгие фильтры напрямую."
+        "при очистке кеша и не влияет на строгие фильтры напрямую.",
     )
     history = _link_rows(store.history_rows(limit=200))
     feedback_by_set = store.all_feedback()
@@ -4800,22 +5351,18 @@ def main() -> None:
             store, st.session_state["active_preset_id"]
         )
 
-    page = _sidebar(store)
+    _sidebar(store)
+    page = _site_header(store)
     cfg: PresetConfig = _active_config(store)
 
     flash = st.session_state.pop("_flash", None)
     if flash:
         st.toast(flash)
 
-    st.markdown(
-        "<div class='osu-eyebrow'>osu!standard · real API discovery · "
-        "real .osu gameplay preview</div>",
-        unsafe_allow_html=True,
-    )
-    st.title(APP_TITLE)
-
     if page == "search":
         page_search(store, cfg)
+    elif page == "library":
+        page_library(store, cfg)
     elif page == "analysis":
         page_analysis(store, cfg)
     elif page == "favorites":

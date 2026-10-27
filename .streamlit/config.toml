@@ -2,3 +2,10 @@
 # The appearance uploader accepts up to 12 MB; validation in appearance.py
 # enforces the same bound independently of Streamlit.
 maxUploadSize = 12
+
+[theme]
+base = "dark"
+primaryColor = "#e75b9a"
+backgroundColor = "#0f0d13"
+secondaryBackgroundColor = "#17131d"
+textColor = "#f3eef5"
