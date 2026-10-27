@@ -198,6 +198,40 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         """,
         "CREATE INDEX idx_analysis_status ON beatmap_analysis(status)",
     ),
+    3: (
+        """
+        CREATE TABLE analysis_queue (
+            beatmap_id INTEGER PRIMARY KEY
+                REFERENCES beatmaps(id) ON DELETE CASCADE,
+            status TEXT NOT NULL DEFAULT 'pending',
+            priority INTEGER NOT NULL DEFAULT 100,
+            reason TEXT NOT NULL DEFAULT '',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            max_attempts INTEGER NOT NULL DEFAULT 3,
+            enqueued_at TEXT NOT NULL,
+            next_attempt_at TEXT,
+            claimed_at TEXT,
+            claimed_by TEXT,
+            last_error TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        )
+        """,
+        "CREATE INDEX idx_analysis_queue_pick "
+        "ON analysis_queue(status, next_attempt_at, priority)",
+        """
+        CREATE TABLE analysis_worker_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            owner TEXT NOT NULL DEFAULT '',
+            heartbeat_at TEXT,
+            paused INTEGER NOT NULL DEFAULT 0,
+            started_at TEXT,
+            last_error TEXT NOT NULL DEFAULT '',
+            last_discovery_at TEXT,
+            discovery_requested INTEGER NOT NULL DEFAULT 0
+        )
+        """,
+        "INSERT OR IGNORE INTO analysis_worker_state (id) VALUES (1)",
+    ),
 }
 
 
@@ -543,6 +577,11 @@ class Storage:
             row = conn.execute("SELECT COUNT(*) AS n FROM beatmapsets").fetchone()
             return int(row["n"]) if row else 0
 
+    def beatmap_count(self) -> int:
+        with self.connection() as conn:
+            row = conn.execute("SELECT COUNT(*) AS n FROM beatmaps").fetchone()
+            return int(row["n"]) if row else 0
+
     # -- attributes --------------------------------------------------------
     def save_attributes(self, beatmap_id: int, attributes: dict[str, Any]) -> None:
         with self.connection() as conn:
@@ -695,13 +734,291 @@ class Storage:
                     result[int(row["beatmap_id"])] = dict(row)
         return result
 
-    def analysis_stats(self) -> dict[str, int]:
+    def analysis_stats(
+        self, analyzer_version: int | None = None
+    ) -> dict[str, int]:
+        with self.connection() as conn:
+            if analyzer_version is None:
+                rows = conn.execute(
+                    "SELECT status, COUNT(*) AS n FROM beatmap_analysis "
+                    "GROUP BY status"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT status, COUNT(*) AS n FROM beatmap_analysis "
+                    "WHERE analyzer_version=? GROUP BY status",
+                    (int(analyzer_version),),
+                ).fetchall()
+        return {str(row["status"]): int(row["n"]) for row in rows}
+
+    # -- persistent analysis queue / worker --------------------------------
+    def enqueue_analysis(
+        self,
+        rows: Iterable[tuple[int, int, str]],
+        *,
+        max_attempts: int = config.DEFAULT_ANALYSIS_MAX_ATTEMPTS,
+    ) -> int:
+        now = now_iso()
+        payload = [
+            (
+                int(beatmap_id),
+                int(priority),
+                str(reason),
+                int(max_attempts),
+                now,
+                now,
+            )
+            for beatmap_id, priority, reason in rows
+        ]
+        if not payload:
+            return 0
+        with self.connection() as conn:
+            conn.executemany(
+                """
+                INSERT INTO analysis_queue (
+                    beatmap_id, status, priority, reason, attempts,
+                    max_attempts, enqueued_at, updated_at
+                ) VALUES (?, 'pending', ?, ?, 0, ?, ?, ?)
+                ON CONFLICT(beatmap_id) DO UPDATE SET
+                    status='pending',
+                    priority=excluded.priority,
+                    reason=excluded.reason,
+                    max_attempts=excluded.max_attempts,
+                    next_attempt_at=NULL,
+                    claimed_at=NULL,
+                    claimed_by=NULL,
+                    updated_at=excluded.updated_at
+                """,
+                payload,
+            )
+        return len(payload)
+
+    def claim_analysis(
+        self, owner: str, limit: int
+    ) -> list[dict[str, Any]]:
+        """Atomically claim due jobs so two workers cannot process one map."""
+
+        now = now_iso()
+        with self.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                """
+                SELECT * FROM analysis_queue
+                WHERE status='pending'
+                  AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+                ORDER BY priority ASC, beatmap_id ASC
+                LIMIT ?
+                """,
+                (now, max(1, int(limit))),
+            ).fetchall()
+            for row in rows:
+                conn.execute(
+                    """
+                    UPDATE analysis_queue
+                    SET status='processing', claimed_at=?, claimed_by=?,
+                        updated_at=?
+                    WHERE beatmap_id=? AND status='pending'
+                    """,
+                    (now, owner, now, int(row["beatmap_id"])),
+                )
+            claimed = [
+                dict(row)
+                for row in rows
+                if conn.execute(
+                    "SELECT status, claimed_by FROM analysis_queue "
+                    "WHERE beatmap_id=?",
+                    (int(row["beatmap_id"]),),
+                ).fetchone()["claimed_by"]
+                == owner
+            ]
+        return claimed
+
+    def finish_analysis(
+        self,
+        beatmap_id: int,
+        *,
+        status: str,
+        attempts: int,
+        next_attempt_at: str | None,
+        error: str = "",
+    ) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                """
+                UPDATE analysis_queue
+                SET status=?, attempts=?, next_attempt_at=?,
+                    claimed_at=NULL, claimed_by=NULL, last_error=?,
+                    updated_at=?
+                WHERE beatmap_id=?
+                """,
+                (
+                    status,
+                    int(attempts),
+                    next_attempt_at,
+                    str(error)[:500],
+                    now_iso(),
+                    int(beatmap_id),
+                ),
+            )
+
+    def recover_analysis_jobs(self) -> int:
+        with self.connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE analysis_queue
+                SET status='pending', claimed_at=NULL, claimed_by=NULL,
+                    updated_at=?
+                WHERE status='processing'
+                """,
+                (now_iso(),),
+            )
+            return int(cursor.rowcount or 0)
+
+    def queue_stats(self) -> dict[str, int]:
         with self.connection() as conn:
             rows = conn.execute(
-                "SELECT status, COUNT(*) AS n FROM beatmap_analysis "
+                "SELECT status, COUNT(*) AS n FROM analysis_queue "
                 "GROUP BY status"
             ).fetchall()
-        return {str(row["status"]): int(row["n"]) for row in rows}
+        result = {
+            "pending": 0,
+            "processing": 0,
+            "done": 0,
+            "failed": 0,
+            "unavailable": 0,
+        }
+        for row in rows:
+            result[str(row["status"])] = int(row["n"])
+        result["total"] = sum(
+            int(row["n"]) for row in rows
+        )
+        return result
+
+    def queue_failures(self, limit: int = 10) -> list[dict[str, Any]]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT q.beatmap_id, q.status, q.attempts, q.last_error,
+                       q.updated_at, b.version, b.beatmapset_id,
+                       bs.title, bs.artist
+                FROM analysis_queue q
+                JOIN beatmaps b ON b.id=q.beatmap_id
+                JOIN beatmapsets bs ON bs.id=b.beatmapset_id
+                WHERE q.status IN ('failed', 'unavailable')
+                ORDER BY q.updated_at DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def pending_analysis_count(self) -> int:
+        return self.queue_stats().get("pending", 0) + self.queue_stats().get(
+            "processing", 0
+        )
+
+    def worker_state(self) -> dict[str, Any]:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM analysis_worker_state WHERE id=1"
+            ).fetchone()
+        return dict(row) if row else {}
+
+    def acquire_worker_lease(
+        self, owner: str, lease_seconds: float
+    ) -> bool:
+        now = datetime.now(timezone.utc)
+        stale = (now - timedelta(seconds=max(1.0, lease_seconds))).replace(
+            microsecond=0
+        ).isoformat()
+        stamp = now.replace(microsecond=0).isoformat()
+        with self.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT owner, heartbeat_at FROM analysis_worker_state "
+                "WHERE id=1"
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    "INSERT INTO analysis_worker_state "
+                    "(id, owner, heartbeat_at, started_at) VALUES (1,?,?,?)",
+                    (owner, stamp, stamp),
+                )
+                return True
+            current_owner = str(row["owner"] or "")
+            heartbeat = str(row["heartbeat_at"] or "")
+            if current_owner == owner or not heartbeat or heartbeat < stale:
+                conn.execute(
+                    "UPDATE analysis_worker_state "
+                    "SET owner=?, heartbeat_at=?, started_at=?"
+                    " WHERE id=1",
+                    (owner, stamp, stamp),
+                )
+                return True
+            return False
+
+    def heartbeat_worker(self, owner: str, lease_seconds: float) -> bool:
+        stamp = datetime.now(timezone.utc).replace(
+            microsecond=0
+        ).isoformat()
+        with self.connection() as conn:
+            cursor = conn.execute(
+                "UPDATE analysis_worker_state SET heartbeat_at=? "
+                "WHERE id=1 AND owner=?",
+                (stamp, owner),
+            )
+            return bool(cursor.rowcount)
+
+    def release_worker_lease(self, owner: str) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                "UPDATE analysis_worker_state "
+                "SET owner='', heartbeat_at=NULL WHERE id=1 AND owner=?",
+                (owner,),
+            )
+
+    def set_worker_paused(self, paused: bool) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                "UPDATE analysis_worker_state SET paused=? WHERE id=1",
+                (1 if paused else 0,),
+            )
+
+    def set_worker_error(self, error: str) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                "UPDATE analysis_worker_state SET last_error=? WHERE id=1",
+                (str(error)[:500],),
+            )
+
+    def set_worker_discovery_time(self, value: str | None = None) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                "UPDATE analysis_worker_state SET last_discovery_at=? "
+                "WHERE id=1",
+                (value or now_iso(),),
+            )
+
+    def request_worker_discovery(self) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                "UPDATE analysis_worker_state "
+                "SET discovery_requested=1 WHERE id=1"
+            )
+
+    def consume_worker_discovery_request(self) -> bool:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT discovery_requested FROM analysis_worker_state "
+                "WHERE id=1"
+            ).fetchone()
+            requested = bool(row and row["discovery_requested"])
+            if requested:
+                conn.execute(
+                    "UPDATE analysis_worker_state "
+                    "SET discovery_requested=0 WHERE id=1"
+                )
+            return requested
 
     # -- search cache ------------------------------------------------------
     def cache_get(self, key: str) -> dict[str, Any] | None:

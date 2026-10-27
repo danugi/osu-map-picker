@@ -371,7 +371,7 @@ def test_corrupted_preset_row_is_skipped(storage: Storage) -> None:
         storage.get_preset(preset.id)
 
 
-def test_v2_migration_adds_analysis_table_without_losing_catalog(
+def test_v2_v3_migrations_add_analysis_and_queue_without_losing_catalog(
     tmp_path,
 ) -> None:
     path = tmp_path / "v1.db"
@@ -379,6 +379,8 @@ def test_v2_migration_adds_analysis_table_without_losing_catalog(
     store.save_beatmapset(make_beatmapset(7, title="Preserved"))
     store.set_favorite(7, True)
     with store.connection() as conn:
+        conn.execute("DROP TABLE analysis_queue")
+        conn.execute("DROP TABLE analysis_worker_state")
         conn.execute("DROP TABLE beatmap_analysis")
         conn.execute("PRAGMA user_version = 1")
     upgraded = Storage(path)
@@ -387,11 +389,15 @@ def test_v2_migration_adds_analysis_table_without_losing_catalog(
     assert preserved is not None and preserved.title == "Preserved"
     assert 7 in upgraded.favorite_ids()
     with upgraded.connection() as conn:
-        table = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' "
-            "AND name='beatmap_analysis'"
-        ).fetchone()
-    assert table is not None
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    assert {"beatmap_analysis", "analysis_queue", "analysis_worker_state"} <= (
+        tables
+    )
 
 
 def test_database_info(storage: Storage) -> None:

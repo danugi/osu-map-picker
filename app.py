@@ -23,7 +23,7 @@ from typing import Any
 
 import streamlit as st
 
-import analysis
+import analysis_worker
 import appearance
 import catalog
 import config
@@ -108,12 +108,14 @@ PATTERN_LABELS = {
 }
 NAV_ITEMS = (
     "search",
+    "analysis",
     "favorites",
     "history",
     "settings",
 )
 NAV_LABELS = {
     "search": "🔎 Поиск",
+    "analysis": "🧪 Анализ",
     "favorites": "⭐ Избранное",
     "history": "🕘 История",
     "settings": "⚙️ Настройки",
@@ -632,6 +634,22 @@ def _sidebar(store: Storage) -> str:
             st.rerun()
 
     st.sidebar.divider()
+    try:
+        worker = analysis_worker.worker_status(store)
+    except Exception:  # noqa: BLE001 - sidebar must never block browsing
+        worker = {}
+    queue = worker.get("queue", {})
+    worker_state = (
+        "пауза"
+        if worker.get("paused")
+        else ("работает" if worker.get("thread_alive") else "ожидает")
+    )
+    st.sidebar.caption(
+        f"🧪 Анализ: {worker.get('measured', 0)} + "
+        f"{worker.get('partial', 0)} част. из {worker.get('catalog', 0)} · "
+        f"очередь {queue.get('pending', 0) + queue.get('processing', 0)} · "
+        f"{worker_state}"
+    )
     try:
         api_config = config.load_api_config()
         configured = api_config.configured
@@ -1825,11 +1843,8 @@ def _render_card(
         f"· HP {beatmap.hp if beatmap.hp is not None else '?'}</div>"
     )
     with st.container(border=True):
-        cover_col, body_col = st.columns([0.76, 2.24])
-        with cover_col:
-            st.markdown(cover_html, unsafe_allow_html=True)
-        with body_col:
-            st.markdown(header_html, unsafe_allow_html=True)
+        st.markdown(cover_html, unsafe_allow_html=True)
+        st.markdown(header_html, unsafe_allow_html=True)
         match = _match_factor(scored)
         match_text = (
             "недостаточно данных"
@@ -2812,13 +2827,26 @@ def _render_result(store: Storage, result: DiscoveryResult) -> None:
     else:
         shown = items[:visible]
 
-    for index, item in enumerate(shown, start=1):
-        card_position = (
-            items.index(picked) + 1
-            if picked is not None
-            else index
+    if picked is not None:
+        _render_card(
+            store,
+            picked,
+            items.index(picked) + 1,
+            weights,
         )
-        _render_card(store, item, card_position, weights)
+    else:
+        # osu!-style discovery grid: two compact cards per row on desktop;
+        # Streamlit stacks the columns on narrow screens.
+        for start in range(0, len(shown), 2):
+            columns = st.columns(2, gap="medium")
+            for offset, item in enumerate(shown[start : start + 2]):
+                with columns[offset]:
+                    _render_card(
+                        store,
+                        item,
+                        start + offset + 1,
+                        weights,
+                    )
     if picked is None and len(items) > visible:
         if st.button("Показать ещё 15", key="show_more_results"):
             st.session_state["result_visible"] = visible + 15
@@ -3158,6 +3186,21 @@ def page_search(store: Storage, cfg: PresetConfig) -> None:
         "использует весь подходящий каталог, а не только текущую выдачу; "
         "«Искать» пополняет каталог."
     )
+    st.markdown(
+        "<div class='osu-discovery-hero'>"
+        "<div class='osu-discovery-copy'>"
+        "<div class='osu-eyebrow'>beatmap discovery</div>"
+        f"<div class='osu-discovery-title'>{html.escape(cfg.name)}</div>"
+        "<div class='osu-discovery-sub'>"
+        f"{catalog_size} карт в локальном каталоге · "
+        f"{len(selected_skills)} активных навыков · "
+        "строгие фильтры остаются строгими"
+        "</div></div>"
+        "<div class='osu-discovery-orbit' aria-hidden='true'>"
+        "<span></span><span></span><span></span>"
+        "</div></div>",
+        unsafe_allow_html=True,
+    )
 
     query_text = st.text_input(
         "Что искать",
@@ -3280,73 +3323,6 @@ def page_search(store: Storage, cfg: PresetConfig) -> None:
         "фильтры. Повторное нажатие выбирает другую.",
     )
 
-    with st.expander("🧪 Анализ .osu и доказательства", expanded=False):
-        stats = store.analysis_stats()
-        st.caption(
-            "Сохранённый анализ: "
-            + (
-                ", ".join(f"{key}: {value}" for key, value in sorted(stats.items()))
-                if stats
-                else "пока нет"
-            )
-            + ". Анализ выполняется только по кнопке; обычные rerun его не "
-            "запускают."
-        )
-        current = st.session_state.get("result")
-        batch_ids = (
-            [item.beatmap.id for item in current.scored]
-            if isinstance(current, DiscoveryResult)
-            else []
-        )
-        batch_size = int(
-            st.number_input(
-                "Сколько difficulty проанализировать за один запуск",
-                min_value=1,
-                max_value=50,
-                value=10,
-                step=1,
-                key="analysis_batch_size",
-                help="Сначала используются локальные .osu; отсутствующие можно "
-                "скачать, если настроен API. Пакет ограничен дедлайном.",
-            )
-        )
-        st.caption(
-            f"Кандидатов в текущей выдаче: {len(batch_ids)}. "
-            + (
-                "Недостающие .osu будут скачаны в пределах лимита."
-                if configured
-                else "API не настроен: будут проанализированы только уже "
-                "сохранённые .osu."
-            )
-        )
-        if st.button(
-            "Анализировать отсутствующие .osu",
-            key="analyze_missing_osu",
-            disabled=not batch_ids,
-            use_container_width=True,
-        ):
-            with st.spinner("Анализирую .osu в ограниченном пакете…"):
-                summary = analysis.batch_analyze(
-                    store,
-                    batch_ids,
-                    limit=batch_size,
-                    allow_download=configured,
-                    deadline_seconds=45.0,
-                )
-            st.session_state["analysis_notice"] = (
-                "Анализ .osu: обработано {analyzed}, пропущено {skipped}, "
-                "ошибок {failed}, осталось {remaining}; {elapsed} с."
-            ).format(**summary)
-            # Refresh cards with the new evidence using the local catalog only;
-            # this action must not silently start an API discovery.
-            _execute_search(store, cfg, local_only=True)
-            st.rerun()
-        if not batch_ids:
-            st.caption(
-                "Сначала выполните поиск или случайную подборку, чтобы выбрать "
-                "difficulty для анализа."
-            )
-
     with st.expander("Дополнительные фильтры и лимиты", expanded=False):
         _search_advanced_filters(cfg)
         st.caption(
@@ -3359,9 +3335,7 @@ def page_search(store: Storage, cfg: PresetConfig) -> None:
     notice = st.session_state.pop("random_notice", None)
     if notice:
         st.warning(str(notice))
-    analysis_notice = st.session_state.pop("analysis_notice", None)
-    if analysis_notice:
-        st.info(str(analysis_notice))
+
 
     result = st.session_state.get("result")
     if isinstance(result, DiscoveryResult):
@@ -3383,6 +3357,147 @@ def page_search(store: Storage, cfg: PresetConfig) -> None:
 # ---------------------------------------------------------------------------
 # Presets
 # ---------------------------------------------------------------------------
+
+
+def page_analysis(store: Storage, cfg: PresetConfig) -> None:
+    st.header("🧪 Анализ и фоновая очередь")
+    st.caption(
+        "Фоновый worker постепенно разбирает известный каталог: сначала "
+        "избранное, оценки и недавние карты, затем остальные. Сетевые "
+        "загрузки и разбор .osu выполняются вне пути отрисовки Streamlit."
+    )
+    worker = analysis_worker.worker_status(store)
+    queue = worker.get("queue", {})
+    beatmaps = max(1, int(worker.get("beatmaps", 0)))
+    analyzed = int(worker.get("analyzed", 0))
+    partial = int(worker.get("partial", 0))
+    progress = min(1.0, analyzed / beatmaps)
+
+    metrics = st.columns(4)
+    metrics[0].metric(
+        "Проанализировано",
+        f"{analyzed}/{beatmaps}",
+        delta=f"{partial} частично" if partial else None,
+    )
+    metrics[1].metric(
+        "В очереди",
+        int(queue.get("pending", 0)) + int(queue.get("processing", 0)),
+    )
+    metrics[2].metric("Ошибок", int(queue.get("failed", 0)))
+    metrics[3].metric(
+        "Worker",
+        "пауза"
+        if worker.get("paused")
+        else ("работает" if worker.get("thread_alive") else "ожидает"),
+    )
+    st.progress(progress, text=f"Покрытие анализа: {progress:.0%}")
+    st.caption(
+        f"API: {'настроен' if worker.get('api_configured') else 'не настроен'} · "
+        f"владелец: {worker.get('owner') or '—'} · "
+        f"heartbeat: {round(worker.get('heartbeat_age') or 0)} с назад · "
+        f"последний автопоиск: {worker.get('last_discovery_at') or '—'}"
+    )
+    if worker.get("last_error"):
+        st.warning("Последняя ошибка worker: " + str(worker["last_error"]))
+    if not worker.get("enabled"):
+        st.info(
+            "Фоновый worker отключён переменной OSU_PICKER_WORKER=0. "
+            "Кнопки ниже всё равно меняют сохранённое состояние очереди."
+        )
+
+    controls = st.columns([1.0, 1.0, 1.0])
+    if controls[0].button(
+        "▶ Возобновить" if worker.get("paused") else "⏸ Пауза",
+        key="analysis_toggle_pause",
+        use_container_width=True,
+    ):
+        analysis_worker.set_paused(store, not bool(worker.get("paused")))
+        _flash("Фоновая очередь обновлена.")
+        st.rerun()
+    if controls[1].button(
+        "Переочередить каталог",
+        key="analysis_requeue",
+        use_container_width=True,
+    ):
+        try:
+            added = analysis_worker.enqueue_catalog(
+                store,
+                allow_download=bool(worker.get("api_configured")),
+            )
+        except Exception as exc:  # noqa: BLE001 - UI boundary
+            st.error(f"Очередь не обновлена: {type(exc).__name__}")
+        else:
+            _flash(f"В очередь добавлено/обновлено: {added}.")
+            st.rerun()
+    if controls[2].button(
+        "Обновить каталог сейчас",
+        key="analysis_discovery_now",
+        use_container_width=True,
+        disabled=not worker.get("api_configured"),
+        help="Ставит bounded-запрос discovery в очередь worker. "
+        "Кнопка не выполняет сетевой запрос во время отрисовки.",
+    ):
+        store.request_worker_discovery()
+        _flash("Запрос автоматического discovery поставлен worker.")
+        st.rerun()
+
+    left, right = st.columns([1.0, 1.0])
+    with left:
+        st.subheader("Очередь")
+        st.dataframe(
+            [
+                {"Состояние": key, "Карт": value}
+                for key, value in sorted(queue.items())
+                if key != "total"
+            ],
+            hide_index=True,
+            width="stretch",
+        )
+        st.caption(f"Всего строк очереди: {queue.get('total', 0)}.")
+    with right:
+        st.subheader("Сохранённый анализ")
+        analysis_stats = worker.get("analysis", {})
+        if analysis_stats:
+            st.dataframe(
+                [
+                    {
+                        "Состояние": evidence.label(key),
+                        "Карт": value,
+                    }
+                    for key, value in sorted(analysis_stats.items())
+                ],
+                hide_index=True,
+                width="stretch",
+            )
+        else:
+            st.info(
+                "Анализ ещё не сохранён. Worker начнёт с локальных .osu, "
+                "если они есть; отсутствующие файлы появятся в очереди "
+                "только при доступном API."
+            )
+        failures = store.queue_failures(limit=8)
+        if failures:
+            st.markdown("**Последние проблемы**")
+            st.dataframe(
+                [
+                    {
+                        "Карта": f"{row.get('artist', '')} — "
+                        f"{row.get('title', '')}",
+                        "Статус": row.get("status"),
+                        "Попыток": row.get("attempts"),
+                        "Ошибка": row.get("last_error") or "—",
+                    }
+                    for row in failures
+                ],
+                hide_index=True,
+                width="stretch",
+            )
+    st.caption(
+        "Pending — ещё не обработано; processing — взято worker; done — "
+        "результат сохранён; unavailable — нет .osu без API или источник "
+        "недоступен; failed — исчерпаны bounded-попытки. Пустой анализ не "
+        "подменяется отрицательным результатом."
+    )
 
 
 def page_presets(store: Storage, cfg: PresetConfig) -> None:
@@ -4649,6 +4764,7 @@ def main() -> None:
         initial_sidebar_state="expanded",
     )
     store = load_storage(str(config.db_path()))
+    analysis_worker.ensure_worker(store)
     _render_appearance(store)
 
     if st.session_state.pop("_reset_editors", False):
@@ -4691,6 +4807,8 @@ def main() -> None:
 
     if page == "search":
         page_search(store, cfg)
+    elif page == "analysis":
+        page_analysis(store, cfg)
     elif page == "favorites":
         page_favorites(store)
     elif page == "history":

@@ -10,6 +10,7 @@ from PIL import Image
 from streamlit.testing.v1 import AppTest
 
 import analysis
+import analysis_worker
 import app as app_module
 import appearance
 import discovery
@@ -25,12 +26,14 @@ from test_patterns import make_osu
 APP = str(Path(__file__).resolve().parents[1] / "app.py")
 NAV = (
     "search",
+    "analysis",
     "favorites",
     "history",
     "settings",
 )
 HEADERS = (
     "🔎 Поиск карт",
+    "🧪 Анализ и фоновая очередь",
     "⭐ Избранное",
     "🕘 История",
     "⚙️ Настройки",
@@ -670,7 +673,7 @@ def test_navigation_is_compact_and_switches_pages(app_env) -> None:
     at.run()
     for page_id in NAV:
         assert _button(at, f"nav_{page_id}") is not None
-    assert len(NAV) == 4
+    assert len(NAV) == 5
     assert _button(at, "nav_search").proto.type == "primary"
     assert _button(at, "nav_settings").proto.type == "secondary"
     assert not any(item.key == "nav_presets" for item in at.button)
@@ -813,7 +816,9 @@ def test_cards_distinguish_analyzed_from_missing_osu(app_env) -> None:
     assert "измерено" in text
 
 
-def test_analysis_batch_persists_cached_osu_evidence(app_env) -> None:
+def test_analysis_queue_processes_cached_file_and_page_reports_it(
+    app_env,
+) -> None:
     store = Storage(app_env)
     _seed_short_cached_maps(store)
     cache = analysis.cache_dir_for(store)
@@ -824,16 +829,23 @@ def test_analysis_batch_persists_cached_osu_evidence(app_env) -> None:
         ),
         encoding="utf-8",
     )
-    at = AppTest.from_file(APP, default_timeout=90)
-    at.run()
-    _button(at, "run_search").click().run()
-    assert not at.exception, _texts(at)
-    _button(at, "analyze_missing_osu").click().run()
-    assert not at.exception, _texts(at)
+    added = analysis_worker.enqueue_catalog(store, allow_download=False)
+    assert added >= 1
+    assert analysis_worker.process_once(
+        store, limit=1, allow_download=False
+    ) == 1
     stats = store.analysis_stats()
     assert stats.get("measured", 0) >= 1
-    text = _texts(at)
-    assert "Анализ .osu" in text or "измерено" in text
+
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.session_state["nav"] = "analysis"
+    at.run()
+    assert not at.exception, _texts(at)
+    assert "🧪 Анализ и фоновая очередь" in [
+        header.value for header in at.header
+    ]
+    labels = {metric.label for metric in at.metric}
+    assert {"Проанализировано", "В очереди", "Ошибок", "Worker"} <= labels
 
 
 def test_local_streams_and_bursts_use_only_cached_osu_evidence(app_env) -> None:

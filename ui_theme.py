@@ -415,6 +415,66 @@ hr {{
   text-transform: uppercase;
   margin-bottom: 0.35rem;
 }}
+.osu-discovery-hero {{
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.2rem;
+  margin: 1.1rem 0 1.2rem;
+  padding: 1.15rem 1.35rem;
+  border-radius: var(--osu-radius-lg);
+  border: 1px solid rgba(var(--osu-accent-rgb), 0.26);
+  background:
+    radial-gradient(520px 180px at 8% 0%, rgba(var(--osu-accent-rgb), 0.22), transparent 70%),
+    radial-gradient(420px 200px at 100% 100%, rgba(111, 74, 214, 0.20), transparent 72%),
+    linear-gradient(135deg, rgba(29, 23, 36, 0.92), rgba(15, 12, 20, 0.94));
+  overflow: hidden;
+}}
+.osu-discovery-copy {{
+  min-width: 0;
+}}
+.osu-discovery-title {{
+  font-size: clamp(1.35rem, 2.4vw, 2rem);
+  font-weight: 800;
+  letter-spacing: -0.025em;
+  line-height: 1.1;
+  color: var(--osu-text);
+}}
+.osu-discovery-sub {{
+  color: var(--osu-muted);
+  font-size: 0.86rem;
+  margin-top: 0.32rem;
+}}
+.osu-discovery-orbit {{
+  position: relative;
+  width: 92px;
+  height: 92px;
+  flex: 0 0 92px;
+  border-radius: 50%;
+  border: 1px solid rgba(var(--osu-accent-rgb), 0.38);
+  box-shadow: 0 0 42px rgba(var(--osu-accent-rgb), 0.16) inset;
+}}
+.osu-discovery-orbit::before,
+.osu-discovery-orbit::after {{
+  content: "";
+  position: absolute;
+  border-radius: 50%;
+  border: 1px solid rgba(255,255,255,0.16);
+}}
+.osu-discovery-orbit::before {{ inset: 16px; }}
+.osu-discovery-orbit::after {{ inset: 32px; border-color: rgba(var(--osu-accent-rgb), 0.46); }}
+.osu-discovery-orbit span {{
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--osu-accent);
+  box-shadow: 0 0 12px rgba(var(--osu-accent-rgb), 0.8);
+}}
+.osu-discovery-orbit span:nth-child(1) {{ top: 10px; left: 42px; }}
+.osu-discovery-orbit span:nth-child(2) {{ bottom: 16px; left: 20px; opacity: 0.7; }}
+.osu-discovery-orbit span:nth-child(3) {{ right: 13px; top: 38px; opacity: 0.55; }}
 .osu-hero-meta {{
   display: flex;
   flex-wrap: wrap;
@@ -465,9 +525,9 @@ hr {{
 }}
 .osu-card-stats {{
   display: grid;
-  grid-template-columns: repeat(5, minmax(70px, 1fr));
-  gap: 0.55rem;
-  margin: 0.85rem 0 0.55rem;
+  grid-template-columns: repeat(4, minmax(64px, 1fr));
+  gap: 0.5rem;
+  margin: 0.75rem 0 0.45rem;
 }}
 .osu-stat {{
   background: rgba(8, 6, 11, 0.34);
@@ -494,8 +554,8 @@ hr {{
 }}
 .osu-cover {{
   position: relative;
-  min-height: 148px;
-  aspect-ratio: 1.9 / 1;
+  min-height: 118px;
+  aspect-ratio: 2.35 / 1;
   border-radius: var(--osu-radius-md);
   overflow: hidden;
   border: 1px solid var(--osu-border);
@@ -516,7 +576,7 @@ hr {{
   align-items: center;
   justify-content: center;
   height: 100%;
-  min-height: 148px;
+  min-height: 118px;
   color: rgba(255,255,255,0.80);
   font-weight: 800;
   font-size: clamp(1.6rem, 4vw, 2.8rem);
@@ -622,6 +682,8 @@ hr {{
   .block-container {{ padding-left: 1rem; padding-right: 1rem; }}
   .osu-card-stats {{ grid-template-columns: repeat(2, minmax(80px, 1fr)); }}
   .osu-score {{ display: none; }}
+  .osu-discovery-orbit {{ display: none; }}
+  .osu-discovery-hero {{ padding: 1rem; }}
 }}
 </style>
 """

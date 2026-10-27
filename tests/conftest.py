@@ -15,6 +15,16 @@ from models import Beatmap, Beatmapset
 from storage import Storage
 
 
+@pytest.fixture(autouse=True)
+def _disable_background_worker(monkeypatch):
+    """AppTest must stay deterministic; worker tests start workers explicitly."""
+
+    monkeypatch.setenv("OSU_PICKER_WORKER", "0")
+    monkeypatch.delenv("OSU_CLIENT_ID", raising=False)
+    monkeypatch.delenv("OSU_CLIENT_SECRET", raising=False)
+    yield
+
+
 def make_beatmap(
     beatmap_id: int,
     beatmapset_id: int,

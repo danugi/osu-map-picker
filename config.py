@@ -19,7 +19,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 APP_NAME = "Personal osu! Map Picker"
 APP_VERSION = "0.4.0"
 SETTINGS_SCHEMA_VERSION = 1
-DB_SCHEMA_VERSION = 2
+DB_SCHEMA_VERSION = 3
 
 OSU_SITE = "https://osu.ppy.sh"
 OSU_API_BASE = "https://osu.ppy.sh/api/v2"
@@ -36,6 +36,19 @@ DEFAULT_CACHE_TTL_MINUTES = 30
 # request; worst-case overrun is bounded by one request chain (timeout and
 # retries) plus local ranking.
 DEFAULT_DISCOVERY_DEADLINE_SECONDS = 120.0
+
+# --- Background analysis worker ------------------------------------------
+# One daemon thread analyzes missing/stale .osu files through a persistent
+# SQLite queue. Network work is never performed inside a Streamlit rerun.
+DEFAULT_WORKER_POLL_SECONDS = 2.0
+DEFAULT_ANALYSIS_BATCH_SIZE = 4
+DEFAULT_ANALYSIS_MAX_ATTEMPTS = 3
+DEFAULT_ANALYSIS_LEASE_SECONDS = 180.0
+DEFAULT_ANALYSIS_RETRY_MINUTES = (5, 30)
+DEFAULT_WORKER_DOWNLOAD_INTERVAL_SECONDS = 1.0
+DEFAULT_AUTO_DISCOVERY_INTERVAL_MINUTES = 60
+DEFAULT_AUTO_DISCOVERY_MAX_REQUESTS = 4
+DEFAULT_AUTO_DISCOVERY_DEADLINE_SECONDS = 60.0
 
 # --- Filter defaults (the user's starting profile) ------------------------
 DEFAULT_MODES = ("osu",)
