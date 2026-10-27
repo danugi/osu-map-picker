@@ -539,6 +539,29 @@ def test_incremental_diversification_matches_reference_order() -> None:
     ]
 
 
+def test_recommendation_coverage_is_separate_from_score() -> None:
+    empty = evaluate_candidate(candidate(1), context())
+    assert 0.0 <= empty.coverage <= 1.0
+    assert empty.coverage < 1.0
+    assert any("Покрытие факторов" in reason for reason in empty.reasons)
+
+    measured = candidate(2)
+    measured_features = derive_features(
+        measured.beatmap,
+        measured.beatmapset,
+        attributes=None,
+    )
+    measured = Candidate(
+        measured.beatmapset,
+        measured.beatmap,
+        traits=measured_features,
+        skillsets={},
+    )
+    scored = evaluate_candidate(measured, context())
+    assert 0.0 <= scored.coverage <= 1.0
+    assert math.isfinite(scored.score)
+
+
 def test_explanation_is_transparent_and_not_probability() -> None:
     scored = evaluate_candidate(candidate(1), context())
     lines = explain(scored)

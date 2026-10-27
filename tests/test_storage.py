@@ -371,6 +371,29 @@ def test_corrupted_preset_row_is_skipped(storage: Storage) -> None:
         storage.get_preset(preset.id)
 
 
+def test_v2_migration_adds_analysis_table_without_losing_catalog(
+    tmp_path,
+) -> None:
+    path = tmp_path / "v1.db"
+    store = Storage(path)
+    store.save_beatmapset(make_beatmapset(7, title="Preserved"))
+    store.set_favorite(7, True)
+    with store.connection() as conn:
+        conn.execute("DROP TABLE beatmap_analysis")
+        conn.execute("PRAGMA user_version = 1")
+    upgraded = Storage(path)
+    assert upgraded.schema_version() == config.DB_SCHEMA_VERSION
+    preserved = upgraded.get_beatmapset(7)
+    assert preserved is not None and preserved.title == "Preserved"
+    assert 7 in upgraded.favorite_ids()
+    with upgraded.connection() as conn:
+        table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name='beatmap_analysis'"
+        ).fetchone()
+    assert table is not None
+
+
 def test_database_info(storage: Storage) -> None:
     storage.save_beatmapset(make_beatmapset(1))
     info = storage.database_info()

@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
 import config
+import evidence
 from features import TRAITS, trait_similarity
 from feedback import (
     VERDICT_LABELS,
@@ -258,8 +259,13 @@ def _mapping_fit(candidate: Candidate, settings: RankingSettings) -> FactorScore
             if value <= 0:
                 continue
             item = skills.get(key)
-            if item is None or item.score is None:
+            if item is None:
                 parts.append(f"{key}: нет данных")
+                continue
+            if item.score is None:
+                parts.append(
+                    f"{item.name}: {evidence.short_label(item.status)}"
+                )
                 continue
             parts.append(
                 f"{item.name}: {item.display_score}% "
@@ -656,10 +662,12 @@ def evaluate_candidate(candidate: Candidate, ctx: RankingContext) -> ScoredCandi
     factors: list[FactorScore] = []
     numerator = 0.0
     denominator = 0.0
+    enabled_weight = 0.0
     for key in FACTOR_ORDER:
         weight, enabled = _weight(ctx.settings, key)
         if not enabled or weight <= 0:
             continue
+        enabled_weight += weight
         factor = builders[key]()
         factors.append(factor)
         if factor.value is None:
@@ -677,6 +685,11 @@ def evaluate_candidate(candidate: Candidate, ctx: RankingContext) -> ScoredCandi
     if not math.isfinite(base):
         base = 0.5
     score = max(0.0, min(1.0, base))
+    coverage = (
+        max(0.0, min(1.0, denominator / enabled_weight))
+        if enabled_weight > 0
+        else 0.0
+    )
     penalty = 0.0
     normalized: list[FactorScore] = []
     for factor in factors:
@@ -706,12 +719,18 @@ def evaluate_candidate(candidate: Candidate, ctx: RankingContext) -> ScoredCandi
     missing = [f.label for f in factors if f.value is None]
     if missing:
         reasons.append("Нет данных: " + ", ".join(missing) + ".")
+    if coverage < 0.999:
+        reasons.append(
+            f"Покрытие факторов: {coverage:.0%}; отсутствующие факторы не "
+            "заменялись нулём и не повышают уверенность."
+        )
     return ScoredCandidate(
         candidate=candidate,
         score=score,
         factors=tuple(factors),
         reasons=tuple(reasons),
         penalty=penalty,
+        coverage=coverage,
     )
 
 

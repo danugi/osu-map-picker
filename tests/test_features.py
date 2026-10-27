@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from conftest import make_beatmap, make_beatmapset
 
+import evidence
 import gameplay
 import patterns
 from features import derive_traits, format_traits, trait_similarity
@@ -72,6 +73,97 @@ def test_truncated_sequence_analysis_is_not_reported_as_high_confidence() -> Non
 
     assert traits.sources["streams"] == "osu_sequence_partial"
     assert traits.confidence == "medium"
+
+
+def test_evidence_status_distinguishes_unanalyzed_from_not_detected() -> None:
+    beatmapset = make_beatmapset(1)
+    beatmap = make_beatmap(11, 1)
+
+    unanalyzed = derive_traits(
+        beatmap,
+        beatmapset,
+        None,
+        analysis_status=evidence.NOT_ANALYZED,
+    )
+    assert "streams" not in unanalyzed.scores
+    assert unanalyzed.status("streams") == evidence.NOT_ANALYZED
+
+    missing_source = derive_traits(
+        beatmap,
+        beatmapset,
+        None,
+        analysis_status=evidence.SOURCE_UNAVAILABLE,
+    )
+    assert missing_source.status("streams") == evidence.SOURCE_UNAVAILABLE
+
+    analyzed_empty = derive_traits(
+        beatmap,
+        beatmapset,
+        None,
+        sequence=SequenceAnalysis(
+            analyzed_notes=10, total_notes=10, analyzer_version=2
+        ),
+        analysis_status=evidence.MEASURED,
+    )
+    assert analyzed_empty.scores["streams"] == 0.0
+    assert analyzed_empty.status("streams") == evidence.NOT_DETECTED
+
+    partial = derive_traits(
+        beatmap,
+        beatmapset,
+        None,
+        sequence=SequenceAnalysis(
+            analyzed_notes=10,
+            total_notes=20,
+            truncated=True,
+            stream_chains=(
+                PatternChain(
+                    kind="stream",
+                    start_index=0,
+                    length=10,
+                    start_ms=1000,
+                    end_ms=2125,
+                    median_gap_ms=125.0,
+                    rhythm_quality=1.0,
+                    compact_share=1.0,
+                ),
+            ),
+            analyzer_version=2,
+        ),
+        analysis_status=evidence.PARTIAL,
+    )
+    assert partial.status("streams") == evidence.PARTIAL
+    assert partial.analysis_status == evidence.PARTIAL
+
+
+def test_geometry_features_have_bounded_ranges() -> None:
+    beatmapset = make_beatmapset(1)
+    beatmap = make_beatmap(11, 1, cs=4.0)
+    notes = [
+        (1000 + index * 125, 100 if index % 2 else 400, 100)
+        for index in range(12)
+    ]
+    analysis = patterns.analyze_sequences(
+        gameplay.parse_osu(make_osu(notes), beatmap_id=11)
+    )
+    traits = derive_traits(
+        beatmap,
+        beatmapset,
+        None,
+        sequence=analysis,
+        analysis_status=evidence.MEASURED,
+    )
+    for key in (
+        "jump_share",
+        "wide_jump_share",
+        "flow_share",
+        "angle_change_share",
+        "slider_share",
+        "notes_per_second",
+        "pattern_variety",
+        "rhythm_variability",
+    ):
+        assert 0.0 <= traits.scores[key] <= 1.0
 
 
 def test_traits_from_tags_are_low_confidence() -> None:

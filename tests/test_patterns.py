@@ -157,6 +157,64 @@ def test_sequence_features_report_truncated_analysis() -> None:
     assert analysis.total_notes == gameplay.MAX_PREVIEW_OBJECTS
 
 
+def test_geometry_labels_multiple_patterns() -> None:
+    # A compact fast chain followed by wide zig-zag jumps: more than one
+    # measured category must be allowed at once.
+    notes = [
+        (1000 + index * 125, 100 + index * 8, 100) for index in range(12)
+    ]
+    notes += [
+        (3000 + index * 300, 100 if index % 2 else 400, 100)
+        for index in range(12)
+    ]
+    analysis = analyze(notes)
+    assert "streams" in analysis.labels
+    assert analysis.wide_jump_share > 0.2
+    assert "wide_aim" in analysis.labels
+    assert "flow_aim" in analysis.labels
+    assert analysis.sections
+
+
+def test_geometry_detects_flow_and_wide_jumps_separately() -> None:
+    flow = analyze(
+        [(1000 + index * 250, 100 + index * 30, 100) for index in range(10)]
+    )
+    wide = analyze(
+        [(1000 + index * 250, 100 if index % 2 else 400, 100) for index in range(10)]
+    )
+    assert flow.flow_share > 0.5
+    assert "flow_aim" in flow.labels
+    assert wide.wide_jump_share > 0.5
+    assert "wide_aim" in wide.labels
+
+
+def test_mixed_sections_are_reported() -> None:
+    # First 24 notes are compact and straight, next 24 are wide zig-zag jumps.
+    notes = [
+        (1000 + index * 125, 100 + index * 4, 100) for index in range(24)
+    ]
+    notes += [
+        (5000 + index * 300, 100 if index % 2 else 400, 100)
+        for index in range(24)
+    ]
+    analysis = analyze(notes)
+    assert "mixed_patterns" in analysis.labels
+    assert len(analysis.sections) >= 2
+    assert any("wide_aim" in section.labels for section in analysis.sections)
+    assert any(
+        "flow_aim" in section.labels or not section.labels
+        for section in analysis.sections
+    )
+
+
+def test_analyzed_slow_map_is_not_a_stream() -> None:
+    analysis = analyze([(1000 + index * 600, 100, 100) for index in range(10)])
+    assert analysis.stream_chains == ()
+    assert analysis.burst_chains == ()
+    features = patterns.sequence_features(analysis)
+    assert features["streams"] == 0.0
+
+
 def test_cached_analysis_is_reused_until_the_file_changes(
     tmp_path, monkeypatch
 ) -> None:

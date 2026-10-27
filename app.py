@@ -23,9 +23,11 @@ from typing import Any
 
 import streamlit as st
 
+import analysis
 import appearance
 import catalog
 import config
+import evidence
 import gameplay
 import presets
 import randomizer
@@ -51,13 +53,23 @@ from models import (
     STATUSES,
     DiscoveryResult,
     FactorConfig,
+    FactorScore,
     PresetConfig,
     ScoredCandidate,
 )
 from osu_api import OsuApiClient, OsuApiError
 from presets import PresetError
 from ranking import FACTOR_LABELS, RankingConfigError, explain, validate_ranking
-from relevance import BELOW, MATCHED, MATCHED_LIMITED, NO_DATA, NOT_ANALYZED
+from relevance import (
+    BELOW,
+    FAILED,
+    MATCHED,
+    MATCHED_LIMITED,
+    NO_DATA,
+    NOT_ANALYZED,
+    PARTIAL,
+    SOURCE_UNAVAILABLE,
+)
 from skillsets import (
     CONFIDENCE_LABELS,
     SKILLS,
@@ -78,6 +90,21 @@ TARGET_STATUS_LABELS = {
     BELOW: "ниже порога",
     NO_DATA: "недостаточно данных",
     NOT_ANALYZED: "не анализировалось",
+    SOURCE_UNAVAILABLE: "источник недоступен",
+    PARTIAL: "частичный анализ",
+    FAILED: "анализ не удался",
+}
+PATTERN_LABELS = {
+    "jump_aim": "прыжковый aim",
+    "wide_aim": "широкие прыжки",
+    "flow_aim": "плавный aim",
+    "angle_control": "резкие смены угла",
+    "slider_heavy": "много слайдеров",
+    "high_density": "высокая плотность",
+    "streams": "стримы",
+    "bursts": "бёрсты",
+    "mixed_patterns": "смешанные секции",
+    "variable_rhythm": "переменный ритм",
 }
 NAV_ITEMS = (
     "search",
@@ -1630,6 +1657,11 @@ def _render_factor_table(scored: ScoredCandidate) -> None:
         "это эвристический порядок, а не вероятность того, что карта "
         "понравится."
     )
+    st.caption(
+        f"Evidence coverage: {round(scored.coverage * 100)}% веса включённых "
+        "факторов имеют значение. Низкое покрытие означает, что оценка "
+        "опирается на меньшую часть заявленных целей."
+    )
 
 
 def _feedback_form(store: Storage, beatmapset_id: int) -> None:
@@ -1675,12 +1707,20 @@ def _card_skill_lines(
     for key, item in entries:
         name = SKILLS[key].name if key in SKILLS else key
         if item is None or item.score is None:
-            lines.append(f"{name}: нет данных")
+            status = (
+                item.status
+                if item is not None
+                else scored.candidate.traits.status(key)
+            )
+            lines.append(f"{name}: {evidence.short_label(status)}")
             continue
+        if item.status == evidence.NOT_DETECTED:
+            lines.append(f"{name}: не найдено (анализ выполнялся)")
+            continue
+        suffix = evidence.short_label(item.status)
         lines.append(
-            f"{name}: {item.display_score}% "
-            f"({CONFIDENCE_LABELS.get(item.confidence, item.confidence)}; "
-            f"{SUPPORT_LABELS.get(item.support, item.support)})"
+            f"{name}: {item.display_score}%"
+            + (f" ({suffix})" if suffix else "")
         )
     return lines
 
@@ -1690,6 +1730,35 @@ def _format_seconds(value: int | float | None) -> str:
         return "?"
     seconds = max(0, int(value))
     return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+def _match_factor(scored: ScoredCandidate) -> FactorScore | None:
+    for factor in scored.factors:
+        if factor.key == "mapping_fit":
+            return factor
+    return None
+
+
+def _pattern_summary(scored: ScoredCandidate) -> str:
+    candidate = scored.candidate
+    sequence = candidate.sequence
+    if sequence is not None:
+        if sequence.labels:
+            labels = [
+                PATTERN_LABELS.get(label, label) for label in sequence.labels[:5]
+            ]
+            return "Паттерны .osu: " + ", ".join(labels) + "."
+        return (
+            "Паттерны .osu: проанализировано, выраженных паттернов по "
+            "заданным критериям не найдено (это не отсутствие данных)."
+        )
+    analysis_evidence = candidate.analysis
+    status = (
+        analysis_evidence.status
+        if analysis_evidence is not None
+        else candidate.traits.analysis_status
+    )
+    return "Паттерны .osu: " + evidence.explanation(status)
 
 
 def _render_card(
@@ -1740,7 +1809,9 @@ def _render_card(
         f"<span class='osu-chip accent'>{html.escape(version)}</span>"
         f"</div></div>"
         f"<div class='osu-score'><div class='num'>{scored.display_score}</div>"
-        f"<div class='lbl'>Recommendation</div></div></div>"
+        f"<div class='lbl'>Recommendation</div>"
+        f"<div class='lbl'>evidence {round(scored.coverage * 100)}%</div>"
+        f"</div></div>"
         f"<div class='osu-card-stats'>"
         f"<div class='osu-stat'><div class='k'>Difficulty</div><div class='v'>{html.escape(stars_text)}</div></div>"
         f"<div class='osu-stat'><div class='k'>BPM</div><div class='v'>{html.escape(bpm_text)}</div></div>"
@@ -1759,6 +1830,28 @@ def _render_card(
             st.markdown(cover_html, unsafe_allow_html=True)
         with body_col:
             st.markdown(header_html, unsafe_allow_html=True)
+        match = _match_factor(scored)
+        match_text = (
+            "недостаточно данных"
+            if match is None or match.value is None
+            else f"{round(match.value * 100)}%"
+        )
+        st.caption(
+            f"Match: {match_text} · Evidence coverage: "
+            f"{round(scored.coverage * 100)}% · Recommendation: "
+            f"{scored.display_score}/100 (эвристический порядок)."
+        )
+        st.caption(_pattern_summary(scored))
+        analysis_evidence = scored.candidate.analysis
+        if (
+            analysis_evidence is not None
+            and analysis_evidence.status == evidence.PARTIAL
+        ):
+            st.caption(
+                "Частичный анализ .osu: "
+                + (analysis_evidence.scope or "покрыта только часть карты")
+                + ". Найденное относится к этой части."
+            )
         if not scored.candidate.within_tolerance:
             st.warning("Карта вне строгого диапазона звёзд: допущена мягким режимом.")
         unknown = scored.candidate.unknown_fields
@@ -1768,13 +1861,15 @@ def _render_card(
             )
         skill_lines = _card_skill_lines(scored, skill_weights)
         if skill_lines:
-            st.caption("Навыки: " + " · ".join(skill_lines))
-        traits = scored.candidate.traits
-        if traits.notes:
-            st.caption("Данные и ограничения: " + " ".join(traits.notes))
+            st.caption("Цели пресета: " + " · ".join(skill_lines))
 
         with st.expander("Почему эта карта здесь", expanded=False):
             _render_target_gate(scored)
+            traits = scored.candidate.traits
+            if traits.notes:
+                st.markdown("**Данные и ограничения**")
+                for note in traits.notes:
+                    st.caption("• " + note)
             st.markdown("**Факторы рекомендации**")
             for line in explain(scored):
                 st.markdown(f"- {line}")
@@ -1790,30 +1885,89 @@ def _render_card(
                     f"{int(round(scored.diversified_score * 100))}/100. Это не "
                     "изменение строгих фильтров."
                 )
-            st.markdown("**Детали навыков**")
-            relevant = [
-                item
-                for item in scored.candidate.skillsets.values()
-                if item.score is not None
-                and (
-                    not skill_weights
-                    or skill_weights.get(item.skill_id, 0.0) > 0
+            st.markdown("**Состояние анализа .osu**")
+            analysis_evidence = scored.candidate.analysis
+            if analysis_evidence is None:
+                st.caption(
+                    "Статус анализа неизвестен; sequence-признаки не "
+                    "интерпретируются как отсутствие паттерна."
                 )
-            ]
-            relevant.sort(key=lambda item: (-(item.score or 0.0), item.skill_id))
+            else:
+                st.caption(
+                    f"{evidence.label(analysis_evidence.status)}"
+                    f" · источник: {analysis_evidence.source or '—'}"
+                    f" · анализатор v{analysis_evidence.analyzer_version or '—'}"
+                    + (
+                        f" · {analysis_evidence.scope}"
+                        if analysis_evidence.scope
+                        else ""
+                    )
+                )
+                st.caption(evidence.explanation(analysis_evidence.status))
+                sequence = scored.candidate.sequence
+                if sequence is not None:
+                    if sequence.sections:
+                        section_bits = []
+                        for section in sequence.sections[:3]:
+                            labels = ", ".join(
+                                PATTERN_LABELS.get(label, label)
+                                for label in section.labels
+                            ) or "без выраженного паттерна"
+                            section_bits.append(
+                                f"{_format_seconds(section.start_ms / 1000)}–"
+                                f"{_format_seconds(section.end_ms / 1000)}: "
+                                f"{labels}"
+                            )
+                        st.caption("Секции: " + " · ".join(section_bits) + ".")
+                    else:
+                        st.caption(
+                            "Секционное описание недоступно: карта слишком "
+                            "короткая или объектов недостаточно."
+                        )
+            st.markdown("**Детали навыков**")
+            if skill_weights:
+                relevant = [
+                    scored.candidate.skillsets[key]
+                    for key, weight in skill_weights.items()
+                    if weight > 0 and key in scored.candidate.skillsets
+                ]
+            else:
+                relevant = [
+                    item
+                    for item in scored.candidate.skillsets.values()
+                    if item.score is not None
+                ]
+                relevant.sort(
+                    key=lambda item: (-(item.score or 0.0), item.skill_id)
+                )
             if not relevant:
                 st.caption(
                     "Для выбранных навыков не хватает измеримых признаков. "
                     "Значения не выдумывались."
                 )
             for item in relevant[:6]:
-                st.markdown(
-                    f"- **{item.name}: {item.display_score}%** · "
-                    f"уверенность: {CONFIDENCE_LABELS.get(item.confidence, item.confidence)} · "
-                    f"поддержка: {SUPPORT_LABELS.get(item.support, item.support)}"
-                )
+                status = evidence.label(item.status)
+                if item.score is None:
+                    st.markdown(
+                        f"- **{item.name}: {status}** · "
+                        f"покрытие признаков: {item.coverage:.0%}"
+                    )
+                else:
+                    st.markdown(
+                        f"- **{item.name}: {item.display_score}%** · "
+                        f"{status} · "
+                        f"уверенность: {CONFIDENCE_LABELS.get(item.confidence, item.confidence)} · "
+                        f"поддержка: {SUPPORT_LABELS.get(item.support, item.support)} · "
+                        f"покрытие: {item.coverage:.0%}"
+                    )
                 if item.evidence:
                     st.caption("Признаки: " + "; ".join(item.evidence[:4]) + ".")
+                if item.missing:
+                    st.caption(
+                        "Недоступные признаки: "
+                        + ", ".join(item.missing[:6])
+                        + "."
+                    )
                 if item.limitations:
                     st.caption("Ограничения: " + " ".join(item.limitations[:3]))
 
@@ -2410,10 +2564,13 @@ def _render_result(store: Storage, result: DiscoveryResult) -> None:
         )
         st.caption(
             "Sequence-анализ: "
-            f"{result.sequence_analyzed} проанализировано, "
-            f"{result.sequence_unanalyzed} без анализа · "
+            f"{result.sequence_analyzed} проанализировано "
+            f"({result.sequence_partial} частично), "
+            f"{result.sequence_not_analyzed} не анализировалось, "
+            f"{result.sequence_source_unavailable} без .osu, "
+            f"{result.sequence_failed} с ошибкой · "
             f".osu скачано: {result.sequence_downloads} · "
-            f"из локального кэша: {result.sequence_cache_hits} · "
+            f"из локального кэша/БД: {result.sequence_cache_hits} · "
             f"полнота sequence-данных: {sequence_state}."
         )
 
@@ -3123,6 +3280,73 @@ def page_search(store: Storage, cfg: PresetConfig) -> None:
         "фильтры. Повторное нажатие выбирает другую.",
     )
 
+    with st.expander("🧪 Анализ .osu и доказательства", expanded=False):
+        stats = store.analysis_stats()
+        st.caption(
+            "Сохранённый анализ: "
+            + (
+                ", ".join(f"{key}: {value}" for key, value in sorted(stats.items()))
+                if stats
+                else "пока нет"
+            )
+            + ". Анализ выполняется только по кнопке; обычные rerun его не "
+            "запускают."
+        )
+        current = st.session_state.get("result")
+        batch_ids = (
+            [item.beatmap.id for item in current.scored]
+            if isinstance(current, DiscoveryResult)
+            else []
+        )
+        batch_size = int(
+            st.number_input(
+                "Сколько difficulty проанализировать за один запуск",
+                min_value=1,
+                max_value=50,
+                value=10,
+                step=1,
+                key="analysis_batch_size",
+                help="Сначала используются локальные .osu; отсутствующие можно "
+                "скачать, если настроен API. Пакет ограничен дедлайном.",
+            )
+        )
+        st.caption(
+            f"Кандидатов в текущей выдаче: {len(batch_ids)}. "
+            + (
+                "Недостающие .osu будут скачаны в пределах лимита."
+                if configured
+                else "API не настроен: будут проанализированы только уже "
+                "сохранённые .osu."
+            )
+        )
+        if st.button(
+            "Анализировать отсутствующие .osu",
+            key="analyze_missing_osu",
+            disabled=not batch_ids,
+            use_container_width=True,
+        ):
+            with st.spinner("Анализирую .osu в ограниченном пакете…"):
+                summary = analysis.batch_analyze(
+                    store,
+                    batch_ids,
+                    limit=batch_size,
+                    allow_download=configured,
+                    deadline_seconds=45.0,
+                )
+            st.session_state["analysis_notice"] = (
+                "Анализ .osu: обработано {analyzed}, пропущено {skipped}, "
+                "ошибок {failed}, осталось {remaining}; {elapsed} с."
+            ).format(**summary)
+            # Refresh cards with the new evidence using the local catalog only;
+            # this action must not silently start an API discovery.
+            _execute_search(store, cfg, local_only=True)
+            st.rerun()
+        if not batch_ids:
+            st.caption(
+                "Сначала выполните поиск или случайную подборку, чтобы выбрать "
+                "difficulty для анализа."
+            )
+
     with st.expander("Дополнительные фильтры и лимиты", expanded=False):
         _search_advanced_filters(cfg)
         st.caption(
@@ -3135,6 +3359,9 @@ def page_search(store: Storage, cfg: PresetConfig) -> None:
     notice = st.session_state.pop("random_notice", None)
     if notice:
         st.warning(str(notice))
+    analysis_notice = st.session_state.pop("analysis_notice", None)
+    if analysis_notice:
+        st.info(str(analysis_notice))
 
     result = st.session_state.get("result")
     if isinstance(result, DiscoveryResult):
@@ -4281,6 +4508,18 @@ def page_diagnostics(store: Storage, cfg: PresetConfig) -> None:
                 pass
         _flash(f"Кеш превью очищен: файлов {removed}.")
         st.rerun()
+
+    st.subheader("Анализ .osu")
+    analysis_stats = store.analysis_stats()
+    if analysis_stats:
+        st.write(
+            " · ".join(
+                f"{evidence.label(key)}: {value}"
+                for key, value in sorted(analysis_stats.items())
+            )
+        )
+    else:
+        st.info("Сохранённого анализа .osu пока нет.")
 
     st.subheader("Последний поиск")
     last = store.last_search_run()

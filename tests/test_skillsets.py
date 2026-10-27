@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from conftest import make_beatmap, make_beatmapset
 
 from features import derive_features
@@ -249,6 +250,37 @@ def test_required_any_accepts_one_reliable_feature() -> None:
     skill = evaluate_skills(features)["aim_control"]
     assert skill.score is not None
     assert "control" in skill.evidence[0] or "control" in " ".join(skill.evidence)
+
+
+def test_combined_skill_reports_missing_components_and_coverage() -> None:
+    skills = evaluate_skills(sequence_features(streams=1.0))
+    combined = skills["stream_reading"]
+    assert combined.score is not None
+    assert combined.coverage == pytest.approx(0.5)
+    assert combined.status == "partial"
+    assert "ar_challenge" in combined.missing
+
+
+def test_unanalyzed_skill_reports_status_instead_of_zero() -> None:
+    skill = evaluate_skills(BeatmapFeatures())["stream_long"]
+    assert skill.score is None
+    assert skill.status in {"", "not_analyzed"}
+    assert skill.coverage == 0.0
+
+
+def test_analyzed_zero_streams_is_not_detected_not_missing() -> None:
+    features = sequence_features(streams=0.0, bursts=0.0)
+    features = BeatmapFeatures(
+        scores=features.scores,
+        sources=features.sources,
+        statuses={
+            key: "not_detected" for key in features.scores
+        },
+        confidence="high",
+    )
+    skill = evaluate_skills(features)["stream_long"]
+    assert skill.score is not None and skill.score == 0.0
+    assert skill.status == "not_detected"
 
 
 def test_stream_control_requires_sequence_evidence() -> None:

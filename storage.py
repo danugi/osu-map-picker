@@ -179,7 +179,25 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
             filters_json TEXT NOT NULL DEFAULT '{}'
         )
         """,
-    )
+    ),
+    2: (
+        """
+        CREATE TABLE beatmap_analysis (
+            beatmap_id INTEGER PRIMARY KEY
+                REFERENCES beatmaps(id) ON DELETE CASCADE,
+            status TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT '',
+            analyzer_version INTEGER NOT NULL,
+            file_mtime_ns INTEGER,
+            file_size INTEGER,
+            scope TEXT NOT NULL DEFAULT '',
+            analyzed_at TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            sequence_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """,
+        "CREATE INDEX idx_analysis_status ON beatmap_analysis(status)",
+    ),
 }
 
 
@@ -596,6 +614,94 @@ class Storage:
                 for row in rows:
                     result[int(row["beatmap_id"])] = dict(row)
         return result
+
+    # -- persistent .osu analysis ------------------------------------------
+    def save_analysis(
+        self,
+        beatmap_id: int,
+        *,
+        status: str,
+        source: str,
+        analyzer_version: int,
+        file_mtime_ns: int | None,
+        file_size: int | None,
+        scope: str,
+        sequence_json: str,
+        attempts: int = 0,
+    ) -> None:
+        with self.connection() as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM beatmaps WHERE id = ?", (int(beatmap_id),)
+            ).fetchone()
+            if exists is None:
+                raise StorageError(
+                    f"Нельзя сохранить анализ: beatmap {beatmap_id} не сохранён"
+                )
+            conn.execute(
+                """
+                INSERT INTO beatmap_analysis (
+                    beatmap_id, status, source, analyzer_version,
+                    file_mtime_ns, file_size, scope, analyzed_at, attempts,
+                    sequence_json
+                ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(beatmap_id) DO UPDATE SET
+                    status=excluded.status,
+                    source=excluded.source,
+                    analyzer_version=excluded.analyzer_version,
+                    file_mtime_ns=excluded.file_mtime_ns,
+                    file_size=excluded.file_size,
+                    scope=excluded.scope,
+                    analyzed_at=excluded.analyzed_at,
+                    attempts=excluded.attempts,
+                    sequence_json=excluded.sequence_json
+                """,
+                (
+                    int(beatmap_id),
+                    status,
+                    source,
+                    int(analyzer_version),
+                    file_mtime_ns,
+                    file_size,
+                    scope,
+                    now_iso(),
+                    int(attempts),
+                    sequence_json,
+                ),
+            )
+
+    def get_analysis(self, beatmap_id: int) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM beatmap_analysis WHERE beatmap_id = ?",
+                (int(beatmap_id),),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def analysis_for_beatmaps(
+        self, beatmap_ids: Iterable[int]
+    ) -> dict[int, dict[str, Any]]:
+        wanted = list(dict.fromkeys(int(value) for value in beatmap_ids))
+        result: dict[int, dict[str, Any]] = {}
+        with self.connection() as conn:
+            for start in range(0, len(wanted), 400):
+                chunk = wanted[start : start + 400]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    "SELECT * FROM beatmap_analysis "
+                    f"WHERE beatmap_id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    result[int(row["beatmap_id"])] = dict(row)
+        return result
+
+    def analysis_stats(self) -> dict[str, int]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT status, COUNT(*) AS n FROM beatmap_analysis "
+                "GROUP BY status"
+            ).fetchall()
+        return {str(row["status"]): int(row["n"]) for row in rows}
 
     # -- search cache ------------------------------------------------------
     def cache_get(self, key: str) -> dict[str, Any] | None:

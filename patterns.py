@@ -19,11 +19,23 @@ from statistics import median, pstdev
 from typing import Callable
 
 import gameplay
-from models import PatternChain, SequenceAnalysis
+from models import PatternChain, PatternSection, SequenceAnalysis
+
+ANALYZER_VERSION = 2
 
 STREAM_MIN_NOTES = 10
 BURST_MIN_NOTES = 5
 BURST_MAX_NOTES = 9
+# Geometry thresholds are deliberately conservative and expressed in circle
+# diameters so CS changes the physical spacing rather than the label.
+JUMP_DIAMETERS = 1.2
+WIDE_JUMP_DIAMETERS = 2.0
+FLOW_ANGLE_DEGREES = 35.0
+ANGLE_CHANGE_DEGREES = 90.0
+SLIDER_HEAVY_SHARE = 0.35
+HIGH_DENSITY_NOTES_PER_SECOND = 5.0
+SECTION_OBJECTS = 24
+MAX_SECTIONS = 32
 
 # A fast chain is at most 0.40 beat between consecutive notes. That includes
 # 1/4, 1/3, 1/6 and 1/8, but excludes 1/2 jumps even at high BPM.
@@ -52,6 +64,14 @@ SEQUENCE_FEATURE_KEYS = frozenset(
         "burst_median",
         "burst_tempo",
         "burst_rhythm_quality",
+        "jump_share",
+        "wide_jump_share",
+        "flow_share",
+        "angle_change_share",
+        "slider_share",
+        "notes_per_second",
+        "pattern_variety",
+        "rhythm_variability",
     }
 )
 
@@ -118,6 +138,189 @@ def _chain(
     )
 
 
+def _angle_degrees(
+    previous: gameplay.PreviewObject,
+    current: gameplay.PreviewObject,
+    following: gameplay.PreviewObject,
+) -> float | None:
+    ax, ay = current.x - previous.x, current.y - previous.y
+    bx, by = following.x - current.x, following.y - current.y
+    norm_a = math.hypot(ax, ay)
+    norm_b = math.hypot(bx, by)
+    if norm_a <= 1e-6 or norm_b <= 1e-6:
+        return None
+    cosine = (ax * bx + ay * by) / (norm_a * norm_b)
+    return math.degrees(math.acos(max(-1.0, min(1.0, cosine))))
+
+
+def _geometry(
+    notes: list[gameplay.PreviewObject], cs: float
+) -> tuple[dict[str, float], tuple[str, ...], tuple[PatternSection, ...]]:
+    """Measure spatial/timing properties on the analyzed objects.
+
+    These are descriptive measurements, not proof that a map belongs to a
+    subjective genre. Thresholds are documented next to the constants above.
+    """
+
+    if len(notes) < 2:
+        return {}, (), ()
+    diameter = _circle_diameter(cs)
+    distances: list[float] = []
+    angles: list[float] = []
+    gaps: list[float] = []
+    for index in range(1, len(notes)):
+        previous, current = notes[index - 1], notes[index]
+        distance = (
+            math.hypot(current.x - previous.x, current.y - previous.y)
+            / diameter
+        )
+        distances.append(distance)
+        gap = float(current.start - previous.start)
+        if gap > 0:
+            gaps.append(gap)
+        if index + 1 < len(notes):
+            angle = _angle_degrees(previous, current, notes[index + 1])
+            if angle is not None:
+                angles.append(angle)
+    jump_share = (
+        sum(1 for value in distances if value >= JUMP_DIAMETERS)
+        / len(distances)
+        if distances
+        else 0.0
+    )
+    wide_share = (
+        sum(1 for value in distances if value >= WIDE_JUMP_DIAMETERS)
+        / len(distances)
+        if distances
+        else 0.0
+    )
+    flow_share = (
+        sum(1 for value in angles if value <= FLOW_ANGLE_DEGREES)
+        / len(angles)
+        if angles
+        else 0.0
+    )
+    angle_share = (
+        sum(1 for value in angles if value >= ANGLE_CHANGE_DEGREES)
+        / len(angles)
+        if angles
+        else 0.0
+    )
+    slider_share = (
+        sum(1 for note in notes if note.kind == "slider") / len(notes)
+    )
+    span = max(1.0, float(notes[-1].start - notes[0].start))
+    notes_per_second = len(notes) / (span / 1000.0)
+    rhythm_variability = 0.0
+    if len(gaps) > 1:
+        mean_gap = sum(gaps) / len(gaps)
+        rhythm_variability = (
+            pstdev(gaps) / mean_gap if mean_gap > 0 else 0.0
+        )
+    metrics = {
+        "jump_share": _clamp(jump_share),
+        "wide_jump_share": _clamp(wide_share),
+        "flow_share": _clamp(flow_share),
+        "angle_change_share": _clamp(angle_share),
+        "slider_share": _clamp(slider_share),
+        "notes_per_second": max(0.0, notes_per_second),
+        "rhythm_variability": _clamp(rhythm_variability),
+    }
+    return metrics, (), ()
+
+
+def _section_labels(
+    notes: list[gameplay.PreviewObject], cs: float
+) -> tuple[PatternSection, ...]:
+    """Bound, evenly spaced section summaries for mixed-pattern detection."""
+
+    if len(notes) <= SECTION_OBJECTS:
+        windows = [(0, len(notes))]
+    else:
+        total = len(notes)
+        count = min(
+            MAX_SECTIONS, max(1, math.ceil(total / SECTION_OBJECTS))
+        )
+        step = max(1, total // count)
+        starts = list(range(0, max(1, total - SECTION_OBJECTS + 1), step))
+        windows = [
+            (start, min(total, start + SECTION_OBJECTS)) for start in starts
+        ][:MAX_SECTIONS]
+    sections: list[PatternSection] = []
+    for start, end in windows:
+        chunk = notes[start:end]
+        metrics, _, _ = _geometry(chunk, cs)
+        labels = _labels_from_metrics(metrics)
+        sections.append(
+            PatternSection(
+                start_ms=chunk[0].start,
+                end_ms=chunk[-1].start,
+                object_count=len(chunk),
+                labels=labels,
+                jump_share=metrics.get("jump_share", 0.0),
+                wide_jump_share=metrics.get("wide_jump_share", 0.0),
+                flow_share=metrics.get("flow_share", 0.0),
+                angle_change_share=metrics.get("angle_change_share", 0.0),
+            )
+        )
+    return tuple(sections)
+
+
+def _labels_from_metrics(metrics: dict[str, float]) -> tuple[str, ...]:
+    labels: list[str] = []
+    # Thresholds are intentionally stricter than "the value is non-zero".
+    # They are descriptive heuristics, not genre proof.
+    if metrics.get("jump_share", 0.0) >= 0.65:
+        labels.append("jump_aim")
+    if metrics.get("wide_jump_share", 0.0) >= 0.50:
+        labels.append("wide_aim")
+    if metrics.get("flow_share", 0.0) >= 0.30:
+        labels.append("flow_aim")
+    if metrics.get("angle_change_share", 0.0) >= 0.60:
+        labels.append("angle_control")
+    if metrics.get("slider_share", 0.0) >= SLIDER_HEAVY_SHARE:
+        labels.append("slider_heavy")
+    if metrics.get("notes_per_second", 0.0) >= HIGH_DENSITY_NOTES_PER_SECOND:
+        labels.append("high_density")
+    return tuple(labels)
+
+
+def _primary_pattern(labels: tuple[str, ...]) -> str:
+    for candidate in (
+        "flow_aim",
+        "wide_aim",
+        "angle_control",
+        "slider_heavy",
+        "high_density",
+        "jump_aim",
+    ):
+        if candidate in labels:
+            return candidate
+    return ""
+
+
+def _combined_labels(
+    metrics: dict[str, float],
+    stream_chains: list[PatternChain],
+    burst_chains: list[PatternChain],
+    sections: tuple[PatternSection, ...],
+) -> tuple[str, ...]:
+    labels = list(_labels_from_metrics(metrics))
+    if stream_chains:
+        labels.append("streams")
+    if burst_chains:
+        labels.append("bursts")
+    primary_sections = {
+        _primary_pattern(section.labels)
+        for section in sections
+        if section.labels
+    }
+    primary_sections.discard("")
+    if len(primary_sections) >= 2:
+        labels.append("mixed_patterns")
+    return tuple(dict.fromkeys(labels))
+
+
 def analyze_sequences(preview: gameplay.BeatmapPreview) -> SequenceAnalysis:
     """Find separate stream and burst chains in one parsed difficulty."""
 
@@ -129,10 +332,21 @@ def analyze_sequences(preview: gameplay.BeatmapPreview) -> SequenceAnalysis:
     )
     total_notes = len(notes)
     if total_notes < BURST_MIN_NOTES:
+        metrics, _, sections = _geometry(notes, preview.circle_size)
         return SequenceAnalysis(
             analyzed_notes=total_notes,
             total_notes=total_notes,
             truncated=preview.truncated,
+            jump_share=metrics.get("jump_share", 0.0),
+            wide_jump_share=metrics.get("wide_jump_share", 0.0),
+            flow_share=metrics.get("flow_share", 0.0),
+            angle_change_share=metrics.get("angle_change_share", 0.0),
+            slider_share=metrics.get("slider_share", 0.0),
+            notes_per_second=metrics.get("notes_per_second", 0.0),
+            rhythm_variability=metrics.get("rhythm_variability", 0.0),
+            labels=_combined_labels(metrics, [], [], sections),
+            sections=sections,
+            analyzer_version=ANALYZER_VERSION,
         )
 
     runs: list[tuple[int, int]] = []
@@ -185,12 +399,26 @@ def analyze_sequences(preview: gameplay.BeatmapPreview) -> SequenceAnalysis:
         if chain is not None:
             bucket.append(chain)
 
+    metrics, _, _ = _geometry(notes, preview.circle_size)
+    sections = _section_labels(notes, preview.circle_size)
     return SequenceAnalysis(
         stream_chains=tuple(stream_chains),
         burst_chains=tuple(burst_chains),
         analyzed_notes=total_notes,
         total_notes=total_notes,
         truncated=preview.truncated,
+        jump_share=metrics.get("jump_share", 0.0),
+        wide_jump_share=metrics.get("wide_jump_share", 0.0),
+        flow_share=metrics.get("flow_share", 0.0),
+        angle_change_share=metrics.get("angle_change_share", 0.0),
+        slider_share=metrics.get("slider_share", 0.0),
+        notes_per_second=metrics.get("notes_per_second", 0.0),
+        rhythm_variability=metrics.get("rhythm_variability", 0.0),
+        labels=_combined_labels(
+            metrics, stream_chains, burst_chains, sections
+        ),
+        sections=sections,
+        analyzer_version=ANALYZER_VERSION,
     )
 
 
@@ -226,6 +454,16 @@ def sequence_features(analysis: SequenceAnalysis) -> dict[str, float]:
             (240.0 - (median(burst_gaps) if burst_gaps else 240.0)) / 180.0
         ),
         "burst_rhythm_quality": _weighted_quality(analysis.burst_chains),
+        "jump_share": _clamp(analysis.jump_share),
+        "wide_jump_share": _clamp(analysis.wide_jump_share),
+        "flow_share": _clamp(analysis.flow_share),
+        "angle_change_share": _clamp(analysis.angle_change_share),
+        "slider_share": _clamp(analysis.slider_share),
+        "notes_per_second": _clamp(
+            analysis.notes_per_second / HIGH_DENSITY_NOTES_PER_SECOND
+        ),
+        "pattern_variety": _clamp(len(analysis.labels) / 6.0),
+        "rhythm_variability": _clamp(analysis.rhythm_variability),
     }
 
 
@@ -235,6 +473,7 @@ def _cached_analysis(
     beatmap_id: int,
     mtime_ns: int,
     size: int,
+    analyzer_version: int,
 ) -> SequenceAnalysis:
     """Parse and analyze one unchanged cached ``.osu`` file.
 
@@ -272,4 +511,5 @@ def load_analysis(
         int(beatmap_id),
         stat.st_mtime_ns,
         stat.st_size,
+        ANALYZER_VERSION,
     )

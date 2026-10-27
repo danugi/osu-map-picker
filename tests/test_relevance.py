@@ -470,8 +470,14 @@ def test_aim_farm_gate_rejects_missing_aim_attributes() -> None:
     check = evaluate_relevance(candidate, preset.ranking)
     assert check.passed is False
     assert all(target.score is None for target in check.targets)
-    assert all(target.status == "недостаточно данных" for target in check.targets)
-    assert "недостаточно данных" in check.reason
+    assert all(
+        target.status in {"недостаточно данных", "не анализировалось"}
+        for target in check.targets
+    )
+    assert (
+        "недостаточно данных" in check.reason
+        or "не анализировалось" in check.reason
+    )
 
 
 def test_speed_gate_rejects_missing_speed_attributes() -> None:

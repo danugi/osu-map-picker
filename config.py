@@ -19,7 +19,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 APP_NAME = "Personal osu! Map Picker"
 APP_VERSION = "0.4.0"
 SETTINGS_SCHEMA_VERSION = 1
-DB_SCHEMA_VERSION = 1
+DB_SCHEMA_VERSION = 2
 
 OSU_SITE = "https://osu.ppy.sh"
 OSU_API_BASE = "https://osu.ppy.sh/api/v2"

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import evidence
 from features import FEATURE_LABELS, SOURCE_LABELS
 from models import BeatmapFeatures, SkillScore
 from patterns import SEQUENCE_FEATURE_KEYS
@@ -178,12 +179,21 @@ _add(
         "aim_wide",
         "Wide Aim",
         "aim",
-        "Большие расстояния и широкий размах прыжков. Пока это прокси по "
-        "aim-давлению, низкой плотности и тегу wide/spacing.",
-        {"aim_pressure": 0.45, "low_density": 0.25, "tag_wide": 0.20, "aim": 0.10},
-        required_any=("aim_pressure",),
+        "Большие расстояния и широкий размах прыжков. При наличии .osu "
+        "используется измеренная доля широких прыжков; без файла остаётся "
+        "прокси по aim-давлению, плотности и тегу wide/spacing.",
+        {
+            "wide_jump_share": 0.35,
+            "aim_pressure": 0.25,
+            "low_density": 0.15,
+            "tag_wide": 0.15,
+            "aim": 0.10,
+        },
+        support="measured",
+        required_any=("aim_pressure", "wide_jump_share"),
         limitations=(
-            "Реальная ширина прыжков не измеряется без геометрии .osu.",
+            "Ширина прыжков измеряется только при наличии .osu; тег wide не "
+            "доказывает геометрию.",
         ),
     )
 )
@@ -192,12 +202,21 @@ _add(
         "aim_flow",
         "Flow Aim",
         "aim",
-        "Связанные движения и непрерывные траектории. Прокси по aim, "
-        "плотности и доле слайдеров.",
-        {"aim_pressure": 0.35, "aim": 0.25, "density": 0.20, "slider_ratio": 0.20},
-        required_any=("aim_pressure",),
+        "Связанные движения и непрерывные траектории. При наличии .osu "
+        "используется доля плавных переходов; без файла остаётся прокси по "
+        "aim-давлению, плотности и слайдерам.",
+        {
+            "flow_share": 0.30,
+            "aim_pressure": 0.25,
+            "aim": 0.20,
+            "density": 0.15,
+            "slider_ratio": 0.10,
+        },
+        support="measured",
+        required_any=("aim_pressure", "flow_share"),
         limitations=(
-            "Flow-геометрия и углы не измеряются по метаданным API.",
+            "Плавность измеряется по углам между последовательными объектами "
+            "только при наличии .osu.",
         ),
     )
 )
@@ -206,12 +225,26 @@ _add(
         "aim_control",
         "Aim Control",
         "aim",
-        "Смена направлений, углы и контроль перемещения. Использует "
+        "Смена направлений, углы и контроль перемещения. При наличии .osu "
+        "используется измеренная доля резких смен угла; без файла остаётся "
         "control-прокси, aim-давление, slider factor и CS.",
-        {"control": 0.35, "aim_pressure": 0.25, "slider_factor": 0.20, "cs": 0.10, "tag_tech": 0.10},
-        required_any=("control", "aim_pressure", "slider_factor"),
+        {
+            "angle_change_share": 0.30,
+            "control": 0.25,
+            "aim_pressure": 0.20,
+            "slider_factor": 0.15,
+            "cs": 0.10,
+        },
+        support="measured",
+        required_any=(
+            "angle_change_share",
+            "control",
+            "aim_pressure",
+            "slider_factor",
+        ),
         limitations=(
-            "Углы и резкость смены направления требуют локального анализа .osu.",
+            "Резкие смены угла измеряются только при наличии .osu; без него "
+            "оценка остаётся прокси.",
         ),
     )
 )
@@ -509,9 +542,11 @@ _add(
         "variable_rhythm",
         "Variable rhythm",
         "finger",
-        "Переменный ритм. Поддержка только при наличии тега rhythm/variable.",
-        {"tag_rhythm": 1.0},
-        required=("tag_rhythm",),
+        "Переменный ритм. При наличии .osu используется измеренная вариация "
+        "интервалов; иначе остаётся тег rhythm/variable.",
+        {"rhythm_variability": 0.60, "tag_rhythm": 0.40},
+        support="measured",
+        required_any=("tag_rhythm", "rhythm_variability"),
         limitations=("Без тега и .osu-анализа переменный ритм не определяется.",),
     )
 )
@@ -778,10 +813,17 @@ _add(
         "angular_control",
         "Angular control",
         "tech",
-        "Углы и контроль траектории: aim control + tech.",
-        {"control": 0.45, "aim_pressure": 0.25, "tag_tech": 0.30},
-        required_any=("control", "aim_pressure"),
-        limitations=("Углы не измеряются без геометрии .osu.",),
+        "Углы и контроль траектории: измеренная доля резких смен угла из "
+        ".osu плюс control-прокси и tech-тег.",
+        {
+            "angle_change_share": 0.35,
+            "control": 0.30,
+            "aim_pressure": 0.20,
+            "tag_tech": 0.15,
+        },
+        support="measured",
+        required_any=("angle_change_share", "control", "aim_pressure"),
+        limitations=("Углы без .osu остаются прокси-оценкой.",),
     )
 )
 _add(
@@ -790,10 +832,15 @@ _add(
         "Slider-heavy patterns",
         "tech",
         "Много слайдеров и высокий slider factor. Доля слайдеров считается "
-        "по счётчикам объектов.",
-        {"slider_ratio": 0.55, "slider_factor": 0.25, "length": 0.20},
+        "по счётчикам объектов и уточняется реальной долей в .osu.",
+        {
+            "slider_share": 0.35,
+            "slider_ratio": 0.40,
+            "slider_factor": 0.15,
+            "length": 0.10,
+        },
         support="measured",
-        required_any=("slider_ratio", "slider_factor"),
+        required_any=("slider_ratio", "slider_factor", "slider_share"),
         limitations=("Сложность слайдеров не сводится к их количеству.",),
     )
 )
@@ -823,8 +870,16 @@ _add(
         "unusual_spacing",
         "Unusual spacing",
         "tech",
-        "Необычный spacing: тег wide/spacing, aim-давление, низкая плотность.",
-        {"tag_wide": 0.50, "aim_pressure": 0.30, "low_density": 0.20},
+        "Необычный spacing: измеренная доля широких прыжков, тег wide/spacing, "
+        "aim-давление и низкая плотность.",
+        {
+            "wide_jump_share": 0.35,
+            "tag_wide": 0.30,
+            "aim_pressure": 0.20,
+            "low_density": 0.15,
+        },
+        support="measured",
+        required_any=("wide_jump_share", "tag_wide", "aim_pressure"),
         limitations=("Spacing и углы требуют геометрии .osu.",),
     )
 )
@@ -844,9 +899,17 @@ _add(
         "pattern_switching",
         "Pattern switching",
         "tech",
-        "Смены паттернов: tech-тег, слайдеры, плотность.",
-        {"tag_tech": 0.60, "slider_ratio": 0.20, "density": 0.20},
-        limitations=("Смены паттернов не измеряются по API.",),
+        "Смены паттернов: разнообразие измеренных секций .osu, tech-тег, "
+        "слайдеры и плотность.",
+        {
+            "pattern_variety": 0.30,
+            "tag_tech": 0.40,
+            "slider_ratio": 0.15,
+            "density": 0.15,
+        },
+        support="measured",
+        required_any=("pattern_variety", "tag_tech"),
+        limitations=("Без .osu смены паттернов остаются только по tech-тегу.",),
     )
 )
 _add(
@@ -1119,6 +1182,13 @@ def _source_confidence(sources: list[str], has_required: bool) -> str:
     return "low" if sources else "none"
 
 
+def _missing_status(features: BeatmapFeatures, keys: list[str]) -> str:
+    statuses = [
+        features.status(key) for key in keys if features.status(key)
+    ]
+    return evidence.aggregate(statuses) if statuses else ""
+
+
 def _base_score(
     definition: SkillDefinition, features: BeatmapFeatures
 ) -> SkillScore:
@@ -1139,7 +1209,16 @@ def _base_score(
         for key, _ in definition.feature_weights
         if key not in features.scores
     ]
+    total_weight = sum(weight for _, weight in definition.feature_weights)
+    available_weight = sum(weight for _, weight in available)
+    coverage = evidence.coverage(available_weight, total_weight)
     if missing_required or not available:
+        unknown_keys = list(dict.fromkeys(missing_required + missing))
+        status = _missing_status(features, unknown_keys)
+        explanation = evidence.explanation(status)
+        limitations = list(definition.limitations)
+        if explanation:
+            limitations.append(explanation)
         return SkillScore(
             skill_id=definition.id,
             name=definition.name,
@@ -1147,11 +1226,15 @@ def _base_score(
             confidence="none",
             support=definition.support,
             evidence=(),
-            missing=tuple(dict.fromkeys(missing_required + missing)),
-            limitations=definition.limitations,
+            missing=tuple(unknown_keys),
+            limitations=tuple(dict.fromkeys(limitations)),
+            status=status,
+            coverage=coverage,
         )
-    total = sum(weight for _, weight in available)
-    value = sum(weight * features.scores[key] for key, weight in available) / total
+    value = (
+        sum(weight * features.scores[key] for key, weight in available)
+        / available_weight
+    )
     sources = [
         features.sources.get(key, "")
         for key, _ in available
@@ -1162,27 +1245,61 @@ def _base_score(
         # Geometry/pattern categories cannot become high-confidence just
         # because the map has difficulty attributes.
         confidence = "low"
-    evidence = []
+    feature_statuses = [features.status(key) for key, _ in available]
+    if definition.support in {"proxy", "limited"}:
+        status = evidence.PROXY
+    elif any(item == evidence.PARTIAL for item in feature_statuses):
+        status = evidence.PARTIAL
+    elif coverage < 1.0:
+        status = evidence.PARTIAL
+    elif any(item == evidence.PROXY for item in feature_statuses):
+        status = evidence.PROXY
+    elif any(item == evidence.NOT_DETECTED for item in feature_statuses):
+        status = evidence.NOT_DETECTED
+    else:
+        status = evidence.MEASURED
+    if definition.required_features and all(
+        features.status(key) == evidence.NOT_DETECTED
+        for key in definition.required_features
+        if key in features.scores
+    ) and all(
+        features.scores.get(key, 0.0) <= 0
+        for key in definition.required_features
+    ):
+        status = evidence.NOT_DETECTED
+    if coverage < 0.5 and confidence in {"medium", "high"}:
+        confidence = "low"
+    evidence_lines = []
     for key, weight in sorted(available, key=lambda item: (-item[1], item[0]))[:6]:
         source = features.sources.get(key, "?")
-        evidence.append(
+        evidence_lines.append(
             f"{FEATURE_LABELS.get(key, key)}: {round(features.scores[key] * 100)}% "
             f"({SOURCE_LABELS.get(source, source)})"
         )
     limitations = list(definition.limitations)
     if missing:
         labels = ", ".join(FEATURE_LABELS.get(key, key) for key in missing[:5])
-        limitations.append(f"Недоступные признаки: {labels}.")
+        limitations.append(
+            f"Недоступные признаки: {labels}. "
+            f"Покрытие признаков: {coverage:.0%}."
+        )
+    if status == evidence.NOT_DETECTED:
+        limitations.append(
+            "Анализ выполнялся: паттерн по заданным критериям не найден, "
+            "это не отсутствие данных."
+        )
     return SkillScore(
         skill_id=definition.id,
         name=definition.name,
         score=max(0.0, min(1.0, value)),
         confidence=confidence,
         support=definition.support,
-        evidence=tuple(evidence),
+        evidence=tuple(evidence_lines),
         missing=tuple(missing),
         limitations=tuple(dict.fromkeys(limitations)),
         sources=tuple(dict.fromkeys(sources)),
+        status=status,
+        coverage=coverage,
     )
 
 
@@ -1217,7 +1334,23 @@ def evaluate_skills(
                 for component_id in definition.required_components
                 if component_id in missing
             ]
+            total_weight = sum(
+                weight for _, weight in definition.components
+            )
+            available_weight = sum(weight for _, weight, _ in parts)
+            coverage = evidence.coverage(available_weight, total_weight)
             if not parts or required_missing:
+                status = evidence.aggregate(
+                    [
+                        *(part.status for _, _, part in parts),
+                        *(
+                            evaluate(component_id).status
+                            for component_id in required_missing
+                        ),
+                    ]
+                    if (parts or required_missing)
+                    else [evidence.NOT_ANALYZED]
+                )
                 result = SkillScore(
                     skill_id=skill_id,
                     name=definition.name,
@@ -1225,7 +1358,16 @@ def evaluate_skills(
                     confidence="none",
                     support=definition.support,
                     missing=tuple(missing),
-                    limitations=definition.limitations,
+                    limitations=tuple(
+                        dict.fromkeys(
+                            [
+                                *definition.limitations,
+                                evidence.explanation(status),
+                            ]
+                        )
+                    ),
+                    status=status,
+                    coverage=coverage,
                 )
             else:
                 total = sum(weight for _, weight, _ in parts)
@@ -1238,7 +1380,7 @@ def evaluate_skills(
                     (part.support for _, _, part in parts),
                     key=lambda item: _SUPPORT_RANK.get(item, 2),
                 )
-                evidence = tuple(
+                evidence_text = tuple(
                     f"{part.name}: {part.display_score}% "
                     f"({CONFIDENCE_LABELS.get(part.confidence, part.confidence)})"
                     for _, _, part in parts
@@ -1248,7 +1390,9 @@ def evaluate_skills(
                     limitations.extend(part.limitations)
                 if missing:
                     limitations.append(
-                        "Нет данных по компонентам: " + ", ".join(missing) + "."
+                        "Нет данных по компонентам: "
+                        + ", ".join(missing)
+                        + f". Покрытие компонентов: {coverage:.0%}."
                     )
                 sources = tuple(
                     dict.fromkeys(
@@ -1264,10 +1408,18 @@ def evaluate_skills(
                     score=max(0.0, min(1.0, value)),
                     confidence=confidence if len(parts) == len(definition.components) else "low",
                     support=support,
-                    evidence=evidence,
+                    evidence=evidence_text,
                     missing=tuple(missing),
                     limitations=tuple(dict.fromkeys(limitations))[:8],
                     sources=sources,
+                    status=(
+                        evidence.PARTIAL
+                        if coverage < 1.0
+                        else evidence.aggregate(
+                            [part.status for _, _, part in parts]
+                        )
+                    ),
+                    coverage=coverage,
                 )
             cache[skill_id] = result
             return result

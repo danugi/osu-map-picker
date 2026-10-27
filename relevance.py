@@ -20,6 +20,7 @@ as "не анализировалось"; an analyzed map with zero chains is "�
 
 from __future__ import annotations
 
+import evidence
 from features import SOURCE_LABELS
 from models import Candidate, RankingSettings, RelevanceResult, TargetMatch
 from skillsets import SKILLS, evaluate_skills, skill_uses_sequences
@@ -29,6 +30,9 @@ MATCHED = "подтверждено"
 MATCHED_LIMITED = "выше порога (ограниченная поддержка)"
 BELOW = "ниже порога"
 NOT_ANALYZED = "не анализировалось"
+SOURCE_UNAVAILABLE = "источник недоступен"
+PARTIAL = "частичный анализ"
+FAILED = "анализ не удался"
 
 
 def _clamp(value: float) -> float:
@@ -52,15 +56,17 @@ def _target_match(
     skillsets = candidate.skillsets or evaluate_skills(candidate.traits)
     item = skillsets.get(target_id)
     if item is None or item.score is None:
-        needs_sequence = (
-            definition is not None and skill_uses_sequences(target_id)
-        )
-        if needs_sequence and candidate.sequence is None:
-            status = NOT_ANALYZED
-            source = NOT_ANALYZED
-        else:
-            status = NO_DATA
-            source = NO_DATA
+        status_code = item.status if item is not None else evidence.NOT_ANALYZED
+        status_labels = {
+            evidence.NOT_ANALYZED: NOT_ANALYZED,
+            evidence.SOURCE_UNAVAILABLE: SOURCE_UNAVAILABLE,
+            evidence.PARTIAL: PARTIAL,
+            evidence.FAILED: FAILED,
+            evidence.PROXY: NO_DATA,
+            evidence.MEASURED: NO_DATA,
+            evidence.NOT_DETECTED: BELOW,
+        }
+        status = status_labels.get(status_code, NO_DATA)
         return TargetMatch(
             target_id=target_id,
             label=label,
@@ -68,7 +74,7 @@ def _target_match(
             threshold=threshold,
             matched=False,
             status=status,
-            source=source,
+            source=status,
             confidence="none",
             support=definition.support if definition is not None else "limited",
             missing=item.missing if item is not None else (target_id,),
@@ -145,10 +151,32 @@ def evaluate_relevance(
             + "."
         )
     elif not available:
-        if all(item.status == NOT_ANALYZED for item in targets):
+        sequence_targets = [
+            item
+            for item in targets
+            if skill_uses_sequences(item.target_id)
+        ]
+        if sequence_targets and all(
+            item.status == NOT_ANALYZED for item in sequence_targets
+        ):
             reason = (
                 "не анализировалось: для целевых тегов нужен .osu, но "
                 "sequence-анализ для этой карты не выполнялся."
+            )
+        elif any(item.status == SOURCE_UNAVAILABLE for item in targets):
+            reason = (
+                "источник недоступен: .osu для целевых тегов отсутствует в "
+                "кеше. Это не значит, что паттерна нет."
+            )
+        elif any(item.status == FAILED for item in targets):
+            reason = (
+                "анализ не удался: .osu был доступен, но разбор завершился "
+                "ошибкой; целевые признаки остаются неизвестными."
+            )
+        elif any(item.status == PARTIAL for item in targets):
+            reason = (
+                "частичный анализ: доступна только часть данных для целевых "
+                "тегов; совпадение не выдумывается."
             )
         else:
             reason = (

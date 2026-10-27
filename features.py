@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import math
 
+import evidence
 from models import (
     Beatmap,
     BeatmapFeatures,
@@ -75,6 +76,14 @@ FEATURE_LABELS = {
     "burst_median": "Медианная длина burst",
     "burst_tempo": "Темп burst-интервалов",
     "burst_rhythm_quality": "Ровность burst-интервалов",
+    "jump_share": "Доля прыжковых интервалов",
+    "wide_jump_share": "Доля широких прыжков",
+    "flow_share": "Доля плавных переходов",
+    "angle_change_share": "Доля резких смен угла",
+    "slider_share": "Доля слайдеров в анализе",
+    "notes_per_second": "Плотность нот в анализе",
+    "pattern_variety": "Разнообразие паттернов",
+    "rhythm_variability": "Вариативность ритма",
     "difficulty_variety": "Разброс сложностей сета",
     "tag_aim": "Тег aim/jump",
     "tag_wide": "Тег wide/spacing",
@@ -143,9 +152,9 @@ _TAG_GROUPS = {
 }
 
 GEOMETRY_NOTE = (
-    "Геометрия паттернов (wide/flow/углы/cross-screen) не вычисляется из "
-    "метаданных API. Для неё нужен локальный анализ .osu-файлов; сейчас "
-    "такие навыки помечены как ограниченные."
+    "Геометрия паттернов (ширина прыжков, плавность, углы, слайдеры) "
+    "измеряется только по локальному .osu. Без файла она остаётся "
+    "неизвестной или прокси-оценкой, а не нулём."
 )
 
 
@@ -175,17 +184,41 @@ def _tag_hint(tags: set[str], keywords: set[str]) -> float:
     return 1.0 if tags & keywords else 0.0
 
 
+def _status_for_source(source: str) -> str:
+    if source in {"osu_api_attributes", "osu_sequence", "osu_sequence_partial"}:
+        return evidence.MEASURED
+    if source in {
+        "beatmap_counts",
+        "beatmap_duration",
+        "beatmap_bpm",
+        "beatmap_cs",
+        "beatmap_od",
+        "beatmap_ar",
+        "beatmap_hp",
+        "beatmap_stars",
+        "beatmapset_metadata",
+    }:
+        return evidence.MEASURED
+    if source in {"tags", "derived_proxy"}:
+        return evidence.PROXY
+    return evidence.MEASURED
+
+
 def _put(
     scores: dict[str, float],
     sources: dict[str, str],
+    statuses: dict[str, str],
     key: str,
     value: float | None,
     source: str,
+    *,
+    status: str | None = None,
 ) -> None:
     if value is None:
         return
     scores[key] = round(_clamp(value), 3)
     sources[key] = source
+    statuses[key] = status or _status_for_source(source)
 
 
 def _variety(beatmapset: Beatmapset) -> float | None:
@@ -205,24 +238,31 @@ def derive_features(
     attributes: DifficultyAttributes | None = None,
     *,
     sequence: SequenceAnalysis | None = None,
+    analysis_status: str = evidence.NOT_ANALYZED,
+    analysis_scope: str = "",
+    analyzer_version: int = 0,
+    attributes_status: str = evidence.NOT_ANALYZED,
 ) -> BeatmapFeatures:
     """Derive only features supported by the data we actually have.
 
     ``sequence`` is optional per-difficulty evidence from the public ``.osu``
     file. Without it, stream and burst features stay absent rather than being
-    replaced by density/BPM proxies.
+    replaced by density/BPM proxies. ``analysis_status`` records *why* those
+    sequence features are absent, so "not analyzed" cannot be mistaken for
+    "analyzed and no pattern found".
     """
 
     scores: dict[str, float] = {}
     sources: dict[str, str] = {}
+    statuses: dict[str, str] = {}
     notes: list[str] = []
     tags = _tag_names(beatmapset.tags)
     confidence = "none"
 
     share = attributes.aim_share if attributes else None
     if share is not None:
-        _put(scores, sources, "aim", share, "osu_api_attributes")
-        _put(scores, sources, "speed", 1.0 - share, "osu_api_attributes")
+        _put(scores, sources, statuses, "aim", share, "osu_api_attributes")
+        _put(scores, sources, statuses, "speed", 1.0 - share, "osu_api_attributes")
         confidence = "medium"
         notes.append(
             "aim/speed — из aim_difficulty и speed_difficulty официального API."
@@ -232,8 +272,8 @@ def derive_features(
         speed_hint = _tag_hint(tags, _SPEED_TAGS)
         if aim_hint or speed_hint:
             total = aim_hint + speed_hint
-            _put(scores, sources, "aim", aim_hint / total, "tags")
-            _put(scores, sources, "speed", speed_hint / total, "tags")
+            _put(scores, sources, statuses, "aim", aim_hint / total, "tags")
+            _put(scores, sources, statuses, "speed", speed_hint / total, "tags")
             confidence = "low"
             notes.append(
                 "aim/speed — только по тегам маппера (низкая уверенность), "
@@ -248,6 +288,7 @@ def derive_features(
         _put(
             scores,
             sources,
+            statuses,
             "low_aim",
             1.0 - scores["aim"],
             sources.get("aim", "derived_proxy"),
@@ -258,13 +299,13 @@ def derive_features(
     density_raw: float | None = None
     if objects and seconds and seconds > 0:
         density_raw = objects / seconds
-        _put(scores, sources, "density", (density_raw - 2.0) / 6.0, "beatmap_counts")
+        _put(scores, sources, statuses, "density", (density_raw - 2.0) / 6.0, "beatmap_counts")
         confidence = "medium" if attributes else "low"
         notes.append(f"Плотность: {density_raw:.1f} объектов/с (hit_length).")
 
     if beatmap.cs is not None:
-        _put(scores, sources, "precision", (beatmap.cs - 3.5) / 3.5, "beatmap_cs")
-        _put(scores, sources, "cs", beatmap.cs / 10.0, "beatmap_cs")
+        _put(scores, sources, statuses, "precision", (beatmap.cs - 3.5) / 3.5, "beatmap_cs")
+        _put(scores, sources, statuses, "cs", beatmap.cs / 10.0, "beatmap_cs")
         if confidence == "none":
             confidence = "low"
         notes.append(f"Precision — прокси по CS {beatmap.cs:g}, не тип паттерна.")
@@ -275,34 +316,36 @@ def derive_features(
         _put(
             scores,
             sources,
+            statuses,
             "control",
             share * (0.45 + 0.55 * star_factor),
             "osu_api_attributes",
         )
 
     if stars is not None:
-        _put(scores, sources, "stars", stars / 10.0, "beatmap_stars")
+        _put(scores, sources, statuses, "stars", stars / 10.0, "beatmap_stars")
     if beatmap.bpm is not None:
-        _put(scores, sources, "bpm", (beatmap.bpm - 100.0) / 200.0, "beatmap_bpm")
+        _put(scores, sources, statuses, "bpm", (beatmap.bpm - 100.0) / 200.0, "beatmap_bpm")
     if seconds and seconds > 0:
-        _put(scores, sources, "length", seconds / 300.0, "beatmap_duration")
-        _put(scores, sources, "shortness", 1.0 - seconds / 300.0, "beatmap_duration")
+        _put(scores, sources, statuses, "length", seconds / 300.0, "beatmap_duration")
+        _put(scores, sources, statuses, "shortness", 1.0 - seconds / 300.0, "beatmap_duration")
     if "density" in scores:
-        _put(scores, sources, "low_density", 1.0 - scores["density"], "derived_proxy")
+        _put(scores, sources, statuses, "low_density", 1.0 - scores["density"], "derived_proxy")
 
     if beatmap.ar is not None:
-        _put(scores, sources, "ar", beatmap.ar / 10.0, "beatmap_ar")
-        _put(scores, sources, "high_ar", (beatmap.ar - 8.0) / 3.0, "beatmap_ar")
-        _put(scores, sources, "low_ar", (6.0 - beatmap.ar) / 6.0, "beatmap_ar")
+        _put(scores, sources, statuses, "ar", beatmap.ar / 10.0, "beatmap_ar")
+        _put(scores, sources, statuses, "high_ar", (beatmap.ar - 8.0) / 3.0, "beatmap_ar")
+        _put(scores, sources, statuses, "low_ar", (6.0 - beatmap.ar) / 6.0, "beatmap_ar")
     if beatmap.od is not None:
-        _put(scores, sources, "od", beatmap.od / 10.0, "beatmap_od")
+        _put(scores, sources, statuses, "od", beatmap.od / 10.0, "beatmap_od")
     if beatmap.hp is not None:
-        _put(scores, sources, "hp", beatmap.hp / 10.0, "beatmap_hp")
+        _put(scores, sources, statuses, "hp", beatmap.hp / 10.0, "beatmap_hp")
 
     if attributes is not None and attributes.aim_difficulty is not None:
         _put(
             scores,
             sources,
+            statuses,
             "aim_pressure",
             attributes.aim_difficulty / 5.0,
             "osu_api_attributes",
@@ -311,6 +354,7 @@ def derive_features(
         _put(
             scores,
             sources,
+            statuses,
             "speed_pressure",
             attributes.speed_difficulty / 5.0,
             "osu_api_attributes",
@@ -319,14 +363,26 @@ def derive_features(
         _put(
             scores,
             sources,
+            statuses,
             "slider_factor",
             (attributes.slider_factor - 0.5) / 2.0,
             "osu_api_attributes",
         )
+    if attributes is None:
+        for key in ("aim_pressure", "speed_pressure", "slider_factor"):
+            statuses.setdefault(key, attributes_status)
+    else:
+        for key, value in (
+            ("aim_pressure", attributes.aim_difficulty),
+            ("speed_pressure", attributes.speed_difficulty),
+            ("slider_factor", attributes.slider_factor),
+        ):
+            if value is None:
+                statuses.setdefault(key, evidence.SOURCE_UNAVAILABLE)
 
     if objects:
         sliders = beatmap.count_sliders or 0
-        _put(scores, sources, "slider_ratio", sliders / objects, "beatmap_counts")
+        _put(scores, sources, statuses, "slider_ratio", sliders / objects, "beatmap_counts")
 
     if "density" in scores and seconds and seconds > 0:
         pressure = max(
@@ -337,6 +393,7 @@ def derive_features(
         _put(
             scores,
             sources,
+            statuses,
             "stamina",
             (0.55 * scores["density"] + 0.45 * pressure)
             * _clamp(seconds / 240.0),
@@ -347,9 +404,30 @@ def derive_features(
         sequence_source = (
             "osu_sequence_partial" if sequence.truncated else "osu_sequence"
         )
+        feature_status = (
+            evidence.PARTIAL
+            if sequence.truncated or analysis_status == evidence.PARTIAL
+            else evidence.MEASURED
+        )
         for key, value in sequence_features(sequence).items():
             if key in SEQUENCE_FEATURE_KEYS:
-                _put(scores, sources, key, value, sequence_source)
+                _put(
+                    scores,
+                    sources,
+                    statuses,
+                    key,
+                    value,
+                    sequence_source,
+                    status=(
+                        feature_status
+                        if value > 0
+                        else (
+                            evidence.PARTIAL
+                            if feature_status == evidence.PARTIAL
+                            else evidence.NOT_DETECTED
+                        )
+                    ),
+                )
         longest_stream = max(
             (chain.length for chain in sequence.stream_chains), default=0
         )
@@ -360,19 +438,41 @@ def derive_features(
             f"{len(sequence.burst_chains)} burst-цепочек 5–9 нот; "
             "это отдельные максимальные цепочки."
         )
+        if sequence.labels:
+            notes.append(
+                "Измеренные паттерны .osu: "
+                + ", ".join(sequence.labels)
+                + "."
+            )
         if sequence.truncated:
             notes.append(
                 "Анализ .osu ограничен первыми "
-                f"{sequence.total_notes} объектами."
+                f"{sequence.total_notes} объектами; найденное относится к "
+                "проанализированной части."
             )
     elif sequence is not None:
-        notes.append("Анализ .osu не дал hit objects для sequence-признаков.")
+        for key in SEQUENCE_FEATURE_KEYS:
+            statuses.setdefault(key, evidence.NOT_DETECTED)
+        notes.append(
+            "Анализ .osu не дал hit objects: признаки потоков остаются "
+            "неизвестными, а не нулевыми."
+        )
+    else:
+        # No analysis object at all: keep every sequence feature unknown and
+        # explain exactly why (not analyzed / missing file / failed).
+        for key in SEQUENCE_FEATURE_KEYS:
+            statuses.setdefault(key, analysis_status)
+        notes.append(
+            "Sequence-признаки не рассчитаны: "
+            + evidence.explanation(analysis_status)
+        )
 
     variety = _variety(beatmapset)
     if variety is not None:
         _put(
             scores,
             sources,
+            statuses,
             "difficulty_variety",
             variety,
             "beatmapset_metadata",
@@ -381,7 +481,7 @@ def derive_features(
     for feature, keywords in _TAG_GROUPS.items():
         hint = _tag_hint(tags, keywords)
         if hint:
-            _put(scores, sources, feature, hint, "tags")
+            _put(scores, sources, statuses, feature, hint, "tags")
             if confidence == "none":
                 confidence = "low"
 
@@ -414,6 +514,10 @@ def derive_features(
         sources=sources,
         confidence=confidence,
         notes=tuple(dict.fromkeys(notes)),
+        statuses=statuses,
+        analysis_status=analysis_status,
+        analysis_scope=analysis_scope,
+        analyzer_version=analyzer_version,
     )
 
 

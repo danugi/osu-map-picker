@@ -666,15 +666,15 @@ def test_sequence_downloads_are_skipped_when_no_target_needs_them(
         calls.append(beatmap_id)
         return _sequence("stream")
 
-    farm = presets.builtin_by_name("Aim Farm")
-    assert farm is not None
+    discovery = presets.builtin_by_name("Discovery")
+    assert discovery is not None
     engine = DiscoveryEngine(
         api,
         storage,
         settings(fetch_attributes_limit=1, fetch_sequences_limit=10),
         sequence_loader=loader,
     )
-    result = engine.run(farm.filters, farm.ranking)
+    result = engine.run(discovery.filters, discovery.ranking)
     assert result.count == 1
     assert calls == []
 
@@ -1049,7 +1049,10 @@ def test_relevance_gate_reports_insufficient_data_separately() -> None:
         exclusions=exclusions,
     )
     assert kept == []
-    assert any("недостаточно данных" in reason for reason in excluded)
+    assert any(
+        "недостаточно данных" in reason or "не анализировалось" in reason
+        for reason in excluded
+    )
 
 
 def test_relevance_gate_reports_below_threshold_separately() -> None:

@@ -9,6 +9,7 @@ from conftest import make_beatmap, make_beatmapset
 from PIL import Image
 from streamlit.testing.v1 import AppTest
 
+import analysis
 import app as app_module
 import appearance
 import discovery
@@ -791,6 +792,50 @@ def test_local_cache_search_reranks_for_each_switched_preset(app_env) -> None:
     assert store.search_run_count() == 0
 
 
+def test_cards_distinguish_analyzed_from_missing_osu(app_env) -> None:
+    store = Storage(app_env)
+    _seed_short_cached_maps(store)
+    cache = analysis.cache_dir_for(store)
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / "11.osu").write_text(
+        make_osu(
+            [(1000 + index * 125, 100 + index * 4, 100) for index in range(12)]
+        ),
+        encoding="utf-8",
+    )
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.run()
+    _button(at, "run_search").click().run()
+    assert not at.exception, _texts(at)
+    text = _texts(at).casefold()
+    assert "паттерны .osu" in text
+    assert "источник недоступен" in text or ".osu-файла нет" in text
+    assert "измерено" in text
+
+
+def test_analysis_batch_persists_cached_osu_evidence(app_env) -> None:
+    store = Storage(app_env)
+    _seed_short_cached_maps(store)
+    cache = analysis.cache_dir_for(store)
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / "11.osu").write_text(
+        make_osu(
+            [(1000 + index * 125, 100, 100) for index in range(12)]
+        ),
+        encoding="utf-8",
+    )
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.run()
+    _button(at, "run_search").click().run()
+    assert not at.exception, _texts(at)
+    _button(at, "analyze_missing_osu").click().run()
+    assert not at.exception, _texts(at)
+    stats = store.analysis_stats()
+    assert stats.get("measured", 0) >= 1
+    text = _texts(at)
+    assert "Анализ .osu" in text or "измерено" in text
+
+
 def test_local_streams_and_bursts_use_only_cached_osu_evidence(app_env) -> None:
     store = Storage(app_env)
     _seed_short_cached_maps(store)
@@ -821,12 +866,11 @@ def test_local_streams_and_bursts_use_only_cached_osu_evidence(app_env) -> None:
     assert streams.sequence_unanalyzed == 10
     assert streams.sequence_downloads == 0
     assert streams.sequence_cache_hits == 2
-    assert (
-        "Sequence-анализ: 2 проанализировано, 10 без анализа"
-        in _texts(at)
-    )
-    assert ".osu скачано: 0" in _texts(at)
-    assert "из локального кэша: 2" in _texts(at)
+    text = _texts(at)
+    assert "Sequence-анализ: 2 проанализировано" in text
+    assert "10 без .osu" in text
+    assert ".osu скачано: 0" in text
+    assert "из локального кэша/БД: 2" in text
 
     at.sidebar.selectbox[0].select("Bursts").run()
     _button(at, "run_search").click().run()

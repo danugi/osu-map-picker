@@ -17,12 +17,15 @@ import time
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Iterable
 
+import analysis as analysis_store
 import config
+import evidence
+import patterns
 from feedback import VERDICT_PREFERENCE, build_taste_profile
 from filters import UserFilterData, apply_filters, validate_filters
 from features import derive_features
-from gameplay import GameplayError
 from models import (
+    AnalysisEvidence,
     Beatmapset,
     Candidate,
     DifficultyAttributes,
@@ -39,7 +42,6 @@ from models import (
     search_page_from_dict,
     search_page_to_dict,
 )
-from patterns import load_analysis
 from osu_api import (
     OsuApiClient,
     OsuApiError,
@@ -52,8 +54,11 @@ from osu_api import (
 from ranking import RankingContext, evaluate_candidate, rank_candidates, validate_ranking
 from relevance import (
     BELOW,
+    FAILED,
     NO_DATA,
     NOT_ANALYZED,
+    PARTIAL,
+    SOURCE_UNAVAILABLE,
     evaluate_relevance,
 )
 from skillsets import SKILLS, evaluate_skills, skill_uses_sequences
@@ -87,12 +92,18 @@ class SequenceStats:
     downloads: int = 0
     cache_hits: int = 0
     failed: int = 0
+    partial: int = 0
+    source_unavailable: int = 0
+    not_analyzed: int = 0
     limit: int = 0
     cached_only: bool = False
 
     @property
     def complete(self) -> bool:
-        return not self.required or self.unanalyzed == 0
+        return (
+            not self.required
+            or (self.unanalyzed == 0 and self.partial == 0)
+        )
 
 
 @dataclass(frozen=True)
@@ -232,10 +243,16 @@ def _apply_relevance_gate(
         statuses = {target.status for target in check.targets}
         if BELOW in statuses:
             reason = "соответствие целевым тегам ниже порога"
+        elif SOURCE_UNAVAILABLE in statuses:
+            reason = "нет .osu для целевых тегов (источник недоступен)"
+        elif FAILED in statuses:
+            reason = "ошибка анализа .osu для целевых тегов"
+        elif PARTIAL in statuses:
+            reason = "частичный анализ .osu для целевых тегов"
         elif NO_DATA in statuses:
             reason = "недостаточно данных для целевых тегов"
         elif NOT_ANALYZED in statuses:
-            reason = "не анализировалось (нужен .osu)"
+            reason = "не анализировалось (нужен .osu или attributes)"
         else:
             reason = "соответствие целевым тегам ниже порога"
         excluded[reason] = excluded.get(reason, 0) + 1
@@ -578,14 +595,30 @@ class DiscoveryEngine:
         return result
 
     # -- sequence analysis -------------------------------------------------
-    def _load_sequence(
+    def _load_analysis(
         self, beatmap_id: int, allow_download: bool
-    ) -> SequenceAnalysis:
+    ) -> AnalysisEvidence:
         if self.sequence_loader is not None:
-            return self.sequence_loader(beatmap_id, allow_download)
-        return load_analysis(
+            sequence = self.sequence_loader(beatmap_id, allow_download)
+            return AnalysisEvidence(
+                beatmap_id=int(beatmap_id),
+                status=(
+                    evidence.PARTIAL
+                    if getattr(sequence, "truncated", False)
+                    else evidence.MEASURED
+                ),
+                source="download" if allow_download else "cache",
+                sequence=sequence,
+                scope=(
+                    f"{sequence.analyzed_notes}/{sequence.total_notes} objects"
+                ),
+                analyzer_version=getattr(
+                    sequence, "analyzer_version", 0
+                ),
+            )
+        return analysis_store.analyze_beatmap(
+            self.storage,
             beatmap_id,
-            self.storage.path.parent / "gameplay_cache",
             allow_download=allow_download,
         )
 
@@ -655,18 +688,28 @@ class DiscoveryEngine:
         return result
 
     @staticmethod
-    def _with_sequence(
-        candidate: Candidate, analysis: SequenceAnalysis
+    def _with_analysis(
+        candidate: Candidate, analysis: AnalysisEvidence
     ) -> Candidate:
+        sequence = analysis.sequence if analysis.usable else None
         traits = derive_features(
             candidate.beatmap,
             candidate.beatmapset,
             candidate.attributes,
-            sequence=analysis,
+            sequence=sequence,
+            analysis_status=analysis.status,
+            analysis_scope=analysis.scope,
+            analyzer_version=analysis.analyzer_version,
+            attributes_status=(
+                evidence.MEASURED
+                if candidate.attributes is not None
+                else evidence.NOT_ANALYZED
+            ),
         )
         return replace(
             candidate,
-            sequence=analysis,
+            sequence=sequence,
+            analysis=analysis,
             traits=traits,
             skillsets=evaluate_skills(traits),
         )
@@ -682,172 +725,184 @@ class DiscoveryEngine:
     ) -> tuple[list[Candidate], SequenceStats]:
         limit = int(self.settings.fetch_sequences_limit)
         required = _needs_sequence_analysis(ctx.settings)
-        if not required or not candidates:
+        if not candidates:
             return candidates, SequenceStats(required=required)
-        if deadline_at is not None and time.perf_counter() >= deadline_at:
-            return candidates, SequenceStats(
-                required=True,
-                unanalyzed=len(candidates),
-                limit=limit,
-                cached_only=limit <= 0 or not allow_download,
-            )
-
         cached_only = limit <= 0 or not allow_download
         analysis_limit = (
             MAX_CACHED_SEQUENCE_ANALYSIS if limit <= 0 else limit
         )
-        if analysis_limit <= 0:
-            return candidates, SequenceStats(
-                required=True,
-                unanalyzed=len(candidates),
-                limit=limit,
-                cached_only=True,
+        evidence_by_id = analysis_store.bulk_peek(
+            self.storage, (item.beatmap.id for item in candidates)
+        )
+        if not required:
+            # Attach the cheap status even when no selected skill needs
+            # sequence data, so cards do not invent "no streams".
+            return (
+                [
+                    self._with_analysis(
+                        candidate,
+                        evidence_by_id.get(
+                            candidate.beatmap.id,
+                            AnalysisEvidence(
+                                beatmap_id=candidate.beatmap.id,
+                                status=evidence.NOT_ANALYZED,
+                            ),
+                        ),
+                    )
+                    for candidate in candidates
+                ],
+                SequenceStats(required=False),
             )
 
         fair = self._fair_sequence_order(candidates, ctx)
-        cached = [
-            candidate
-            for candidate in fair
-            if self._sequence_is_cached(candidate.beatmap.id)
-        ]
-        cached_ids = {candidate.beatmap.id for candidate in cached}
         updated: dict[int, Candidate] = {}
         attempted: set[int] = set()
-        analyzed = 0
         downloads = 0
         cache_hits = 0
         failed = 0
 
-        def store(
-            candidate: Candidate, analysis: SequenceAnalysis, source: str
-        ) -> None:
-            nonlocal analyzed, downloads, cache_hits
-            updated[candidate.beatmap.id] = self._with_sequence(
-                candidate, analysis
+        def store(candidate: Candidate, item: AnalysisEvidence) -> None:
+            nonlocal downloads, cache_hits
+            updated[candidate.beatmap.id] = self._with_analysis(
+                candidate, item
             )
-            analyzed += 1
-            if source == "cache":
-                cache_hits += 1
-            else:
+            evidence_by_id[candidate.beatmap.id] = item
+            if item.source == "download":
                 downloads += 1
+            else:
+                cache_hits += 1
 
-        def attempt(
-            candidate: Candidate, allow: bool
-        ) -> tuple[Exception | None, bool]:
+        def attempt(candidate: Candidate, allow: bool) -> None:
+            nonlocal failed
+            tried = False
             try:
-                analysis = self._load_sequence(candidate.beatmap.id, allow)
-            except GameplayError as exc:
-                return exc, False
-            except Exception as exc:  # noqa: BLE001 - one map must not stop search
+                item = self._load_analysis(candidate.beatmap.id, allow)
+                tried = True
+            except Exception as exc:  # noqa: BLE001 - one map must not stop
                 logger.warning(
                     "sequence analysis failed for %s: %s",
                     candidate.beatmap.id,
                     exc,
                 )
-                return exc, True
-            store(candidate, analysis, "cache" if not allow else "download")
-            return None, False
-
-        def failure_note(
-            candidate: Candidate, exc: Exception, unexpected: bool
-        ) -> None:
-            if len(notes) >= MAX_NOTES:
-                return
-            if unexpected:
-                notes.append(
-                    f".osu {candidate.beatmap.id}: анализ последовательностей "
-                    "не удался."
+                item = AnalysisEvidence(
+                    beatmap_id=candidate.beatmap.id,
+                    status=evidence.FAILED,
+                    source="download" if allow else "cache",
+                    scope=type(exc).__name__,
+                    analyzer_version=patterns.ANALYZER_VERSION,
                 )
-            else:
-                notes.append(f".osu {candidate.beatmap.id}: {exc}")
+            if item.usable:
+                store(candidate, item)
+            elif item.status == evidence.FAILED:
+                failed += 1
+                if len(notes) < MAX_NOTES:
+                    notes.append(
+                        f".osu {candidate.beatmap.id}: "
+                        + (item.scope or "анализ не удался")
+                    )
+            if not tried and len(notes) < MAX_NOTES:
+                notes.append(f".osu {candidate.beatmap.id}: файл недоступен.")
 
-        # Cached files always go first. The attempt count is bounded even when
-        # the user asks for cached-only analysis.
-        for candidate in cached[:MAX_CACHED_SEQUENCE_ANALYSIS]:
-            if analyzed >= analysis_limit:
+        # Existing database/cache evidence goes first, then bounded downloads.
+        for candidate in fair:
+            if len(updated) >= analysis_limit:
                 break
             if deadline_at is not None and time.perf_counter() >= deadline_at:
                 break
-            attempted.add(candidate.beatmap.id)
-            error, unexpected = attempt(candidate, False)
-            if error is None:
+            beatmap_id = candidate.beatmap.id
+            item = evidence_by_id.get(beatmap_id)
+            if item is not None and item.usable:
+                attempted.add(beatmap_id)
+                store(candidate, item)
                 continue
-            if cached_only:
-                failed += 1
-                failure_note(candidate, error, unexpected)
-
-        # In network mode fill the remaining slots from the same fair order.
-        # Missing local files never block later candidates, and a broken cache
-        # entry is retried as a download.
-        if not cached_only and analyzed < analysis_limit:
+            if self._sequence_is_cached(beatmap_id):
+                attempted.add(beatmap_id)
+                attempt(candidate, False)
+        if not cached_only:
             for candidate in fair:
-                if analyzed >= analysis_limit:
+                if len(updated) >= analysis_limit:
                     break
                 if deadline_at is not None and time.perf_counter() >= deadline_at:
                     break
                 beatmap_id = candidate.beatmap.id
-                if beatmap_id in updated:
+                if beatmap_id in attempted or beatmap_id in updated:
                     continue
-                if beatmap_id in cached_ids and beatmap_id not in attempted:
-                    attempted.add(beatmap_id)
-                    error, _ = attempt(candidate, False)
-                    if error is None:
-                        continue
-                error, unexpected = attempt(candidate, True)
-                if error is not None:
-                    failed += 1
-                    failure_note(candidate, error, unexpected)
+                attempted.add(beatmap_id)
+                attempt(candidate, True)
 
-        missing_cache = (
-            sum(1 for candidate in fair if candidate.beatmap.id not in cached_ids)
-            if cached_only
-            else 0
-        )
-        unanalyzed = len(candidates) - analyzed
+        if deadline_at is not None and time.perf_counter() >= deadline_at:
+            notes.append(
+                "Sequence-анализ остановлен по дедлайну; часть карт осталась "
+                "без анализа."
+            )
+
+        result: list[Candidate] = []
+        analyzed = partial = not_analyzed = unavailable = failed_status = 0
+        for candidate in candidates:
+            item = evidence_by_id.get(candidate.beatmap.id)
+            if item is None:
+                item = AnalysisEvidence(
+                    beatmap_id=candidate.beatmap.id,
+                    status=evidence.NOT_ANALYZED,
+                )
+            if item.status == evidence.MEASURED:
+                analyzed += 1
+            elif item.status == evidence.PARTIAL:
+                partial += 1
+            elif item.status == evidence.SOURCE_UNAVAILABLE:
+                unavailable += 1
+            elif item.status == evidence.FAILED:
+                failed_status += 1
+            else:
+                not_analyzed += 1
+            enriched = updated.get(candidate.beatmap.id)
+            result.append(
+                enriched
+                if enriched is not None
+                else self._with_analysis(candidate, item)
+            )
+        unanalyzed = len(candidates) - analyzed - partial
         if limit <= 0:
             notes.append(
                 "Лимит .osu = 0: новые файлы не скачиваются; используется "
                 "только локальный кэш (не более 50 карт)."
             )
-        if analyzed:
+        if analyzed or partial:
             notes.append(
-                f"Sequence-анализ .osu: {analyzed} карт; streams и bursts "
-                "считаются раздельно по непрерывным цепочкам."
+                f"Sequence-анализ .osu: {analyzed + partial} карт "
+                f"({partial} частично); streams, bursts и геометрия считаются "
+                "только по проанализированным объектам."
             )
         if failed:
             notes.append(
-                f"Sequence-анализ: не удалось прочитать .osu для {failed} карт; "
-                "их stream/burst-признаки остаются неизвестными."
+                f"Sequence-анализ: ошибка разбора для {failed} карт; их "
+                "признаки остаются неизвестными, а не нулевыми."
             )
-        if cached_only and missing_cache:
+        if unavailable:
             notes.append(
-                "Локальное переранжирование не скачивает .osu: для "
-                f"{missing_cache} карт файла нет в кеше."
+                f"Нет .osu в кеше для {unavailable} карт: это "
+                "«источник недоступен», а не «паттернов нет»."
             )
         if unanalyzed:
             cap = "0 (только кэш, до 50)" if limit <= 0 else str(analysis_limit)
             notes.append(
-                f"Sequence-анализ: проанализировано {analyzed} из "
-                f"{len(candidates)}; {unanalyzed} остались без анализа "
+                f"Sequence-анализ: покрыто {analyzed + partial} из "
+                f"{len(candidates)}; {unanalyzed} без анализа "
                 f"(лимит {cap})."
             )
         stats = SequenceStats(
             required=True,
-            analyzed=analyzed,
+            analyzed=analyzed + partial,
             unanalyzed=unanalyzed,
             downloads=downloads,
             cache_hits=cache_hits,
-            failed=failed,
+            failed=failed_status,
+            partial=partial,
+            source_unavailable=unavailable,
+            not_analyzed=not_analyzed,
             limit=limit,
             cached_only=cached_only,
         )
-        if not updated:
-            return candidates, stats
-
-        result: list[Candidate] = []
-        for candidate in candidates:
-            enriched = updated.get(candidate.beatmap.id)
-            result.append(enriched if enriched is not None else candidate)
         return result, stats
 
     # -- main entry point --------------------------------------------------
@@ -1282,6 +1337,10 @@ class DiscoveryEngine:
             sequence_unanalyzed=sequence_stats.unanalyzed,
             sequence_downloads=sequence_stats.downloads,
             sequence_cache_hits=sequence_stats.cache_hits,
+            sequence_partial=sequence_stats.partial,
+            sequence_source_unavailable=sequence_stats.source_unavailable,
+            sequence_not_analyzed=sequence_stats.not_analyzed,
+            sequence_failed=sequence_stats.failed,
         )
         if record:
             try:
@@ -1530,6 +1589,10 @@ class DiscoveryEngine:
             sequence_unanalyzed=sequence_stats.unanalyzed,
             sequence_downloads=sequence_stats.downloads,
             sequence_cache_hits=sequence_stats.cache_hits,
+            sequence_partial=sequence_stats.partial,
+            sequence_source_unavailable=sequence_stats.source_unavailable,
+            sequence_not_analyzed=sequence_stats.not_analyzed,
+            sequence_failed=sequence_stats.failed,
         )
 
 

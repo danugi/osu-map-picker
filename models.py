@@ -670,21 +670,28 @@ class Preset:
 
 @dataclass(frozen=True, slots=True)
 class BeatmapFeatures:
-    """Measured mapping features with explicit provenance.
+    """Measured mapping features with explicit provenance and status.
 
-    Scores are only produced for features we can actually derive from the
-    API metadata, object counts, circles/OD/AR and mapper tags. Geometry
-    (wide/flow/awkward angles) is *not* inferred from stars or BPM; those
-    skills stay limited until local ``.osu`` analysis is available.
+    ``scores`` contains only values that actually exist. ``statuses`` explains
+    why a key is absent or how strong its value is: measured, not_detected,
+    not_analyzed, source_unavailable, partial, failed or proxy. Missing is
+    never represented as a fabricated zero.
     """
 
     scores: dict[str, float] = field(default_factory=dict)
     sources: dict[str, str] = field(default_factory=dict)
     confidence: str = "none"  # none | low | medium | high
     notes: tuple[str, ...] = ()
+    statuses: dict[str, str] = field(default_factory=dict)
+    analysis_status: str = "not_analyzed"
+    analysis_scope: str = ""
+    analyzer_version: int = 0
 
     def get(self, key: str) -> float | None:
         return self.scores.get(key)
+
+    def status(self, key: str) -> str:
+        return self.statuses.get(key, "")
 
     @property
     def available(self) -> bool:
@@ -710,11 +717,26 @@ class PatternChain:
 
 
 @dataclass(frozen=True, slots=True)
+class PatternSection:
+    """A measured slice of a difficulty with its locally detected patterns."""
+
+    start_ms: int
+    end_ms: int
+    object_count: int
+    labels: tuple[str, ...] = ()
+    jump_share: float = 0.0
+    wide_jump_share: float = 0.0
+    flow_share: float = 0.0
+    angle_change_share: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
 class SequenceAnalysis:
-    """Sequence evidence extracted from one difficulty's hit objects.
+    """Measured pattern evidence extracted from one difficulty's hit objects.
 
     Streams and bursts are disjoint maximal chains: a chain of 10+ notes is a
     stream, a chain of 5-9 notes is a burst. The same note can never be in both.
+    Geometry values are normalized by the circle diameter implied by CS.
     """
 
     stream_chains: tuple[PatternChain, ...] = ()
@@ -722,6 +744,18 @@ class SequenceAnalysis:
     analyzed_notes: int = 0
     total_notes: int = 0
     truncated: bool = False
+    # Geometry is measured only when the .osu file was analyzed. Zero means
+    # "analyzed, not detected" for these fields, not missing data.
+    jump_share: float = 0.0
+    wide_jump_share: float = 0.0
+    flow_share: float = 0.0
+    angle_change_share: float = 0.0
+    slider_share: float = 0.0
+    notes_per_second: float = 0.0
+    rhythm_variability: float = 0.0
+    labels: tuple[str, ...] = ()
+    sections: tuple[PatternSection, ...] = ()
+    analyzer_version: int = 0
 
     @property
     def stream_notes(self) -> int:
@@ -753,6 +787,11 @@ class SkillScore:
     # "osu_api_attributes", ...). Keeping them separate from evidence lets the
     # UI say whether a match came from the API, a mapper tag or a proxy.
     sources: tuple[str, ...] = ()
+    # Why the value exists/does not exist. See evidence.py. Empty means the
+    # caller did not provide status information (legacy/manual construction).
+    status: str = ""
+    # Share of this skill's configured feature weight that was available.
+    coverage: float = 0.0
 
     @property
     def display_score(self) -> int | None:
@@ -828,6 +867,28 @@ class RelevanceResult:
 
 
 @dataclass(frozen=True, slots=True)
+class AnalysisEvidence:
+    """Status and result of `.osu` analysis for one difficulty."""
+
+    beatmap_id: int
+    status: str = "not_analyzed"
+    source: str = ""
+    sequence: SequenceAnalysis | None = None
+    scope: str = ""
+    analyzer_version: int = 0
+    file_mtime_ns: int | None = None
+    file_size: int | None = None
+    attempts: int = 0
+
+    @property
+    def usable(self) -> bool:
+        return self.sequence is not None and self.status in {
+            "measured",
+            "partial",
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class Candidate:
     beatmapset: Beatmapset
     beatmap: Beatmap
@@ -839,6 +900,7 @@ class Candidate:
     unknown_fields: tuple[str, ...] = ()
     relevance: RelevanceResult | None = None
     sequence: SequenceAnalysis | None = None
+    analysis: AnalysisEvidence | None = None
 
     @property
     def key(self) -> int:
@@ -853,6 +915,8 @@ class ScoredCandidate:
     reasons: tuple[str, ...] = ()
     penalty: float = 0.0
     diversified_score: float | None = None
+    # Share of enabled factor weight backed by an actual value.
+    coverage: float = 0.0
 
     @property
     def beatmapset(self) -> Beatmapset:
@@ -925,6 +989,10 @@ class DiscoveryResult:
     sequence_unanalyzed: int = 0
     sequence_downloads: int = 0
     sequence_cache_hits: int = 0
+    sequence_partial: int = 0
+    sequence_source_unavailable: int = 0
+    sequence_not_analyzed: int = 0
+    sequence_failed: int = 0
 
     @property
     def count(self) -> int:
