@@ -144,9 +144,9 @@ def test_three_themes_have_distinct_stylesheets() -> None:
     }
     assert set(css) == {"modern_glass", "osu_minimal", "dark_clean"}
     assert "osu! Minimal" in ui_theme.THEME_LABELS["osu_minimal"]
-    assert "flat, dense" in css["osu_minimal"]
-    assert "Dark Clean" in css["dark_clean"]
-    assert "osu! Minimal" not in css["dark_clean"]
+    assert "--osu-bg: #141319" in css["osu_minimal"]
+    assert "--osu-bg: #17191F" in css["dark_clean"]
+    assert "--osu-bg: #17161B" in css["modern_glass"]
     assert len(set(css.values())) == 3
 
 

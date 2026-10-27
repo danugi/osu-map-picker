@@ -49,10 +49,10 @@ class AppearanceSettings:
     fit: str = "cover"
     position_x: int = 50
     position_y: int = 50
-    dim: float = 0.42
-    blur: int = 4
+    dim: float = 0.52
+    blur: int = 0
     opacity: float = 1.0
-    panel_opacity: float = 0.84
+    panel_opacity: float = 0.98
     accent: str = "#ff66aa"
 
     def to_dict(self) -> dict[str, object]:

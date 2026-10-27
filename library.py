@@ -418,11 +418,14 @@ def _where_clause(filters: LibraryFilters) -> tuple[str, dict[str, Any]]:
         clauses.append(f"beatmapset_id IN ({placeholders})")
         for index, value in enumerate(filters.set_ids):
             params[f"set_{index}"] = int(value)
-    for index, pattern in enumerate(filters.patterns):
-        # Labels are stored as a JSON string array. This is a read-only,
-        # bounded local filter; malformed or absent JSON simply does not match.
-        clauses.append(f"sequence_json LIKE :pattern_{index}")
-        params[f"pattern_{index}"] = f'%"{pattern}"%'
+    if filters.patterns:
+        # Any selected pattern matches. Labels are stored as a JSON string
+        # array; malformed or absent JSON simply does not match.
+        parts = []
+        for index, pattern in enumerate(filters.patterns):
+            parts.append(f"sequence_json LIKE :pattern_{index}")
+            params[f"pattern_{index}"] = f'%"{pattern}"%'
+        clauses.append("(" + " OR ".join(parts) + ")")
     return (" AND ".join(clauses) or "1=1"), params
 
 

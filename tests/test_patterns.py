@@ -172,6 +172,7 @@ def test_geometry_labels_multiple_patterns() -> None:
     assert analysis.wide_jump_share > 0.2
     assert "wide_aim" in analysis.labels
     assert "flow_aim" in analysis.labels
+    assert set(analysis.labels) <= set(patterns.DETECTED_LABELS)
     assert analysis.sections
 
 

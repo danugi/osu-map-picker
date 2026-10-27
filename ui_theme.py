@@ -24,28 +24,28 @@ class ThemePalette:
 
 PALETTES = {
     "modern_glass": ThemePalette(
-        base="#120f16",
-        base_alt="#1b1420",
-        panel_rgb=(29, 23, 34),
-        text="#f8f2f7",
-        muted="#b9acb9",
-        border="rgba(255, 255, 255, 0.10)",
+        base="#17161B",
+        base_alt="#211F26",
+        panel_rgb=(33, 31, 38),
+        text="#F4F0F5",
+        muted="#B9B4C0",
+        border="rgba(255, 255, 255, 0.09)",
     ),
     "osu_minimal": ThemePalette(
-        base="#0e0e12",
-        base_alt="#141419",
-        panel_rgb=(19, 19, 24),
-        text="#f7f7fa",
-        muted="#aaaab6",
-        border="rgba(255, 255, 255, 0.13)",
+        base="#141319",
+        base_alt="#1E1C23",
+        panel_rgb=(30, 28, 35),
+        text="#F4F0F5",
+        muted="#B9B4C0",
+        border="rgba(255, 255, 255, 0.08)",
     ),
     "dark_clean": ThemePalette(
-        base="#12151b",
-        base_alt="#181c24",
-        panel_rgb=(25, 29, 37),
-        text="#eef2f8",
-        muted="#9aa6b7",
-        border="rgba(170, 190, 215, 0.13)",
+        base="#17191F",
+        base_alt="#1F222A",
+        panel_rgb=(31, 34, 42),
+        text="#F2F4F8",
+        muted="#AEB4C0",
+        border="rgba(190, 200, 218, 0.10)",
     ),
 }
 
@@ -56,8 +56,8 @@ THEME_LABELS = {
 }
 
 THEME_DESCRIPTIONS = {
-    "modern_glass": "Полупрозрачные панели, мягкое свечение и акцент osu!.",
-    "osu_minimal": "Почти чёрная сцена, розовый акцент, плотные панели и строгие формы.",
+    "modern_glass": "Тёмная нейтральная сцена, плотные поверхности и акцент osu!.",
+    "osu_minimal": "Компактные поверхности, розовый акцент и строгие формы.",
     "dark_clean": "Нейтральный графит, спокойные границы и минимальный визуальный шум.",
 }
 
@@ -90,7 +90,6 @@ def build_theme_css(
     panel_strong = _rgba(panel_rgb, min(0.98, settings.panel_opacity + 0.08))
     panel_soft = _rgba(panel_rgb, max(0.45, settings.panel_opacity - 0.18))
     accent_soft = _rgba(accent_rgb, 0.15)
-    accent_glow = _rgba(accent_rgb, 0.28)
     if background_uri:
         background_rule = (
             "background-image:"
@@ -105,15 +104,7 @@ def build_theme_css(
             "transform:scale(1.035);"
         )
     else:
-        background_rule = (
-            "background-image:"
-            "radial-gradient(1200px 700px at 12% -10%, "
-            f"{_rgba(accent_rgb, 0.20)}, transparent 60%),"
-            "radial-gradient(900px 600px at 100% 0%, "
-            "rgba(93, 71, 186, 0.18), transparent 55%),"
-            "linear-gradient(160deg, "
-            f"{palette.base_alt}, {palette.base} 58%, #0b090e);"
-        )
+        background_rule = f"background: {palette.base};"
     css = f"""
 <style>
 :root {{
@@ -121,9 +112,11 @@ def build_theme_css(
   --osu-accent-rgb: {accent_rgb[0]}, {accent_rgb[1]}, {accent_rgb[2]};
   --osu-accent-text: {accent_text};
   --osu-accent-soft: {accent_soft};
-  --osu-accent-glow: {accent_glow};
   --osu-bg: {palette.base};
   --osu-bg-alt: {palette.base_alt};
+  --osu-surface: #211F26;
+  --osu-surface-raised: #292730;
+  --osu-surface-input: #1E1C23;
   --osu-panel: {panel};
   --osu-panel-strong: {panel_strong};
   --osu-panel-soft: {panel_soft};
@@ -134,17 +127,18 @@ def build_theme_css(
   --osu-success: #76d7a2;
   --osu-warning: #ffc266;
   --osu-danger: #ff7f9f;
-  --osu-radius-sm: 9px;
-  --osu-radius-md: 14px;
-  --osu-radius-lg: 20px;
+  --osu-radius-btn: 8px;
+  --osu-radius-sm: 8px;
+  --osu-radius-md: 10px;
+  --osu-radius-lg: 12px;
   --osu-space-1: 0.35rem;
   --osu-space-2: 0.65rem;
   --osu-space-3: 1rem;
   --osu-space-4: 1.5rem;
   --osu-space-5: 2.2rem;
-  --osu-shadow-sm: 0 8px 24px rgba(0, 0, 0, 0.18);
-  --osu-shadow-md: 0 16px 44px rgba(0, 0, 0, 0.28);
-  --osu-transition: 160ms cubic-bezier(.2, .75, .25, 1);
+  --osu-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.22);
+  --osu-shadow-md: 0 2px 6px rgba(0, 0, 0, 0.24);
+  --osu-transition: 120ms ease;
   --osu-font: "Segoe UI Variable Text", "Segoe UI", Inter, system-ui, -apple-system, sans-serif;
 }}
 
@@ -173,8 +167,7 @@ html, body, [class*="css"] {{
   z-index: 1;
 }}
 [data-testid="stHeader"] {{
-  background: linear-gradient(180deg, rgba(10, 8, 12, 0.82), transparent);
-  backdrop-filter: blur(10px);
+  background: var(--osu-bg);
 }}
 [data-testid="stMain"] {{
   background: transparent;
@@ -196,11 +189,11 @@ h1 {{
 h1::after {{
   content: "";
   display: block;
-  width: 74px;
-  height: 4px;
-  margin-top: 0.55rem;
-  border-radius: 99px;
-  background: linear-gradient(90deg, var(--osu-accent), transparent);
+  width: 48px;
+  height: 3px;
+  margin-top: 0.5rem;
+  border-radius: 2px;
+  background: var(--osu-accent);
 }}
 p, li, label, .stMarkdown {{
   color: var(--osu-text);
@@ -214,14 +207,12 @@ a {{
   transition: color var(--osu-transition);
 }}
 a:hover {{
-  color: var(--osu-accent-text) !important;
-  text-shadow: 0 0 18px var(--osu-accent-glow);
+  color: var(--osu-text) !important;
 }}
 
 section[data-testid="stSidebar"] {{
-  background: linear-gradient(180deg, rgba(17, 13, 21, 0.96), rgba(12, 10, 15, 0.94));
+  background: var(--osu-bg);
   border-right: 1px solid var(--osu-border);
-  backdrop-filter: blur(18px);
 }}
 section[data-testid="stSidebar"] .block-container {{
   padding-top: 1.2rem;
@@ -235,65 +226,77 @@ section[data-testid="stSidebar"] h1::after {{
   height: 3px;
 }}
 section[data-testid="stSidebar"] [role="radiogroup"] label {{
-  border-radius: var(--osu-radius-sm);
+  border-radius: var(--osu-radius-btn);
   padding: 0.38rem 0.5rem;
-  transition: background var(--osu-transition), transform var(--osu-transition);
+  transition: background var(--osu-transition);
 }}
 section[data-testid="stSidebar"] [role="radiogroup"] label:hover {{
   background: var(--osu-accent-soft);
-  transform: translateX(2px);
 }}
 
 [data-testid="stVerticalBlockBorderWrapper"] {{
-  background: linear-gradient(145deg, var(--osu-panel-strong), var(--osu-panel));
+  background: var(--osu-panel-strong);
   border: 1px solid var(--osu-border) !important;
-  border-radius: var(--osu-radius-lg) !important;
+  border-radius: var(--osu-radius-md) !important;
   box-shadow: var(--osu-shadow-sm);
   overflow: hidden;
-  transition: border-color var(--osu-transition), box-shadow var(--osu-transition),
-              transform var(--osu-transition);
-  animation: osu-rise 260ms ease-out both;
+  transition: border-color var(--osu-transition), background var(--osu-transition);
 }}
 [data-testid="stVerticalBlockBorderWrapper"]:hover {{
-  border-color: rgba(var(--osu-accent-rgb), 0.42) !important;
-  box-shadow: var(--osu-shadow-md), 0 0 0 1px rgba(var(--osu-accent-rgb), 0.10);
-}}
-@keyframes osu-rise {{
-  from {{ opacity: 0; transform: translateY(5px); }}
-  to {{ opacity: 1; transform: translateY(0); }}
+  border-color: rgba(var(--osu-accent-rgb), 0.32) !important;
 }}
 @media (prefers-reduced-motion: reduce) {{
-  [data-testid="stVerticalBlockBorderWrapper"] {{ animation: none; }}
   * {{ transition-duration: 1ms !important; }}
 }}
 
 .stButton > button, .stDownloadButton > button, .stLinkButton > a,
 [data-testid="stFormSubmitButton"] > button {{
-  border-radius: 999px !important;
-  border: 1px solid rgba(var(--osu-accent-rgb), 0.48) !important;
-  background: linear-gradient(135deg, rgba(var(--osu-accent-rgb), 0.20), rgba(255,255,255,0.03)) !important;
+  border-radius: var(--osu-radius-btn) !important;
+  border: 1px solid var(--osu-border-strong) !important;
+  background: var(--osu-surface-raised) !important;
   color: var(--osu-text) !important;
-  font-weight: 650 !important;
-  min-height: 2.45rem;
-  padding: 0.38rem 1.05rem !important;
+  font-weight: 600 !important;
+  min-height: 2.35rem;
+  padding: 0.35rem 0.9rem !important;
   box-shadow: none !important;
-  transition: transform var(--osu-transition), box-shadow var(--osu-transition),
-              background var(--osu-transition) !important;
+  transition: background var(--osu-transition), border-color var(--osu-transition) !important;
 }}
 .stButton > button:hover, .stDownloadButton > button:hover, .stLinkButton > a:hover,
 [data-testid="stFormSubmitButton"] > button:hover {{
-  background: linear-gradient(135deg, rgba(var(--osu-accent-rgb), 0.38), rgba(255,255,255,0.06)) !important;
-  border-color: var(--osu-accent) !important;
-  box-shadow: 0 8px 22px rgba(var(--osu-accent-rgb), 0.20) !important;
-  transform: translateY(-1px);
+  background: #302D38 !important;
+  border-color: rgba(var(--osu-accent-rgb), 0.45) !important;
   color: var(--osu-text) !important;
 }}
 .stButton > button[kind="primary"],
 [data-testid="stFormSubmitButton"] > button[kind="primary"] {{
-  background: linear-gradient(135deg, var(--osu-accent), rgba(var(--osu-accent-rgb), 0.72)) !important;
+  background: var(--osu-accent) !important;
   color: var(--osu-accent-text) !important;
-  border: 1px solid transparent !important;
-  box-shadow: 0 8px 26px rgba(var(--osu-accent-rgb), 0.22) !important;
+  border-color: var(--osu-accent) !important;
+}}
+.stButton > button[kind="primary"]:hover,
+[data-testid="stFormSubmitButton"] > button[kind="primary"]:hover {{
+  background: color-mix(in srgb, var(--osu-accent) 88%, white) !important;
+  border-color: transparent !important;
+}}
+.stButton > button:disabled,
+[data-testid="stFormSubmitButton"] > button:disabled {{
+  opacity: 0.45 !important;
+  background: #221F27 !important;
+  border-color: var(--osu-border) !important;
+  color: var(--osu-muted) !important;
+}}
+[class*="st-key-preset_delete"] button,
+[class*="st-key-taste_delete"] button,
+[class*="st-key-history_remove"] button,
+[class*="st-key-appearance_remove"] button {{
+  color: var(--osu-danger) !important;
+  border-color: color-mix(in srgb, var(--osu-danger) 38%, transparent) !important;
+}}
+[class*="st-key-preset_delete"] button:hover,
+[class*="st-key-taste_delete"] button:hover,
+[class*="st-key-history_remove"] button:hover,
+[class*="st-key-appearance_remove"] button:hover {{
+  background: rgba(255, 127, 159, 0.10) !important;
 }}
 .stButton > button:focus-visible, input:focus-visible, select:focus-visible {{
   outline: 2px solid var(--osu-accent) !important;
@@ -302,26 +305,31 @@ section[data-testid="stSidebar"] [role="radiogroup"] label:hover {{
 
 [data-baseweb="input"], [data-baseweb="textarea"], [data-baseweb="select"] > div,
 .stNumberInput [data-baseweb="input"], .stDateInput [data-baseweb="input"] {{
-  background: rgba(11, 9, 14, 0.48) !important;
+  background: var(--osu-surface-input) !important;
   border-color: var(--osu-border) !important;
-  border-radius: var(--osu-radius-sm) !important;
+  border-radius: var(--osu-radius-btn) !important;
   color: var(--osu-text) !important;
-  transition: border-color var(--osu-transition), box-shadow var(--osu-transition);
+  transition: border-color var(--osu-transition);
 }}
 [data-baseweb="input"]:focus-within, [data-baseweb="textarea"]:focus-within,
 [data-baseweb="select"] > div:focus-within {{
-  border-color: rgba(var(--osu-accent-rgb), 0.68) !important;
-  box-shadow: 0 0 0 3px rgba(var(--osu-accent-rgb), 0.11) !important;
+  border-color: var(--osu-accent) !important;
+  box-shadow: 0 0 0 1px var(--osu-accent) !important;
 }}
 [data-baseweb="popover"] div[role="listbox"] {{
-  background: #19141e !important;
+  background: var(--osu-bg-alt) !important;
   border: 1px solid var(--osu-border) !important;
   border-radius: var(--osu-radius-md) !important;
 }}
-[data-baseweb="tag"] {{
-  background: rgba(var(--osu-accent-rgb), 0.20) !important;
+[data-baseweb="tag"],
+[data-testid="stMultiSelectTagsContainer"] [data-tag] {{
+  background: rgba(var(--osu-accent-rgb), 0.14) !important;
   color: var(--osu-text) !important;
-  border-radius: 999px !important;
+  border: 1px solid rgba(var(--osu-accent-rgb), 0.28) !important;
+  border-radius: 6px !important;
+}}
+[data-testid="stMultiSelectTagsContainer"] [data-tag] span {{
+  color: var(--osu-text) !important;
 }}
 
 .stTabs [data-baseweb="tab-list"] {{
@@ -329,7 +337,7 @@ section[data-testid="stSidebar"] [role="radiogroup"] label:hover {{
   border-bottom: 1px solid var(--osu-border);
 }}
 .stTabs [data-baseweb="tab"] {{
-  border-radius: 999px;
+  border-radius: var(--osu-radius-btn);
   padding: 0.35rem 0.85rem;
   color: var(--osu-muted);
 }}
@@ -341,7 +349,7 @@ section[data-testid="stSidebar"] [role="radiogroup"] label:hover {{
   background: var(--osu-accent) !important;
 }}
 details, [data-testid="stExpander"] {{
-  background: rgba(18, 14, 22, 0.36);
+  background: var(--osu-surface-input);
   border: 1px solid var(--osu-border) !important;
   border-radius: var(--osu-radius-md) !important;
   overflow: hidden;
@@ -354,7 +362,7 @@ details, [data-testid="stExpander"] {{
 }}
 
 [data-testid="stMetric"] {{
-  background: rgba(12, 9, 15, 0.34);
+  background: var(--osu-surface);
   border: 1px solid var(--osu-border);
   border-radius: var(--osu-radius-md);
   padding: 0.7rem 0.85rem;
@@ -370,7 +378,29 @@ details, [data-testid="stExpander"] {{
 [data-testid="stAlert"] {{
   border-radius: var(--osu-radius-md) !important;
   border: 1px solid var(--osu-border) !important;
-  background: var(--osu-panel-soft) !important;
+  background: var(--osu-surface) !important;
+}}
+[data-testid="stAlertContainer"] {{
+  background: var(--osu-surface) !important;
+  border: 1px solid var(--osu-border) !important;
+  border-left: 3px solid var(--osu-accent) !important;
+  border-radius: var(--osu-radius-md) !important;
+  color: var(--osu-text) !important;
+}}
+[data-testid="stAlert"]:has([data-testid="stAlertContentWarning"])
+  [data-testid="stAlertContainer"] {{
+  border-left-color: var(--osu-warning) !important;
+}}
+[data-testid="stAlert"]:has([data-testid="stAlertContentError"])
+  [data-testid="stAlertContainer"] {{
+  border-left-color: var(--osu-danger) !important;
+}}
+[data-testid="stAlert"]:has([data-testid="stAlertContentSuccess"])
+  [data-testid="stAlertContainer"] {{
+  border-left-color: var(--osu-success) !important;
+}}
+[data-testid="stAlert"] p {{
+  color: var(--osu-text) !important;
 }}
 [data-testid="stDataFrame"], [data-testid="stTable"] {{
   border: 1px solid var(--osu-border);
@@ -390,7 +420,7 @@ hr {{
   border-color: var(--osu-accent) !important;
 }}
 .stProgress > div > div > div > div {{
-  background: linear-gradient(90deg, var(--osu-accent), rgba(var(--osu-accent-rgb), 0.52)) !important;
+  background: var(--osu-accent) !important;
 }}
 ::selection {{
   background: rgba(var(--osu-accent-rgb), 0.35);
@@ -409,72 +439,11 @@ hr {{
   align-items: center;
   gap: 0.5rem;
   color: var(--osu-accent);
-  font-size: 0.74rem;
-  font-weight: 750;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
+  font-size: 0.76rem;
+  font-weight: 650;
+  letter-spacing: 0.02em;
   margin-bottom: 0.35rem;
 }}
-.osu-discovery-hero {{
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1.2rem;
-  margin: 1.1rem 0 1.2rem;
-  padding: 1.15rem 1.35rem;
-  border-radius: var(--osu-radius-lg);
-  border: 1px solid rgba(var(--osu-accent-rgb), 0.26);
-  background:
-    radial-gradient(520px 180px at 8% 0%, rgba(var(--osu-accent-rgb), 0.22), transparent 70%),
-    radial-gradient(420px 200px at 100% 100%, rgba(111, 74, 214, 0.20), transparent 72%),
-    linear-gradient(135deg, rgba(29, 23, 36, 0.92), rgba(15, 12, 20, 0.94));
-  overflow: hidden;
-}}
-.osu-discovery-copy {{
-  min-width: 0;
-}}
-.osu-discovery-title {{
-  font-size: clamp(1.35rem, 2.4vw, 2rem);
-  font-weight: 800;
-  letter-spacing: -0.025em;
-  line-height: 1.1;
-  color: var(--osu-text);
-}}
-.osu-discovery-sub {{
-  color: var(--osu-muted);
-  font-size: 0.86rem;
-  margin-top: 0.32rem;
-}}
-.osu-discovery-orbit {{
-  position: relative;
-  width: 92px;
-  height: 92px;
-  flex: 0 0 92px;
-  border-radius: 50%;
-  border: 1px solid rgba(var(--osu-accent-rgb), 0.38);
-  box-shadow: 0 0 42px rgba(var(--osu-accent-rgb), 0.16) inset;
-}}
-.osu-discovery-orbit::before,
-.osu-discovery-orbit::after {{
-  content: "";
-  position: absolute;
-  border-radius: 50%;
-  border: 1px solid rgba(255,255,255,0.16);
-}}
-.osu-discovery-orbit::before {{ inset: 16px; }}
-.osu-discovery-orbit::after {{ inset: 32px; border-color: rgba(var(--osu-accent-rgb), 0.46); }}
-.osu-discovery-orbit span {{
-  position: absolute;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--osu-accent);
-  box-shadow: 0 0 12px rgba(var(--osu-accent-rgb), 0.8);
-}}
-.osu-discovery-orbit span:nth-child(1) {{ top: 10px; left: 42px; }}
-.osu-discovery-orbit span:nth-child(2) {{ bottom: 16px; left: 20px; opacity: 0.7; }}
-.osu-discovery-orbit span:nth-child(3) {{ right: 13px; top: 38px; opacity: 0.55; }}
 .osu-hero-meta {{
   display: flex;
   flex-wrap: wrap;
@@ -486,11 +455,11 @@ hr {{
   align-items: center;
   gap: 0.35rem;
   border: 1px solid var(--osu-border);
-  background: rgba(255,255,255,0.045);
+  background: var(--osu-surface-raised);
   color: var(--osu-text);
-  border-radius: 999px;
-  padding: 0.22rem 0.62rem;
-  font-size: 0.78rem;
+  border-radius: 6px;
+  padding: 0.2rem 0.52rem;
+  font-size: 0.76rem;
   line-height: 1.25;
   white-space: nowrap;
 }}
@@ -538,9 +507,7 @@ hr {{
 }}
 .osu-stat .k {{
   color: var(--osu-muted);
-  font-size: 0.66rem;
-  text-transform: uppercase;
-  letter-spacing: 0.09em;
+  font-size: 0.68rem;
   white-space: nowrap;
 }}
 .osu-stat .v {{
@@ -557,12 +524,10 @@ hr {{
   position: relative;
   min-height: 118px;
   aspect-ratio: 2.35 / 1;
-  border-radius: var(--osu-radius-md);
+  border-radius: var(--osu-radius-sm);
   overflow: hidden;
   border: 1px solid var(--osu-border);
-  background:
-    radial-gradient(circle at 28% 25%, rgba(var(--osu-accent-rgb), 0.26), transparent 58%),
-    linear-gradient(135deg, #24192c, #120f16);
+  background: var(--osu-surface-raised);
 }}
 .osu-cover-link {{
   position: absolute;
@@ -574,9 +539,8 @@ hr {{
   height: 100%;
   object-fit: cover;
   display: block;
-  transition: transform 260ms ease, filter var(--osu-transition);
 }}
-.osu-cover:hover img {{ transform: scale(1.035); filter: saturate(1.08); }}
+.osu-cover:hover img {{ opacity: 0.96; }}
 .osu-cover-fallback {{
   display: flex;
   align-items: center;
@@ -592,14 +556,13 @@ hr {{
   position: absolute;
   left: 0.55rem;
   bottom: 0.55rem;
-  border-radius: 999px;
-  padding: 0.2rem 0.55rem;
-  background: rgba(10, 8, 12, 0.76);
+  border-radius: 4px;
+  padding: 0.18rem 0.45rem;
+  background: rgba(17, 16, 20, 0.86);
   border: 1px solid rgba(255,255,255,0.16);
-  font-size: 0.72rem;
-  font-weight: 700;
+  font-size: 0.7rem;
+  font-weight: 650;
   color: #fff;
-  backdrop-filter: blur(8px);
 }}
 .osu-score {{
   text-align: right;
@@ -613,10 +576,8 @@ hr {{
 }}
 .osu-score .lbl {{
   color: var(--osu-muted);
-  font-size: 0.58rem;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  margin-top: 0.22rem;
+  font-size: 0.64rem;
+  margin-top: 0.2rem;
   white-space: nowrap;
 }}
 .osu-links {{
@@ -680,10 +641,9 @@ hr {{
   margin-top: 1.2rem;
   max-width: 380px;
   border-radius: var(--osu-radius-md);
-  border: 1px solid rgba(255,255,255,0.16);
-  background: rgba(20, 15, 24, 0.86);
+  border: 1px solid var(--osu-border-strong);
+  background: var(--osu-surface);
   padding: 0.85rem;
-  backdrop-filter: blur(10px);
 }}
 @media (max-width: 760px) {{
   .block-container {{ padding-left: 1rem; padding-right: 1rem; }}
@@ -692,108 +652,6 @@ hr {{
   .osu-discovery-orbit {{ display: none; }}
   .osu-discovery-hero {{ padding: 1rem; }}
 }}
-</style>
-"""
-    if settings.theme == "osu_minimal":
-        css += """
-<style>
-/* osu! Minimal: flat, dense, pink accent, no glass. */
-[data-testid="stVerticalBlockBorderWrapper"] {
-  background: rgba(19, 19, 24, 0.97) !important;
-  border-radius: 8px !important;
-  box-shadow: none !important;
-  animation: none !important;
-}
-[data-testid="stVerticalBlockBorderWrapper"]:hover {
-  border-color: rgba(var(--osu-accent-rgb), 0.55) !important;
-  box-shadow: none !important;
-}
-section[data-testid="stSidebar"] {
-  background: #101014 !important;
-  backdrop-filter: none !important;
-}
-[data-testid="stHeader"] {
-  background: #0e0e12 !important;
-  backdrop-filter: none !important;
-}
-[data-testid="stMetric"], details, [data-testid="stExpander"],
-[data-testid="stAlert"], .osu-preview-card {
-  background: #141419 !important;
-  border-radius: 8px !important;
-  box-shadow: none !important;
-  backdrop-filter: none !important;
-}
-.stButton > button, .stDownloadButton > button, .stLinkButton > a,
-[data-testid="stFormSubmitButton"] > button {
-  border-radius: 7px !important;
-  background: #17171d !important;
-  border-color: rgba(255, 255, 255, 0.17) !important;
-  box-shadow: none !important;
-}
-.stButton > button:hover, .stDownloadButton > button:hover,
-[data-testid="stFormSubmitButton"] > button:hover {
-  background: rgba(var(--osu-accent-rgb), 0.16) !important;
-  transform: none !important;
-  box-shadow: none !important;
-}
-.stButton > button[kind="primary"],
-[data-testid="stFormSubmitButton"] > button[kind="primary"] {
-  background: var(--osu-accent) !important;
-  color: #101014 !important;
-  border-color: var(--osu-accent) !important;
-}
-h1::after { width: 42px; height: 3px; border-radius: 0; }
-[data-baseweb="input"], [data-baseweb="textarea"],
-[data-baseweb="select"] > div {
-  background: #111116 !important;
-  border-radius: 6px !important;
-}
-.osu-chip, [data-baseweb="tag"] { border-radius: 5px !important; }
-.osu-note { border-radius: 0 6px 6px 0; }
-.osu-cover, .osu-stat, .osu-preview { border-radius: 7px !important; }
-</style>
-"""
-    elif settings.theme == "dark_clean":
-        css += """
-<style>
-/* Dark Clean: calm graphite, compact cards, restrained glow. */
-[data-testid="stVerticalBlockBorderWrapper"] {
-  background: var(--osu-panel-strong) !important;
-  border-radius: 12px !important;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.16) !important;
-  animation: none !important;
-}
-[data-testid="stVerticalBlockBorderWrapper"]:hover {
-  border-color: rgba(var(--osu-accent-rgb), 0.30) !important;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.20) !important;
-  transform: none !important;
-}
-section[data-testid="stSidebar"] {
-  background: #11151c !important;
-  backdrop-filter: blur(8px) !important;
-}
-[data-testid="stHeader"] {
-  background: rgba(18, 21, 27, 0.92) !important;
-}
-.stButton > button, .stDownloadButton > button, .stLinkButton > a,
-[data-testid="stFormSubmitButton"] > button {
-  border-radius: 9px !important;
-  background: rgba(var(--osu-accent-rgb), 0.10) !important;
-  box-shadow: none !important;
-}
-.stButton > button:hover, .stDownloadButton > button:hover,
-[data-testid="stFormSubmitButton"] > button:hover {
-  background: rgba(var(--osu-accent-rgb), 0.22) !important;
-  transform: none !important;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18) !important;
-}
-[data-testid="stMetric"], details, [data-testid="stExpander"],
-[data-testid="stAlert"], .osu-preview-card {
-  background: rgba(25, 29, 37, 0.92) !important;
-  border-radius: 10px !important;
-}
-h1::after { width: 52px; height: 3px; }
-.osu-cover, .osu-stat { border-radius: 9px !important; }
 </style>
 """
     css += """
@@ -814,17 +672,15 @@ section[data-testid="stSidebar"] {
   width: 274px !important;
   min-width: 274px !important;
   border-right: 1px solid var(--osu-border) !important;
-  background: rgba(12, 10, 16, 0.94) !important;
+  background: var(--osu-bg) !important;
 }
 section[data-testid="stSidebar"] .block-container {
   padding: 1.25rem 1rem 2rem !important;
 }
 .rail-heading {
   color: var(--osu-text);
-  font-size: 0.78rem;
-  font-weight: 800;
-  letter-spacing: 0.13em;
-  text-transform: uppercase;
+  font-size: 0.86rem;
+  font-weight: 700;
   margin-bottom: 0.2rem;
 }
 .rail-caption {
@@ -837,8 +693,9 @@ section[data-testid="stSidebar"] .block-container {
 [data-testid="stNumberInputContainer"],
 [data-baseweb="select"] > div,
 [data-baseweb="input"] {
-  background: #111015 !important;
+  background: var(--osu-surface-input) !important;
   border-color: var(--osu-border) !important;
+  border-radius: var(--osu-radius-btn) !important;
   color: var(--osu-text) !important;
 }
 [data-testid="stTextInputRootElement"] input,
@@ -849,11 +706,11 @@ section[data-testid="stSidebar"] .block-container {
 }
 [data-baseweb="select"] svg { fill: var(--osu-muted) !important; }
 [data-testid="stSegmentedControl"] [role="radiogroup"] {
-  gap: 0.2rem;
-  padding: 0.18rem;
+  gap: 0.15rem;
+  padding: 0.15rem;
   border: 1px solid var(--osu-border);
-  border-radius: 6px;
-  background: #111015;
+  border-radius: var(--osu-radius-btn);
+  background: var(--osu-surface-input);
 }
 [data-testid="stSegmentedControl"] button[role="radio"] {
   background: transparent !important;
@@ -874,13 +731,13 @@ section[data-testid="stSidebar"] .block-container {
   border-color: rgba(var(--osu-accent-rgb), 0.34) !important;
 }
 .stButton > button[kind="secondary"] {
-  background: rgba(255,255,255,0.035) !important;
+  background: var(--osu-surface-raised) !important;
   color: var(--osu-text) !important;
-  border-color: var(--osu-border) !important;
+  border-color: var(--osu-border-strong) !important;
 }
 .stButton > button[kind="secondary"]:hover {
-  background: rgba(var(--osu-accent-rgb), 0.12) !important;
-  border-color: rgba(var(--osu-accent-rgb), 0.36) !important;
+  background: #302D38 !important;
+  border-color: rgba(var(--osu-accent-rgb), 0.40) !important;
 }
 .site-header {
   display: flex;
@@ -899,15 +756,14 @@ section[data-testid="stSidebar"] .block-container {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 48px;
-  height: 48px;
-  border-radius: 14px;
-  background: linear-gradient(145deg, var(--osu-accent), #b44adf);
-  color: #fff;
-  font-size: 1.05rem;
-  font-weight: 900;
-  letter-spacing: -0.06em;
-  box-shadow: 0 8px 26px rgba(var(--osu-accent-rgb), 0.28);
+  width: 44px;
+  height: 44px;
+  border-radius: var(--osu-radius-md);
+  background: var(--osu-accent);
+  color: var(--osu-accent-text);
+  font-size: 1rem;
+  font-weight: 800;
+  letter-spacing: -0.05em;
 }
 .site-brand-copy {
   display: flex;
@@ -915,17 +771,15 @@ section[data-testid="stSidebar"] .block-container {
   min-width: 0;
 }
 .site-brand-kicker {
-  color: var(--osu-accent);
-  font-size: 0.66rem;
-  font-weight: 800;
-  letter-spacing: 0.15em;
-  text-transform: uppercase;
+  color: var(--osu-muted);
+  font-size: 0.7rem;
+  font-weight: 600;
 }
 .site-brand-name {
   color: var(--osu-text);
-  font-size: 1.3rem;
-  font-weight: 800;
-  line-height: 1.08;
+  font-size: 1.25rem;
+  font-weight: 700;
+  line-height: 1.12;
   letter-spacing: -0.02em;
 }
 .site-header-meta {
@@ -947,13 +801,11 @@ section[data-testid="stSidebar"] .block-container {
 }
 .site-pill {
   border: 1px solid var(--osu-border);
-  border-radius: 4px;
+  border-radius: 6px;
   padding: 0.22rem 0.5rem;
   color: var(--osu-muted);
-  font-size: 0.66rem;
-  font-weight: 750;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  font-size: 0.7rem;
+  font-weight: 600;
 }
 .site-pill.online { color: var(--osu-success); border-color: rgba(118, 215, 162, 0.32); }
 .site-pill.local { color: var(--osu-warning); border-color: rgba(255, 194, 102, 0.3); }
@@ -964,39 +816,37 @@ section[data-testid="stSidebar"] .block-container {
   margin: 0 0 1.25rem;
   padding: 0.2rem 0;
   border-bottom: 1px solid var(--osu-border);
-  background: rgba(13, 11, 17, 0.86);
-  backdrop-filter: blur(14px);
+  background: var(--osu-bg);
 }
 .st-key-site_nav .stButton > button {
-  border: 0 !important;
-  border-bottom: 2px solid transparent !important;
-  border-radius: 0 !important;
+  border: 1px solid transparent !important;
+  border-radius: var(--osu-radius-btn) !important;
   background: transparent !important;
   color: var(--osu-muted) !important;
   box-shadow: none !important;
-  min-height: 40px;
-  padding: 0.25rem 0.45rem !important;
-  font-size: 0.76rem;
-  font-weight: 800;
-  letter-spacing: 0.11em;
-  text-transform: uppercase;
+  min-height: 38px;
+  padding: 0.25rem 0.55rem !important;
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
   transform: none !important;
 }
 .st-key-site_nav .stButton > button:hover {
   color: var(--osu-text) !important;
-  border-bottom-color: rgba(var(--osu-accent-rgb), 0.45) !important;
+  background: var(--osu-surface) !important;
+  border-color: var(--osu-border) !important;
 }
 .st-key-site_nav .stButton > button[kind="primary"] {
   color: var(--osu-accent) !important;
-  border-bottom-color: var(--osu-accent) !important;
-  background: transparent !important;
+  background: rgba(var(--osu-accent-rgb), 0.10) !important;
+  border-color: rgba(var(--osu-accent-rgb), 0.28) !important;
 }
 .page-kicker {
   color: var(--osu-accent);
-  font-size: 0.68rem;
-  font-weight: 800;
-  letter-spacing: 0.17em;
-  text-transform: uppercase;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
   margin: 0.2rem 0 0.15rem;
 }
 h2, [data-testid="stHeadingWithActionElements"] h2 {
@@ -1014,13 +864,13 @@ h2, [data-testid="stHeadingWithActionElements"] h2 {
   margin: 1.0rem 0 0.85rem;
   border: 1px solid var(--osu-border);
   background: var(--osu-border);
-  border-radius: 8px;
+  border-radius: var(--osu-radius-md);
   overflow: hidden;
 }
 .library-summary { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .discovery-stats > div, .library-summary > div {
-  background: rgba(17, 14, 22, 0.94);
-  padding: 0.75rem 0.9rem;
+  background: var(--osu-surface);
+  padding: 0.7rem 0.85rem;
   display: flex;
   flex-direction: column;
   gap: 0.1rem;
@@ -1036,10 +886,9 @@ h2, [data-testid="stHeadingWithActionElements"] h2 {
 }
 .section-label {
   color: var(--osu-text);
-  font-size: 0.76rem;
-  font-weight: 800;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
+  font-size: 0.84rem;
+  font-weight: 700;
+  letter-spacing: 0;
   margin: 1.0rem 0 0.45rem;
 }
 .library-result-head {
@@ -1063,11 +912,9 @@ h2, [data-testid="stHeadingWithActionElements"] h2 {
   position: relative;
   aspect-ratio: 2.15 / 1;
   min-height: 110px;
-  border-radius: 6px;
+  border-radius: var(--osu-radius-sm);
   overflow: hidden;
-  background:
-    radial-gradient(circle at 25% 20%, rgba(var(--osu-accent-rgb), 0.30), transparent 60%),
-    linear-gradient(135deg, #24182d, #120f16);
+  background: var(--osu-surface-raised);
   margin-bottom: 0.65rem;
 }
 .library-cover-link {
@@ -1082,9 +929,8 @@ h2, [data-testid="stHeadingWithActionElements"] h2 {
   height: 100%;
   object-fit: cover;
   display: block;
-  transition: transform 220ms ease;
 }
-.library-cover:hover img { transform: scale(1.025); }
+.library-cover:hover img { opacity: 0.96; }
 .stDialog .library-cover,
 [data-testid="stDialog"] .library-cover {
   aspect-ratio: auto !important;
@@ -1111,21 +957,20 @@ h2, [data-testid="stHeadingWithActionElements"] h2 {
   gap: 0.4rem;
 }
 .library-status, .library-count {
-  background: rgba(9, 8, 12, 0.78);
+  background: rgba(17, 16, 20, 0.88);
   border: 1px solid rgba(255,255,255,0.14);
   border-radius: 4px;
   color: #fff;
   padding: 0.14rem 0.4rem;
-  font-size: 0.64rem;
-  font-weight: 700;
-  backdrop-filter: blur(8px);
+  font-size: 0.66rem;
+  font-weight: 600;
 }
 .library-count { color: var(--osu-accent); }
 .library-set-title {
-  font-size: 1.02rem;
-  font-weight: 800;
-  line-height: 1.25;
-  letter-spacing: -0.02em;
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
 }
 .library-set-title a { color: var(--osu-text) !important; }
 .library-set-title a:hover { color: var(--osu-accent) !important; }
@@ -1146,17 +991,15 @@ h2, [data-testid="stHeadingWithActionElements"] h2 {
 .library-diff-version { color: var(--osu-text); font-size: 0.82rem; font-weight: 650; min-width: 0; }
 .library-diff-mode {
   color: var(--osu-muted);
-  font-size: 0.64rem;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
+  font-size: 0.68rem;
 }
 .library-state {
   margin-left: auto;
   border: 1px solid var(--osu-border);
-  border-radius: 3px;
-  padding: 0.08rem 0.35rem;
-  font-size: 0.63rem;
-  font-weight: 750;
+  border-radius: 6px;
+  padding: 0.08rem 0.38rem;
+  font-size: 0.66rem;
+  font-weight: 600;
   white-space: nowrap;
 }
 .library-state.good { color: var(--osu-success); border-color: rgba(118,215,162,0.3); }
@@ -1169,11 +1012,11 @@ h2, [data-testid="stHeadingWithActionElements"] h2 {
 .library-patterns.muted { color: var(--osu-muted); font-size: 0.68rem; font-style: italic; }
 .pattern-chip {
   color: var(--osu-text);
-  border: 1px solid rgba(var(--osu-accent-rgb), 0.22);
-  background: rgba(var(--osu-accent-rgb), 0.07);
-  border-radius: 3px;
-  padding: 0.06rem 0.32rem;
-  font-size: 0.64rem;
+  border: 1px solid var(--osu-border);
+  background: var(--osu-surface-raised);
+  border-radius: 6px;
+  padding: 0.08rem 0.36rem;
+  font-size: 0.66rem;
 }
 .library-match {
   display: flex;
@@ -1189,12 +1032,12 @@ h2, [data-testid="stHeadingWithActionElements"] h2 {
 [class*="st-key-library_actions_"] .stLinkButton > a {
   min-height: 30px;
   height: 30px;
-  padding: 0.1rem 0.35rem !important;
-  font-size: 0.7rem !important;
-  border-radius: 4px !important;
+  padding: 0.1rem 0.4rem !important;
+  font-size: 0.72rem !important;
+  border-radius: var(--osu-radius-btn) !important;
 }
 [data-testid="stMetric"] {
-  background: rgba(17, 14, 22, 0.94) !important;
+  background: var(--osu-surface) !important;
   border-color: var(--osu-border) !important;
   box-shadow: none !important;
 }
@@ -1222,7 +1065,6 @@ h2, [data-testid="stHeadingWithActionElements"] h2 {
 def preview_html(settings: AppearanceSettings, background_uri: str | None) -> str:
     palette = PALETTES.get(settings.theme, PALETTES["modern_glass"])
     accent_rgb = _hex_to_rgb(settings.accent)
-    accent_soft = _rgba(accent_rgb, 0.25)
     if background_uri:
         background = (
             f'<div class="osu-preview-bg" style="background-image:url(\'{background_uri}\');'
@@ -1234,8 +1076,7 @@ def preview_html(settings: AppearanceSettings, background_uri: str | None) -> st
     else:
         background = (
             '<div class="osu-preview-bg" style="background:'
-            f"radial-gradient(500px 300px at 18% 5%, {accent_soft}, transparent 62%),"
-            f"linear-gradient(145deg,{palette.base_alt},{palette.base})"
+            f"{palette.base}"
             '"></div>'
         )
     overlay = (

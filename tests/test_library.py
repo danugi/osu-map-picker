@@ -129,6 +129,28 @@ def test_scope_and_pattern_filters_are_database_backed(
     assert streams.total_difficulties == 1
     assert streams.sets[0].entries[0].version == "Insane"
 
+    combined = library.query_sets(
+        storage,
+        library.LibraryFilters(
+            scope="analyzed",
+            patterns=("streams", "bursts"),
+            per_page=12,
+        ),
+    )
+    assert combined.total_difficulties == 2
+    assert {
+        entry.version
+        for item in combined.sets
+        for entry in item.entries
+    } == {"Insane", "Hard"}
+    unsupported = library.query_sets(
+        storage,
+        library.LibraryFilters(
+            scope="all", patterns=("variable_rhythm",), per_page=12
+        ),
+    )
+    assert unsupported.total_difficulties == 0
+
     pending = library.query_sets(
         storage, library.LibraryFilters(scope="pending", per_page=12)
     )

@@ -23,6 +23,22 @@ from models import PatternChain, PatternSection, SequenceAnalysis
 
 ANALYZER_VERSION = 2
 
+# Canonical labels the analyzer can actually persist from measured geometry.
+# Keep this in sync with ``_combined_labels``; tests assert the generated
+# labels are a subset of this tuple. Rhythm variability is a numeric feature,
+# not one of these labels.
+DETECTED_LABELS = (
+    "jump_aim",
+    "wide_aim",
+    "flow_aim",
+    "angle_control",
+    "slider_heavy",
+    "high_density",
+    "streams",
+    "bursts",
+    "mixed_patterns",
+)
+
 STREAM_MIN_NOTES = 10
 BURST_MIN_NOTES = 5
 BURST_MAX_NOTES = 9

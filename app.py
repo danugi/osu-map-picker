@@ -30,6 +30,7 @@ import config
 import library
 import evidence
 import gameplay
+import pattern_filters
 import presets
 import randomizer
 import ui_theme
@@ -95,17 +96,19 @@ TARGET_STATUS_LABELS = {
     PARTIAL: "частичный анализ",
     FAILED: "анализ не удался",
 }
-PATTERN_LABELS = {
-    "jump_aim": "прыжковый aim",
-    "wide_aim": "широкие прыжки",
-    "flow_aim": "плавный aim",
-    "angle_control": "резкие смены угла",
-    "slider_heavy": "много слайдеров",
-    "high_density": "высокая плотность",
-    "streams": "стримы",
-    "bursts": "бёрсты",
-    "mixed_patterns": "смешанные секции",
-    "variable_rhythm": "переменный ритм",
+PATTERN_LABELS = dict(pattern_filters.PATTERN_RU)
+ANALYSIS_SOURCE_LABELS = {
+    "download": "скачано",
+    "cache": "локальный кэш",
+    "db": "SQLite",
+    "local": "локальный файл",
+}
+QUEUE_STATUS_LABELS = {
+    "pending": "в очереди",
+    "processing": "в работе",
+    "done": "готово",
+    "failed": "ошибка",
+    "unavailable": "источник недоступен",
 }
 NAV_ITEMS = (
     "search",
@@ -596,9 +599,7 @@ def _sidebar(store: Storage) -> str:
         )
         st.sidebar.caption(f"{group.icon} {group.label} · {role}")
     st.sidebar.caption(
-        "Ручные изменения навыков или фильтров не записываются в пресет "
-        "автоматически. Сохранить их можно на экране поиска или в "
-        "«Настройки → Пресеты»."
+        "Ручные изменения сохраняются отдельно от пресета."
     )
 
     pending_id = st.session_state.get("_pending_preset_id")
@@ -642,8 +643,9 @@ def _sidebar(store: Storage) -> str:
         else ("работает" if worker.get("thread_alive") else "ожидает")
     )
     st.sidebar.caption(
-        f"🧪 Анализ: {worker.get('measured', 0)} + "
-        f"{worker.get('partial', 0)} част. из {worker.get('catalog', 0)} · "
+        f"Анализ: {worker.get('measured', 0)} + "
+        f"{worker.get('partial', 0)} част. из "
+        f"{worker.get('beatmaps', 0)} сложностей · "
         f"очередь {queue.get('pending', 0) + queue.get('processing', 0)} · "
         f"{worker_state}"
     )
@@ -691,7 +693,8 @@ def _site_header(store: Storage) -> str:
         "<span class='site-brand-name'>Map Picker</span>"
         "</span></div>"
         "<div class='site-header-meta'>"
-        f"<span class='site-stat'><strong>{total_text}</strong> difficulty</span>"
+        f"<span class='site-stat'><strong>{total_text}</strong> "
+        f"{_ru_plural(total, 'сложность', 'сложности', 'сложностей')}</span>"
         f"<span class='site-stat'><strong>{analyzed_text}</strong> "
         "с анализом</span>"
         f"<span class='site-pill {'online' if configured else 'local'}'>"
@@ -1810,6 +1813,15 @@ def _format_seconds(value: int | float | None) -> str:
     return f"{seconds // 60}:{seconds % 60:02d}"
 
 
+def _ru_plural(value: int, one: str, few: str, many: str) -> str:
+    number = abs(int(value))
+    if number % 10 == 1 and number % 100 != 11:
+        return one
+    if 2 <= number % 10 <= 4 and not 12 <= number % 100 <= 14:
+        return few
+    return many
+
+
 def _match_factor(scored: ScoredCandidate) -> FactorScore | None:
     for factor in scored.factors:
         if factor.key == "mapping_fit":
@@ -1881,20 +1893,20 @@ def _render_card(
         f"<div class='osu-card-head'><div>"
         f"<div class='osu-card-title'><a href='{safe_url}' target='_blank' "
         f"rel='noopener noreferrer'>{title}</a></div>"
-        f"<div class='osu-card-sub'>{artist} · mapped by {creator}</div>"
+        f"<div class='osu-card-sub'>{artist} · маппер: {creator}</div>"
         f"<div class='osu-hero-meta'>"
         f"<span class='osu-chip'>{html.escape(status)}</span>"
         f"<span class='osu-chip muted'>{html.escape(genre)}</span>"
         f"<span class='osu-chip accent'>{html.escape(version)}</span>"
         f"</div></div>"
         f"<div class='osu-score'><div class='num'>{scored.display_score}</div>"
-        f"<div class='lbl'>Recommendation</div>"
-        f"<div class='lbl'>evidence {round(scored.coverage * 100)}%</div>"
+        f"<div class='lbl'>Рекомендация</div>"
+        f"<div class='lbl'>покрытие {round(scored.coverage * 100)}%</div>"
         f"</div></div>"
         f"<div class='osu-card-stats'>"
-        f"<div class='osu-stat'><div class='k'>Difficulty</div><div class='v'>{html.escape(stars_text)}</div></div>"
+        f"<div class='osu-stat'><div class='k'>Сложность</div><div class='v'>{html.escape(stars_text)}</div></div>"
         f"<div class='osu-stat'><div class='k'>BPM</div><div class='v'>{html.escape(bpm_text)}</div></div>"
-        f"<div class='osu-stat'><div class='k'>Length</div><div class='v'>{html.escape(length)}</div></div>"
+        f"<div class='osu-stat'><div class='k'>Длина</div><div class='v'>{html.escape(length)}</div></div>"
         f"<div class='osu-stat'><div class='k'>AR / OD</div><div class='v'>{html.escape(ar)} / {html.escape(od)}</div></div>"
         f"</div>"
     )
@@ -1908,8 +1920,8 @@ def _render_card(
             else f"{round(match.value * 100)}%"
         )
         st.caption(
-            f"Match: {match_text} · Evidence coverage: "
-            f"{round(scored.coverage * 100)}% · Recommendation: "
+            f"Соответствие: {match_text} · покрытие доказательств: "
+            f"{round(scored.coverage * 100)}% · рекомендация: "
             f"{scored.display_score}/100 (эвристический порядок)."
         )
         st.caption(_pattern_summary(scored))
@@ -2671,7 +2683,7 @@ def _render_result(store: Storage, result: DiscoveryResult) -> None:
             f"пул {random_meta.get('pool', 0)} · сетевых запросов 0."
         )
         meta_note = random_meta.get("note")
-        if meta_note:
+        if meta_note and "Случайная подвыборка" not in str(meta_note):
             st.warning(str(meta_note))
         source_note = random_meta.get("source")
         if source_note:
@@ -3245,13 +3257,13 @@ def page_search(store: Storage, cfg: PresetConfig) -> None:
     st.markdown(
         "<div class='discovery-stats'>"
         f"<div><strong>{local_number(counts.get('total', 0))}</strong>"
-        "<span>difficulty в локальном каталоге</span></div>"
+        f"<span>{_ru_plural(counts.get('total', 0), 'сложность', 'сложности', 'сложностей')} в локальном каталоге</span></div>"
         f"<div><strong>{local_number(counts.get('analyzed', 0) + counts.get('partial', 0))}</strong>"
         "<span>с анализом .osu</span></div>"
         f"<div><strong>{local_number(counts.get('pending', 0))}</strong>"
         "<span>ждут анализа</span></div>"
         f"<div><strong>{local_number(catalog_size)}</strong>"
-        "<span>beatmapsets</span></div>"
+        "<span>наборов</span></div>"
         "</div>",
         unsafe_allow_html=True,
     )
@@ -3446,7 +3458,7 @@ def _library_cover_html(
         + "<div class='library-cover-top'>"
         f"<span class='library-status'>{html.escape(STATUS_RU.get(status, status))}</span>"
         + (
-            f"<span class='library-count'>{difficulties} diff</span>"
+            f"<span class='library-count'>{difficulties} сл.</span>"
             if difficulties > 0
             else ""
         )
@@ -3567,7 +3579,7 @@ def _render_library_set(
             f"target='_blank' rel='noopener noreferrer'>"
             f"{html.escape(set_item.display_title)}</a></div>"
             f"<div class='library-set-artist'>{html.escape(set_item.display_artist)}</div>"
-            f"<div class='library-set-mapper'>mapped by {html.escape(set_item.creator or 'неизвестно')}</div>"
+            f"<div class='library-set-mapper'>маппер: {html.escape(set_item.creator or 'неизвестно')}</div>"
             "</div>",
             unsafe_allow_html=True,
         )
@@ -3581,7 +3593,7 @@ def _render_library_set(
                     _render_library_entry(store, entry, current_scores)
 
 
-@st.dialog("Difficulty details", width="large")
+@st.dialog("Детали сложности", width="large")
 def _library_details_dialog(entry: library.LibraryEntry) -> None:
     st.markdown(
         _library_cover_html(
@@ -3595,16 +3607,16 @@ def _library_details_dialog(entry: library.LibraryEntry) -> None:
     )
     st.subheader(f"{entry.display_title} · [{entry.version or 'unknown'}]")
     st.caption(
-        f"{entry.display_artist} · mapped by {entry.creator or 'неизвестно'}"
+        f"{entry.display_artist} · маппер: {entry.creator or 'неизвестно'}"
     )
     metrics = st.columns(4)
     metrics[0].metric(
-        "Stars", f"{entry.stars:.2f}★" if entry.stars is not None else "?"
+        "Звёзды", f"{entry.stars:.2f}★" if entry.stars is not None else "?"
     )
     metrics[1].metric(
         "BPM", f"{entry.effective_bpm:.0f}" if entry.effective_bpm else "?"
     )
-    metrics[2].metric("Length", _format_seconds(entry.effective_length))
+    metrics[2].metric("Длина", _format_seconds(entry.effective_length))
     metrics[3].metric(
         "AR / OD",
         f"{entry.ar:g} / {entry.od:g}"
@@ -3613,16 +3625,20 @@ def _library_details_dialog(entry: library.LibraryEntry) -> None:
     )
     st.markdown(
         f"**Состояние анализа:** {html.escape(entry.state_label)}  \n"
-        f"Источник: {html.escape(entry.analysis_source or '—')} · "
-        f"analyzer v{entry.analysis_version or '—'} · "
-        f"analyzed: {html.escape(entry.analyzed_at or '—')}  \n"
-        f"Queue: {html.escape(entry.queue_status or '—')} · "
-        f"attempts: {entry.analysis_attempts}/{entry.queue_attempts}"
+        f"Источник: {html.escape(ANALYSIS_SOURCE_LABELS.get(entry.analysis_source, entry.analysis_source or '—'))} · "
+        f"анализатор v{entry.analysis_version or '—'} · "
+        f"проанализировано: {html.escape(entry.analyzed_at or '—')}  \n"
+        f"Очередь: {html.escape(QUEUE_STATUS_LABELS.get(entry.queue_status, entry.queue_status or '—'))} · "
+        f"попыток: {entry.analysis_attempts}/{entry.queue_attempts}"
     )
     if entry.analysis_scope:
-        st.caption(f"Scope: {entry.analysis_scope}")
+        scope_text = (
+            entry.analysis_scope.replace("objects", "объектов")
+            .replace("sections", "секций")
+        )
+        st.caption(f"Покрытие: {scope_text}")
     if entry.queue_error:
-        st.warning(f"Queue error: {entry.queue_error}")
+        st.warning(f"Ошибка очереди: {entry.queue_error}")
     st.markdown(_library_patterns_html(entry), unsafe_allow_html=True)
     sequence = entry.sequence
     if sequence is not None:
@@ -3630,11 +3646,11 @@ def _library_details_dialog(entry: library.LibraryEntry) -> None:
         st.caption(
             f"Объектов: {sequence.analyzed_notes}/{sequence.total_notes}"
             + (" · анализ частичный" if sequence.truncated else "")
-            + f" · jump {sequence.jump_share:.0%} · wide "
-            f"{sequence.wide_jump_share:.0%} · flow {sequence.flow_share:.0%} · "
-            f"angle {sequence.angle_change_share:.0%} · slider "
-            f"{sequence.slider_share:.0%} · density "
-            f"{sequence.notes_per_second:.1f}/s"
+            + f" · прыжки {sequence.jump_share:.0%} · широкие "
+            f"{sequence.wide_jump_share:.0%} · плавность {sequence.flow_share:.0%}"
+            f" · углы {sequence.angle_change_share:.0%} · слайдеры "
+            f"{sequence.slider_share:.0%} · плотность "
+            f"{sequence.notes_per_second:.1f}/с"
         )
         if sequence.sections:
             st.markdown("**Секции**")
@@ -3656,7 +3672,7 @@ def _library_details_dialog(entry: library.LibraryEntry) -> None:
     st.link_button("Открыть difficulty на osu!", entry.beatmap_url)
 
 
-@st.dialog("Gameplay preview", width="large")
+@st.dialog("Превью геймплея", width="large")
 def _library_preview_dialog(
     store: Storage, entry: library.LibraryEntry
 ) -> None:
@@ -3686,7 +3702,7 @@ def _library_preview_dialog(
 def _library_counts_html(counts: dict[str, int]) -> str:
     return (
         "<div class='library-summary'>"
-        f"<div><strong>{counts.get('total', 0):,}</strong><span>всего difficulty</span></div>"
+        f"<div><strong>{counts.get('total', 0):,}</strong><span>всего сложностей</span></div>"
         f"<div><strong>{counts.get('analyzed', 0):,}</strong><span>полный анализ</span></div>"
         f"<div><strong>{counts.get('partial', 0):,}</strong><span>частичный анализ</span></div>"
         f"<div><strong>{counts.get('pending', 0):,}</strong><span>в очереди</span></div>"
@@ -3728,6 +3744,29 @@ def page_library(store: Storage, cfg: PresetConfig) -> None:
         key="library_scope",
     )
     scope = scope or "analyzed"
+    relevant_patterns = pattern_filters.relevant_patterns(
+        cfg.ranking.skill_weights, cfg.ranking.trait_targets
+    )
+    default_patterns = (
+        list(relevant_patterns)
+        if scope in {"analyzed", "all", "partial"}
+        else []
+    )
+    pattern_scope = scope in {"analyzed", "all", "partial"}
+    signature = (
+        st.session_state.get("active_preset_id"),
+        cfg.name,
+        pattern_scope,
+        tuple(relevant_patterns),
+    )
+    if st.session_state.get("_library_pattern_signature") != signature:
+        st.session_state["_library_pattern_signature"] = signature
+        st.session_state["library_preset_patterns"] = default_patterns
+        st.session_state.pop("library_other_patterns", None)
+        st.session_state.pop("library_patterns", None)
+    st.session_state.setdefault(
+        "library_preset_patterns", default_patterns
+    )
     with st.container(key="library_toolbar"):
         top = st.columns([2.3, 1.15, 0.9])
         query = top[0].text_input(
@@ -3743,6 +3782,31 @@ def page_library(store: Storage, cfg: PresetConfig) -> None:
         )
         top[2].caption("Локально")
         top[2].caption("0 API-запросов")
+        pattern_row = st.columns([2.6, 1.4])
+        preset_patterns = pattern_row[0].multiselect(
+            "Паттерны пресета",
+            options=list(relevant_patterns),
+            format_func=pattern_filters.pattern_name,
+            key="library_preset_patterns",
+            placeholder=(
+                "Любые паттерны"
+                if not relevant_patterns
+                else "Выберите паттерны пресета"
+            ),
+            disabled=not relevant_patterns or not pattern_scope,
+            help="Показаны только метки, которые текущий анализатор .osu "
+            "действительно умеет измерять и сохранять для целей пресета.",
+        )
+        pattern_row[1].caption(
+            pattern_filters.preset_pattern_note(
+                cfg.ranking.skill_weights, cfg.ranking.trait_targets
+            )
+        )
+        pattern_row[1].caption(
+            "Пустой выбор — без фильтра по паттернам."
+            if pattern_scope
+            else "Для очереди и ошибок паттерновый фильтр недоступен."
+        )
 
     with st.expander("Фильтры библиотеки", expanded=False):
         filter_cols = st.columns([1.0, 1.0, 1.0])
@@ -3753,18 +3817,30 @@ def page_library(store: Storage, cfg: PresetConfig) -> None:
             key="library_statuses",
             placeholder="Любой статус",
         )
-        patterns = filter_cols[1].multiselect(
-            "Паттерны",
-            options=list(PATTERN_LABELS),
-            format_func=lambda value: PATTERN_LABELS[value],
-            key="library_patterns",
-            placeholder="Любые паттерны",
-        )
-        modes = filter_cols[2].selectbox(
+        modes = filter_cols[1].selectbox(
             "Режим",
             options=["all", *library.known_modes(store)],
             format_func=lambda value: "Все режимы" if value == "all" else value,
             key="library_mode",
+        )
+        other_options = [
+            label
+            for label in pattern_filters.all_pattern_options()
+            if label not in relevant_patterns
+        ]
+        other_patterns = filter_cols[2].multiselect(
+            "Другие паттерны",
+            options=other_options,
+            format_func=pattern_filters.pattern_name,
+            key="library_other_patterns",
+            placeholder=(
+                "Все измеряемые паттерны"
+                if pattern_scope
+                else "Недоступно для этой коллекции"
+            ),
+            disabled=not pattern_scope,
+            help="Полный список доступных меток анализатора. Он не ограничен "
+            "целями активного пресета; пустой выбор не фильтрует.",
         )
         ranges = st.columns(3)
         stars_range = ranges[0].slider(
@@ -3795,7 +3871,7 @@ def page_library(store: Storage, cfg: PresetConfig) -> None:
             for key in (
                 "library_query",
                 "library_statuses",
-                "library_patterns",
+                "library_other_patterns",
                 "library_mode",
                 "library_stars",
                 "library_bpm",
@@ -3803,13 +3879,19 @@ def page_library(store: Storage, cfg: PresetConfig) -> None:
                 "library_page",
             ):
                 st.session_state.pop(key, None)
+            st.session_state["library_preset_patterns"] = list(
+                relevant_patterns
+            )
             st.rerun()
 
+    selected_patterns = tuple(
+        dict.fromkeys((*preset_patterns, *other_patterns))
+    )
     filters = library.LibraryFilters(
         query=query,
         scope=scope,
         statuses=tuple(statuses),
-        patterns=tuple(patterns),
+        patterns=selected_patterns,
         mode=None if modes == "all" else modes,
         stars_min=stars_range[0] if stars_range[0] > 0 else None,
         stars_max=stars_range[1] if stars_range[1] < 12 else None,
@@ -3835,8 +3917,10 @@ def page_library(store: Storage, cfg: PresetConfig) -> None:
     )
     st.markdown(
         "<div class='library-result-head'>"
-        f"<strong>{page.total_sets:,}</strong> beatmapsets · "
-        f"<strong>{page.total_difficulties:,}</strong> difficulty"
+        f"<strong>{page.total_sets:,}</strong> "
+        f"{_ru_plural(page.total_sets, 'набор', 'набора', 'наборов')} · "
+        f"<strong>{page.total_difficulties:,}</strong> "
+        f"{_ru_plural(page.total_difficulties, 'сложность', 'сложности', 'сложностей')}"
         f"<span>Страница {page.page} из {page.pages}</span>"
         "</div>".replace(",", " "),
         unsafe_allow_html=True,
@@ -3991,7 +4075,10 @@ def page_analysis(store: Storage, cfg: PresetConfig) -> None:
         st.subheader("Очередь")
         st.dataframe(
             [
-                {"Состояние": key, "Карт": value}
+                {
+                    "Состояние": QUEUE_STATUS_LABELS.get(key, key),
+                    "Карт": value,
+                }
                 for key, value in sorted(queue.items())
                 if key != "total"
             ],

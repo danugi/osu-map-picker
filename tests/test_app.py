@@ -1710,11 +1710,43 @@ def test_library_page_shows_database_cards_and_analysis_state(
     text = _texts(at)
     assert "Library Song 1" in text
     assert "Library Song 2" in text
-    assert "streams" in text.casefold() or "стримы" in text
+    assert "streams" in text.casefold() or "стримы" in text.casefold()
     assert "частичный анализ" in text.casefold()
     assert any(
         button.key == "library_details_101" for button in at.button
     )
+
+
+def test_library_pattern_filter_follows_active_preset(app_env) -> None:
+    store = Storage(app_env)
+    _seed_app_library(store, 1)
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.run()
+    at.sidebar.selectbox[0].select("Aim Farm").run()
+    at.session_state["nav"] = "library"
+    at.run()
+    assert not at.exception, _texts(at)
+    assert at.session_state["library_preset_patterns"] == ["jump_aim"]
+    widget = next(
+        item for item in at.multiselect if item.key == "library_preset_patterns"
+    )
+    assert widget.options == ["Прыжковый аим"]
+    other = next(
+        item for item in at.multiselect if item.key == "library_other_patterns"
+    )
+    assert "Переменный ритм" not in other.options
+
+    at.sidebar.selectbox[0].select("Streams & Stamina").run()
+    at.session_state["nav"] = "library"
+    at.run()
+    assert not at.exception, _texts(at)
+    selected = at.session_state["library_preset_patterns"]
+    assert selected == ["streams", "high_density"]
+    assert "jump_aim" not in selected
+    widget = next(
+        item for item in at.multiselect if item.key == "library_preset_patterns"
+    )
+    assert widget.options == ["Стримы", "Высокая плотность"]
 
 
 def test_library_scope_filter_is_database_backed(app_env) -> None:
