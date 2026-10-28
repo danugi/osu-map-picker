@@ -132,9 +132,9 @@ def test_search_button_without_credentials_is_honest(app_env) -> None:
     assert store.search_run_count() == 0
 
 
-def _result_with_cards(count: int) -> DiscoveryResult:
+def _result_with_set_ids(set_ids: list[int]) -> DiscoveryResult:
     scored = []
-    for index in range(1, count + 1):
+    for index in set_ids:
         beatmap = make_beatmap(10_000 + index, index, version=f"Diff {index}")
         beatmapset = make_beatmapset(
             index,
@@ -152,6 +152,18 @@ def _result_with_cards(count: int) -> DiscoveryResult:
         scored=tuple(scored),
         ranking_used=RankingSettings(),
     )
+
+
+def _result_with_cards(count: int) -> DiscoveryResult:
+    return _result_with_set_ids(list(range(1, count + 1)))
+
+
+def _visible_result_ids(at: AppTest) -> set[int]:
+    text = "\n".join(str(item.value) for item in at.markdown)
+    return {
+        int(value)
+        for value in re.findall(r"beatmapsets/(\d+)", text)
+    }
 
 
 def test_search_result_expand_control_is_visible_and_works(app_env) -> None:
@@ -212,6 +224,119 @@ def test_search_result_short_list_explains_that_all_are_shown(app_env) -> None:
     assert not any(
         item.key == "show_more_results_top" for item in at.button
     )
+
+
+def _install_fake_expansion(monkeypatch, new_ids: list[int]) -> None:
+    monkeypatch.setenv("OSU_CLIENT_ID", "test-client")
+    monkeypatch.setenv("OSU_CLIENT_SECRET", "test-secret")
+
+    def fake_run(self, filters, ranking, *, record=True, strategy_offset=0):
+        result = _result_with_set_ids(new_ids)
+        self.storage.save_beatmapsets(
+            [item.beatmapset for item in result.scored]
+        )
+        return result
+
+    monkeypatch.setattr(discovery.DiscoveryEngine, "run", fake_run)
+
+
+def test_expanded_search_keeps_old_results_and_visible_count(
+    app_env, monkeypatch
+) -> None:
+    _install_fake_expansion(
+        monkeypatch,
+        list(range(1, 22)) + list(range(101, 113)),
+    )
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.session_state["nav"] = "search"
+    at.session_state["result"] = _result_with_cards(21)
+    at.session_state["result_visible"] = 30
+    at.session_state["result_sort_mode"] = "★ по убыванию"
+    at.run()
+    assert not at.exception, _texts(at)
+    preset_before = at.session_state["active_preset_id"]
+    config_before = at.session_state["active_config"].to_dict()
+
+    expand = _button(at, "expand_search_limits")
+    assert expand is not None
+    expand.click().run()
+    assert not at.exception, _texts(at)
+
+    expanded = at.session_state["result"]
+    ids = [item.beatmapset.id for item in expanded.scored]
+    assert len(ids) == 33
+    assert len(set(ids)) == 33
+    assert set(range(1, 22)) <= set(ids)
+    assert set(range(101, 113)) <= set(ids)
+    assert at.session_state["result_visible"] == 30
+    assert at.session_state["result_only_new"] is False
+    assert at.session_state["result_sort_mode"] == "★ по убыванию"
+    assert at.session_state["active_preset_id"] == preset_before
+    assert at.session_state["active_config"].to_dict() == config_before
+    captions = [str(item.value) for item in at.caption]
+    assert any("Показано 30 из 33" in item for item in captions)
+    assert any("Новых: 12" in item for item in captions)
+    assert _button(at, "toggle_new_results") is not None
+
+    # The default view is the full cumulative result.
+    displayed = _visible_result_ids(at)
+    assert len(displayed) == 30
+    assert set(range(1, 22)) <= displayed
+    assert displayed & set(range(101, 113))
+
+    _button(at, "toggle_new_results").click().run()
+    assert not at.exception, _texts(at)
+    assert at.session_state["result_only_new"] is True
+    assert _visible_result_ids(at) == set(range(101, 113))
+
+    _button(at, "toggle_new_results").click().run()
+    assert not at.exception, _texts(at)
+    assert at.session_state["result_only_new"] is False
+    assert len(_visible_result_ids(at)) == 30
+
+
+def test_expanded_search_with_zero_new_keeps_old_result(
+    app_env, monkeypatch
+) -> None:
+    _install_fake_expansion(monkeypatch, list(range(1, 22)))
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.session_state["nav"] = "search"
+    at.session_state["result"] = _result_with_cards(21)
+    at.session_state["result_visible"] = 30
+    at.run()
+    assert not at.exception, _texts(at)
+    _button(at, "expand_search_limits").click().run()
+    assert not at.exception, _texts(at)
+    assert [item.beatmapset.id for item in at.session_state["result"].scored] == list(
+        range(1, 22)
+    )
+    assert at.session_state["result_visible"] == 21
+    assert "result_new_ids" not in at.session_state
+    assert not any(
+        item.key == "toggle_new_results" for item in at.button
+    )
+    assert any(
+        "не нашёл новых карт" in item.value for item in at.info
+    )
+
+
+def test_expanded_search_with_one_new_map_keeps_old_result(
+    app_env, monkeypatch
+) -> None:
+    _install_fake_expansion(monkeypatch, [101])
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.session_state["nav"] = "search"
+    at.session_state["result"] = _result_with_cards(21)
+    at.session_state["result_visible"] = 30
+    at.run()
+    assert not at.exception, _texts(at)
+    _button(at, "expand_search_limits").click().run()
+    assert not at.exception, _texts(at)
+    ids = {item.beatmapset.id for item in at.session_state["result"].scored}
+    assert ids == set(range(1, 22)) | {101}
+    assert at.session_state["result_visible"] == 22
+    assert set(range(1, 22)) <= _visible_result_ids(at)
+    assert at.session_state["result_only_new"] is False
 
 
 def test_successful_search_reveals_saved_maps_in_library(app_env) -> None:

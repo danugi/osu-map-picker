@@ -2196,6 +2196,58 @@ def _reveal_search_in_library() -> None:
     st.session_state["_library_after_search"] = True
 
 
+def _merge_expanded_result(
+    previous: DiscoveryResult | None,
+    expanded: DiscoveryResult,
+) -> DiscoveryResult:
+    """Merge an expanded run with the earlier visible collection.
+
+    The discovery engine normally returns a superset, but a bounded/cached run
+    can omit a previous page. Keep the expanded candidate for overlapping sets
+    and append only old sets that are genuinely absent.
+    """
+
+    if not isinstance(previous, DiscoveryResult) or not previous.scored:
+        return expanded
+    expanded_ids = {item.beatmapset.id for item in expanded.scored}
+    old_only = [
+        item
+        for item in previous.scored
+        if item.beatmapset.id not in expanded_ids
+    ]
+    if not old_only:
+        return expanded
+    merged = list(expanded.scored)
+    seen = {item.beatmapset.id for item in merged}
+    for item in old_only:
+        if item.beatmapset.id in seen:
+            continue
+        seen.add(item.beatmapset.id)
+        merged.append(item)
+    merged.sort(
+        key=lambda item: (
+            -item.score,
+            item.beatmapset.id,
+            item.beatmap.id,
+        )
+    )
+    return replace(
+        expanded,
+        scored=tuple(merged),
+        total_fetched=max(expanded.total_fetched, previous.total_fetched),
+        passed_filters=max(expanded.passed_filters, previous.passed_filters),
+        passed_relevance=max(
+            expanded.passed_relevance, previous.passed_relevance
+        ),
+        notes=(
+            f"Объединено с предыдущей выдачей: добавлено "
+            f"{len(merged) - len(expanded.scored)} старых карт, не попавших "
+            "в расширенный срез.",
+            *expanded.notes,
+        )[:12],
+    )
+
+
 def _mark_search_expansion(previous_set_ids: set[int]) -> None:
     """Remember which maps are genuinely new after an expanded API search."""
 
@@ -2208,17 +2260,20 @@ def _mark_search_expansion(previous_set_ids: set[int]) -> None:
     ]
     if added:
         st.session_state["result_new_ids"] = added
-        st.session_state["result_only_new"] = True
+        # Filtering is opt-in. The default stays the full cumulative result.
+        st.session_state["result_only_new"] = False
         st.session_state["result_expand_notice"] = (
             f"Расширенный поиск добавил {len(added)} новых карт. "
-            "Они сохранены в SQLite; ниже можно показать только новые."
+            "Они сохранены в SQLite; при необходимости включите "
+            "«Только новые карты»."
         )
     else:
         st.session_state.pop("result_new_ids", None)
         st.session_state.pop("result_only_new", None)
         st.session_state["result_expand_notice"] = (
             "Расширенный поиск не нашёл новых карт: API вернул те же "
-            "совпадения после текущих фильтров и целевого гейта."
+            "совпадения после текущих фильтров и целевого гейта. "
+            "Предыдущая выдача сохранена."
         )
 
 
@@ -2229,7 +2284,19 @@ def _run_expanded_search(store: Storage, cfg: PresetConfig) -> None:
         if isinstance(result, DiscoveryResult)
         else set()
     )
+    previous_visible = int(st.session_state.get("result_visible", 15))
+    previous_sort = st.session_state.get("result_sort_mode")
     if _execute_search(store, cfg, expand_limits=True):
+        expanded = st.session_state.get("result")
+        if isinstance(expanded, DiscoveryResult):
+            merged = _merge_expanded_result(result, expanded)
+            st.session_state["result"] = merged
+            total = len(merged.scored)
+            st.session_state["result_visible"] = min(
+                max(1, previous_visible), max(1, total)
+            )
+            if isinstance(previous_sort, str):
+                st.session_state["result_sort_mode"] = previous_sort
         _mark_search_expansion(previous_ids)
         st.rerun()
 
