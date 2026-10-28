@@ -412,3 +412,47 @@ def test_auth_error_body_is_not_leaked_in_message() -> None:
     with pytest.raises(OsuAuthError) as info:
         api.search_beatmapsets(SearchQuery())
     assert "super-secret" not in str(info.value)
+
+
+def test_title_query_and_cursor_are_sent_without_mutating_the_query_text():
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth/token":
+            return token_response()
+        seen.append(dict(request.url.params))
+        if len(seen) == 1:
+            return httpx.Response(
+                200,
+                json=search_payload([7], cursor_string="next&token"),
+            )
+        return httpx.Response(200, json=search_payload([8]))
+
+    api, _ = client_with(handler)
+    query = SearchQuery(
+        mode="osu",
+        status="ranked",
+        sort="ranked_desc",
+        query="Nightcore & Cut Ver",
+        nsfw=False,
+    )
+    first = api.search_beatmapsets(query)
+    assert first.cursor_string == "next&token"
+    assert seen[0]["q"] == "Nightcore & Cut Ver"
+    assert seen[0]["m"] == "0"
+    assert seen[0]["s"] == "ranked"
+    assert seen[0]["sort"] == "ranked_desc"
+    assert seen[0]["nsfw"] == "hide"
+    second = api.search_beatmapsets(
+        SearchQuery(
+            mode="osu",
+            status="ranked",
+            sort="ranked_desc",
+            query="Nightcore & Cut Ver",
+            nsfw=False,
+            cursor_string=first.cursor_string,
+        )
+    )
+    assert second.beatmapsets[0].id == 8
+    assert seen[1]["cursor_string"] == "next&token"
+    assert seen[1]["q"] == "Nightcore & Cut Ver"

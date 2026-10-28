@@ -38,6 +38,7 @@ from models import (
     SearchPage,
     SearchQuery,
     SequenceAnalysis,
+    StrategyRunStats,
     now_iso,
     search_page_from_dict,
     search_page_to_dict,
@@ -144,8 +145,17 @@ def build_strategies(
         seen_keys.add(key)
         strategies.append(SearchStrategy(name, status, sort, query))
 
-    for status in statuses:
+    for index, status in enumerate(statuses):
         add(f"{status}:recent", status, "ranked_desc", base_query)
+        # High-value preset-owned title searches run immediately after the
+        # primary status, before secondary statuses and optional oldest/rating/
+        # favourites directions. A tight page budget must not silently skip
+        # them because of strategy ordering.
+        if index == 0 and settings.title_queries and not base_query:
+            for query in list(dict.fromkeys(
+                text.strip() for text in settings.title_queries if text.strip()
+            ))[:6]:
+                add(f"title:{query}", primary, "ranked_desc", query)
     if settings.use_oldest:
         add(f"{primary}:oldest", primary, "ranked_asc", base_query)
     if settings.use_rating:
@@ -155,11 +165,6 @@ def build_strategies(
     if settings.expand_seeds and not base_query:
         for seed in list(dict.fromkeys(s.strip() for s in seeds if s.strip()))[:3]:
             add(f"seed:{seed}", primary, "ranked_desc", seed)
-    if settings.title_queries and not base_query:
-        for query in list(dict.fromkeys(
-            text.strip() for text in settings.title_queries if text.strip()
-        ))[:6]:
-            add(f"title:{query}", primary, "ranked_desc", query)
     return strategies
 
 
@@ -374,10 +379,11 @@ class DiscoveryEngine:
         notes: list[str],
         cache_hits: list[int],
         deadline_at: float | None = None,
+        fresh: bool = False,
     ) -> SearchPage | None:
         budget["pages"] = int(budget.get("pages", 0)) + 1
         key = _cache_key(query)
-        cached = self.storage.cache_get(key)
+        cached = None if fresh else self.storage.cache_get(key)
         if cached is not None:
             try:
                 page = search_page_from_dict(cached)
@@ -512,6 +518,9 @@ class DiscoveryEngine:
             ]
             ranked.sort(key=lambda item: (-item.score, item.beatmapset.id))
             top_ids = [item.candidate.beatmap.id for item in ranked[:limit]]
+        budget["attributes_candidates"] = int(
+            budget.get("attributes_candidates", 0)
+        ) + len(top_ids)
         by_beatmap_id = {
             candidate.beatmap.id: candidate for candidate in candidates
         }
@@ -523,21 +532,33 @@ class DiscoveryEngine:
             attributes: DifficultyAttributes | None = None
             if row is not None:
                 attributes = _attributes_from_row(row)
+                budget["attributes_cached"] = int(
+                    budget.get("attributes_cached", 0)
+                ) + 1
             elif not forbidden:
                 if budget["requests"] >= self.settings.max_requests:
+                    budget["attribute_limit"] = True
+                    budget["attributes_stop"] = "request_budget"
                     notes.append(
                         "Бюджет запросов исчерпан до загрузки difficulty "
                         "attributes; часть карт оценена по косвенным признакам."
                     )
                     break
                 if deadline_at is not None and time.perf_counter() >= deadline_at:
+                    budget["attribute_limit"] = True
+                    budget["attributes_stop"] = "deadline"
                     break
                 # Attributes share the same hard counter as search pages.
                 budget["requests"] += 1
+                budget["attributes_requested"] = int(
+                    budget.get("attributes_requested", 0)
+                ) + 1
                 try:
                     attributes = self.api.get_beatmap_attributes(beatmap_id)
                 except OsuForbiddenError:
                     budget["failed"] = int(budget.get("failed", 0)) + 1
+                    budget["attribute_limit"] = True
+                    budget["attributes_stop"] = "forbidden"
                     forbidden = True
                     notes.append(
                         "Difficulty attributes недоступны (HTTP 403). "
@@ -564,6 +585,9 @@ class DiscoveryEngine:
                     )
                 else:
                     budget["succeeded"] = int(budget.get("succeeded", 0)) + 1
+                    budget["attributes_succeeded"] = int(
+                        budget.get("attributes_succeeded", 0)
+                    ) + 1
                     self.storage.save_attributes(
                         beatmap_id,
                         {
@@ -923,6 +947,7 @@ class DiscoveryEngine:
         *,
         record: bool = True,
         strategy_offset: int = 0,
+        fresh: bool = False,
     ) -> DiscoveryResult:
         validate_filters(filters)
         validate_ranking(ranking_settings)
@@ -942,6 +967,12 @@ class DiscoveryEngine:
             "failed": 0,
             "pages": 0,
             "fatal": "",
+            "attributes_candidates": 0,
+            "attributes_requested": 0,
+            "attributes_succeeded": 0,
+            "attributes_cached": 0,
+            "attribute_limit": False,
+            "attributes_stop": "",
         }
         # Do not let broad pagination consume the whole budget before the
         # optional difficulty attributes are requested. This keeps the first
@@ -1010,6 +1041,37 @@ class DiscoveryEngine:
             offset = int(strategy_offset) % len(strategies)
             if offset:
                 strategies = strategies[offset:] + strategies[:offset]
+
+        def base_query(strategy: SearchStrategy) -> SearchQuery:
+            return SearchQuery(
+                mode=filters.modes[0],
+                status=strategy.status,
+                sort=strategy.sort,
+                query=strategy.query,
+                nsfw=not filters.exclude_nsfw,
+            )
+
+        strategy_stats: dict[str, dict[str, Any]] = {
+            strategy.name: {
+                "name": strategy.name,
+                "status": strategy.status,
+                "sort": strategy.sort,
+                "query": strategy.query,
+                "params": base_query(strategy).to_params(),
+                "executed": False,
+                "pages": 0,
+                "api_requests": 0,
+                "cache_hits": 0,
+                "raw_rows": 0,
+                "raw_response_rows": 0,
+                "cursor_advances": 0,
+                "last_has_more": False,
+                "exhausted": False,
+                "stop_reason": "",
+                "error": "",
+            }
+            for strategy in strategies
+        }
         known: dict[int, Beatmapset] = {}
         sources: dict[int, list[str]] = {}
 
@@ -1025,13 +1087,10 @@ class DiscoveryEngine:
                 )
                 break
             strategies_used.append(strategy.name)
-            query = SearchQuery(
-                mode=filters.modes[0],
-                status=strategy.status,
-                sort=strategy.sort,
-                query=strategy.query,
-                nsfw=not filters.exclude_nsfw,
-            )
+            stats = strategy_stats[strategy.name]
+            stats["executed"] = True
+            stats["params"] = base_query(strategy).to_params()
+            query = base_query(strategy)
             seen_cursors: set[str] = set()
             pages = 0
             while True:
@@ -1039,10 +1098,13 @@ class DiscoveryEngine:
                     break
                 if budget["requests"] >= page_budget:
                     mark_incomplete("request_budget", override=True)
+                    stats["stop_reason"] = "request_budget"
                     notes.append(
                         f"Бюджет страниц исчерпан в стратегии {strategy.name}."
                     )
                     break
+                requests_before = int(budget["requests"])
+                cache_before = cache_hits[0]
                 page = self._fetch_page(
                     query,
                     budget=budget,
@@ -1050,16 +1112,24 @@ class DiscoveryEngine:
                     notes=notes,
                     cache_hits=cache_hits,
                     deadline_at=deadline_at,
+                    fresh=fresh,
                 )
+                stats["api_requests"] += int(budget["requests"]) - requests_before
+                stats["cache_hits"] += cache_hits[0] - cache_before
                 if page is None:
                     if budget.get("fatal"):
                         mark_incomplete(str(budget["fatal"]))
                     elif budget["requests"] >= page_budget:
                         mark_incomplete("request_budget", override=True)
+                        stats["stop_reason"] = "request_budget"
                     else:
                         mark_incomplete("request_failed")
+                        stats["stop_reason"] = "request_failed"
                     break
                 if page.error:
+                    mark_incomplete("api_error")
+                    stats["stop_reason"] = stats["stop_reason"] or "api_error"
+                    stats["error"] = str(page.error)
                     notes.append(
                         f"{strategy.name}: API сообщил «{page.error}»"
                     )
@@ -1067,6 +1137,10 @@ class DiscoveryEngine:
                     if len(notes) < MAX_NOTES:
                         notes.append(f"{strategy.name}: {warning}")
                 total_fetched += len(page.beatmapsets)
+                stats["pages"] += 1
+                stats["raw_rows"] += len(page.beatmapsets)
+                stats["raw_response_rows"] += int(page.raw_count) or len(page.beatmapsets)
+                stats["last_has_more"] = bool(page.has_more)
                 for beatmapset in page.beatmapsets:
                     if beatmapset.id not in known:
                         known[beatmapset.id] = beatmapset
@@ -1077,13 +1151,17 @@ class DiscoveryEngine:
                 if pages >= self.settings.max_pages_per_strategy:
                     if page.has_more:
                         mark_incomplete("page_limit")
+                        stats["stop_reason"] = "page_limit"
                         notes.append(
                             f"{strategy.name}: остановлено на "
                             f"{self.settings.max_pages_per_strategy} страницах."
                         )
+                    else:
+                        stats["exhausted"] = True
                     break
                 next_query = self._next_query(page, query)
                 if next_query is None:
+                    stats["exhausted"] = True
                     break
                 cursor_token = json.dumps(
                     {
@@ -1093,15 +1171,27 @@ class DiscoveryEngine:
                     sort_keys=True,
                 )
                 if cursor_token in seen_cursors:
+                    mark_incomplete("repeated_cursor")
+                    stats["stop_reason"] = "repeated_cursor"
                     notes.append(
                         f"{strategy.name}: API вернул повторяющийся курсор; "
                         "пагинация остановлена."
                     )
                     break
                 seen_cursors.add(cursor_token)
+                stats["cursor_advances"] += 1
+                stats["last_has_more"] = True
                 query = next_query
                 if not page.beatmapsets and not page.has_more:
+                    stats["exhausted"] = True
                     break
+
+        for name, stats in strategy_stats.items():
+            if not stats["executed"] and not stats["stop_reason"]:
+                stats["stop_reason"] = "not_attempted"
+        strategy_runs = tuple(
+            StrategyRunStats(**stats) for stats in strategy_stats.values()
+        )
 
         if known:
             try:
@@ -1186,6 +1276,8 @@ class DiscoveryEngine:
             deadline_at=deadline_at,
         )
         attributes_elapsed = time.perf_counter() - attributes_started
+        if budget.get("attribute_limit"):
+            mark_incomplete(str(budget.get("attributes_stop") or "attribute_limit"))
         sequences_started = time.perf_counter()
         candidates, sequence_stats = self._enrich_sequences(
             candidates,
@@ -1198,6 +1290,9 @@ class DiscoveryEngine:
         )
         sequences_elapsed = time.perf_counter() - sequences_started
         strict_passed = len(candidates)
+        filter_excluded = dict(excluded)
+        relevance_evaluated = len(candidates)
+        excluded_before_relevance = dict(excluded)
         candidates = _apply_relevance_gate(
             candidates,
             ranking_settings,
@@ -1205,6 +1300,11 @@ class DiscoveryEngine:
             exclusions=exclusions,
         )
         relevance_passed = len(candidates)
+        relevance_excluded = {
+            reason: count - excluded_before_relevance.get(reason, 0)
+            for reason, count in excluded.items()
+            if count > excluded_before_relevance.get(reason, 0)
+        }
         if ranking_settings.relevance_targets and strict_passed != relevance_passed:
             notes.append(
                 "Целевые теги: исключено "
@@ -1304,9 +1404,39 @@ class DiscoveryEngine:
         finished = now_iso()
         result = DiscoveryResult(
             scored=tuple(scored),
-            total_fetched=len(known),
+            total_fetched=total_fetched,
+            raw_rows=total_fetched,
+            raw_response_rows=sum(
+                stats["raw_response_rows"] for stats in strategy_stats.values()
+            ),
+            unique_raw=len(known),
             passed_filters=strict_passed,
             passed_relevance=relevance_passed,
+            filter_excluded=dict(
+                sorted(
+                    filter_excluded.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )
+            ),
+            relevance_evaluated=relevance_evaluated,
+            relevance_excluded=dict(
+                sorted(
+                    relevance_excluded.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )
+            ),
+            attributes_candidates=int(
+                budget.get("attributes_candidates", 0)
+            ),
+            attributes_requested=int(
+                budget.get("attributes_requested", 0)
+            ),
+            attributes_succeeded=int(
+                budget.get("attributes_succeeded", 0)
+            ),
+            attributes_cached=int(budget.get("attributes_cached", 0)),
+            candidate_limit_hit=bool(truncated),
+            strategy_runs=strategy_runs,
             excluded=dict(
                 sorted(excluded.items(), key=lambda item: (-item[1], item[0]))
             ),
@@ -1495,6 +1625,9 @@ class DiscoveryEngine:
         )
         sequences_elapsed = time.perf_counter() - sequences_started
         strict_passed = len(candidates)
+        filter_excluded = dict(excluded)
+        relevance_evaluated = len(candidates)
+        excluded_before_relevance = dict(excluded)
         candidates = _apply_relevance_gate(
             candidates,
             ranking_settings,
@@ -1502,6 +1635,11 @@ class DiscoveryEngine:
             exclusions=exclusions,
         )
         relevance_passed = len(candidates)
+        relevance_excluded = {
+            reason: count - excluded_before_relevance.get(reason, 0)
+            for reason, count in excluded.items()
+            if count > excluded_before_relevance.get(reason, 0)
+        }
         notes = [
             f"Локальный кеш SQLite: {total_stored} сохранённых карт; для "
             f"переранжирования рассмотрено {len(stored)} (равномерная выборка "
@@ -1571,8 +1709,24 @@ class DiscoveryEngine:
         return DiscoveryResult(
             scored=tuple(scored),
             total_fetched=len(stored),
+            raw_rows=len(stored),
+            unique_raw=len(stored),
             passed_filters=strict_passed,
             passed_relevance=relevance_passed,
+            filter_excluded=dict(
+                sorted(
+                    filter_excluded.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )
+            ),
+            relevance_evaluated=relevance_evaluated,
+            relevance_excluded=dict(
+                sorted(
+                    relevance_excluded.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )
+            ),
+            candidate_limit_hit=bool(truncated),
             excluded=dict(
                 sorted(excluded.items(), key=lambda item: (-item[1], item[0]))
             ),

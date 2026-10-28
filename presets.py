@@ -221,9 +221,9 @@ def _aim_farm() -> PresetConfig:
     cfg.discovery.use_rating = True
     cfg.discovery.use_popular = False
     cfg.discovery.expand_seeds = False
-    cfg.discovery.max_requests = 18
-    cfg.discovery.max_pages_per_strategy = 2
-    cfg.discovery.fetch_attributes_limit = 8
+    cfg.discovery.max_requests = 56
+    cfg.discovery.max_pages_per_strategy = 3
+    cfg.discovery.fetch_attributes_limit = 40
     cfg.discovery.title_queries = [
         "Nightcore & Cut Ver",
         "Cut Ver",
@@ -372,6 +372,96 @@ def _normalized_config_dict(cfg: PresetConfig) -> dict[str, Any]:
 
 def _matches_legacy(cfg: PresetConfig, legacy: PresetConfig) -> bool:
     return _normalized_config_dict(cfg) == _normalized_config_dict(legacy)
+
+
+def preset_drift(stored: PresetConfig, builtin: PresetConfig) -> list[str]:
+    """Human-readable search-affecting differences from the current built-in.
+
+    Names and descriptions are metadata and intentionally do not count as
+    behavioural drift.
+    """
+
+    changes: list[str] = []
+    if stored.filters.statuses != builtin.filters.statuses:
+        changes.append(
+            "статусы: "
+            + ", ".join(stored.filters.statuses)
+            + " → "
+            + ", ".join(builtin.filters.statuses)
+        )
+    if (
+        stored.filters.stars_min,
+        stored.filters.stars_max,
+        stored.filters.star_mode,
+    ) != (
+        builtin.filters.stars_min,
+        builtin.filters.stars_max,
+        builtin.filters.star_mode,
+    ):
+        changes.append(
+            "звёзды: "
+            f"{stored.filters.stars_min}..{stored.filters.stars_max} → "
+            f"{builtin.filters.stars_min}..{builtin.filters.stars_max}"
+        )
+    if (
+        stored.filters.duration_max,
+        stored.filters.duration_min,
+    ) != (
+        builtin.filters.duration_max,
+        builtin.filters.duration_min,
+    ):
+        changes.append(
+            "длительность: "
+            f"{stored.filters.duration_min}..{stored.filters.duration_max} → "
+            f"{builtin.filters.duration_min}..{builtin.filters.duration_max}"
+        )
+    if stored.ranking.skill_weights != builtin.ranking.skill_weights:
+        changes.append("веса навыков отличаются")
+    if stored.ranking.relevance_targets != builtin.ranking.relevance_targets:
+        changes.append(
+            "целевой гейт: "
+            + ", ".join(stored.ranking.relevance_targets)
+            + " → "
+            + ", ".join(builtin.ranking.relevance_targets)
+        )
+    stored_factors = {
+        key: (value.weight, value.enabled)
+        for key, value in stored.ranking.factors.items()
+    }
+    builtin_factors = {
+        key: (value.weight, value.enabled)
+        for key, value in builtin.ranking.factors.items()
+    }
+    if stored_factors != builtin_factors:
+        changes.append("веса факторов ранжирования отличаются")
+    discovery_pairs = (
+        ("максимум запросов", "max_requests"),
+        ("страниц на стратегию", "max_pages_per_strategy"),
+        ("максимум кандидатов", "max_candidates"),
+        ("attribute limit", "fetch_attributes_limit"),
+        ("title-запросы", "title_queries"),
+    )
+    for label, field in discovery_pairs:
+        if getattr(stored.discovery, field) != getattr(
+            builtin.discovery, field
+        ):
+            changes.append(f"discovery: {label} отличаются")
+    if stored.ranking.farm_target_seconds != builtin.ranking.farm_target_seconds:
+        changes.append(
+            "цель NM-фарма: "
+            f"{stored.ranking.farm_target_seconds} → "
+            f"{builtin.ranking.farm_target_seconds} с"
+        )
+    if (
+        stored.ranking.farm_tolerance_seconds
+        != builtin.ranking.farm_tolerance_seconds
+    ):
+        changes.append(
+            "допуск NM-фарма: "
+            f"{stored.ranking.farm_tolerance_seconds} → "
+            f"{builtin.ranking.farm_tolerance_seconds} с"
+        )
+    return changes
 
 
 def _legacy_aim_farm_matches(cfg: PresetConfig) -> bool:
@@ -1040,7 +1130,15 @@ _LEGACY_BUILDERS = (
     _legacy_aim_farm_pp_config,
 )
 
-BUILTIN_PRESETS_VERSION = 10
+# Exact v10 Aim Farm fingerprint. v10 already had title queries and the
+# current gate, but used 18 requests / 2 pages / 8 attributes.
+_PRE_V11_FINGERPRINTS = {
+    "Aim Farm": (
+        "d5ac64627bafe12fa1bc759079bf5884be3146fe2baf62532a8c98e970e84e6b"
+    ),
+}
+
+BUILTIN_PRESETS_VERSION = 11
 _V2_NEW_NAMES = frozenset(
     {
         "Speed",
@@ -1278,6 +1376,22 @@ def _upgrade_sequence_targets(storage: Any) -> int:
     return changed
 
 
+def _upgrade_v11_definitions(storage: Any) -> None:
+    """Update untouched v10 Aim Farm discovery limits to the audited defaults."""
+
+    existing = storage.get_preset_by_name("Aim Farm")
+    if (
+        existing is None
+        or not existing.is_builtin
+        or _preset_fingerprint(existing.config)
+        != _PRE_V11_FINGERPRINTS["Aim Farm"]
+    ):
+        return
+    current = builtin_by_name("Aim Farm")
+    if current is not None:
+        storage.update_preset(existing.id, current)
+
+
 def ensure_builtin_presets(storage: Any) -> int:
     """Seed built-ins and add newer profiles without destroying user edits.
 
@@ -1368,6 +1482,8 @@ def ensure_builtin_presets(storage: Any) -> int:
 
     if version < 10:
         _upgrade_v10_definitions(storage)
+    if version < 11:
+        _upgrade_v11_definitions(storage)
 
     storage.set_preference("builtins_version", str(BUILTIN_PRESETS_VERSION))
     return created

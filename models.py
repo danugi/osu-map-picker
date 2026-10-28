@@ -959,6 +959,28 @@ class Exclusion:
 
 
 @dataclass(frozen=True, slots=True)
+class StrategyRunStats:
+    """Sanitized per-strategy counters for a discovery run."""
+
+    name: str
+    status: str
+    sort: str
+    query: str | None
+    params: dict[str, Any] = field(default_factory=dict)
+    executed: bool = False
+    pages: int = 0
+    api_requests: int = 0
+    cache_hits: int = 0
+    raw_rows: int = 0
+    raw_response_rows: int = 0
+    cursor_advances: int = 0
+    last_has_more: bool = False
+    exhausted: bool = False
+    stop_reason: str = ""
+    error: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class DiscoveryResult:
     scored: tuple[ScoredCandidate, ...] = ()
     total_fetched: int = 0
@@ -988,6 +1010,20 @@ class DiscoveryResult:
     stop_reason: str = ""
     deadline_seconds: float = 0.0
     strategies: tuple[str, ...] = ()
+    # Candidate funnel. ``total_fetched`` is the raw row count including
+    # duplicates; ``unique_raw`` is the deduplicated beatmapset count.
+    raw_rows: int = 0
+    raw_response_rows: int = 0
+    unique_raw: int = 0
+    filter_excluded: dict[str, int] = field(default_factory=dict)
+    relevance_evaluated: int = 0
+    relevance_excluded: dict[str, int] = field(default_factory=dict)
+    attributes_candidates: int = 0
+    attributes_requested: int = 0
+    attributes_succeeded: int = 0
+    attributes_cached: int = 0
+    candidate_limit_hit: bool = False
+    strategy_runs: tuple[StrategyRunStats, ...] = ()
     started_at: str = field(default_factory=now_iso)
     finished_at: str = field(default_factory=now_iso)
     filters_used: Filters | None = None

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import re
+from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from models import (
     ScoredCandidate,
     SearchPage,
     SequenceAnalysis,
+    StrategyRunStats,
 )
 from randomizer import RandomSelection
 from storage import Storage
@@ -230,7 +232,9 @@ def _install_fake_expansion(monkeypatch, new_ids: list[int]) -> None:
     monkeypatch.setenv("OSU_CLIENT_ID", "test-client")
     monkeypatch.setenv("OSU_CLIENT_SECRET", "test-secret")
 
-    def fake_run(self, filters, ranking, *, record=True, strategy_offset=0):
+    def fake_run(
+        self, filters, ranking, *, record=True, strategy_offset=0, fresh=False
+    ):
         result = _result_with_set_ids(new_ids)
         self.storage.save_beatmapsets(
             [item.beatmapset for item in result.scored]
@@ -2428,3 +2432,74 @@ def test_gameplay_preview_error_offers_the_original_mapset(
     assert store.search_run_count() == 0
 
 
+
+
+def test_search_funnel_is_rendered_without_claiming_completeness(app_env) -> None:
+    result = _result_with_cards(3)
+    result = replace(
+        result,
+        raw_rows=50,
+        unique_raw=40,
+        passed_filters=30,
+        passed_relevance=3,
+        relevance_evaluated=30,
+        filter_excluded={"статус": 10},
+        relevance_excluded={"недостаточно данных": 27},
+        attributes_candidates=5,
+        attributes_requested=5,
+        attributes_succeeded=3,
+        attributes_cached=1,
+        complete=False,
+        stop_reason="page_limit",
+        strategy_runs=(
+            StrategyRunStats(
+                name="ranked:recent",
+                status="ranked",
+                sort="ranked_desc",
+                query=None,
+                params={"m": 0, "s": "ranked", "sort": "ranked_desc"},
+                executed=True,
+                pages=2,
+                api_requests=2,
+                raw_rows=50,
+                cursor_advances=1,
+                last_has_more=True,
+                stop_reason="page_limit",
+            ),
+        ),
+    )
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.session_state["nav"] = "search"
+    at.session_state["result"] = result
+    at.run()
+    assert not at.exception, _texts(at)
+    text = _texts(at)
+    assert "сырых строк 50" in text
+    assert "stop: page_limit" in text
+    assert "Стратегии и страницы" in text
+    assert "недостаточно данных" in text
+    assert "полнота: нет" in text
+
+
+def test_search_warns_when_saved_builtin_differs_from_defaults(app_env) -> None:
+    store = Storage(app_env)
+    presets.ensure_builtin_presets(store)
+    farm = store.get_preset_by_name("Aim Farm")
+    assert farm is not None
+    edited = presets.builtin_by_name("Aim Farm")
+    assert edited is not None
+    edited.filters.stars_min = 4.2
+    edited.filters.duration_max = 95
+    store.update_preset(farm.id, edited)
+    store.set_preference("selected_preset", str(farm.id))
+
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.session_state["nav"] = "search"
+    at.run()
+    assert not at.exception, _texts(at)
+    text = _texts(at)
+    assert "отличается от текущего встроенного профиля" in text
+    assert any(
+        item.label == "Чем сохранённый пресет отличается"
+        for item in at.expander
+    )

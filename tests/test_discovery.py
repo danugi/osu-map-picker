@@ -131,7 +131,9 @@ def test_dedupe_across_strategies_and_pagination(storage: Storage) -> None:
     api = StubApi(responder)
     engine = DiscoveryEngine(api, storage, settings())
     result = engine.run(Filters(statuses=["ranked", "loved"]), RankingSettings())
-    assert result.total_fetched == 3
+    assert result.total_fetched == 4
+    assert result.raw_rows == 4
+    assert result.unique_raw == 3
     assert [item.beatmapset.id for item in result.scored] == [1, 2, 3]
     assert len({item.beatmapset.id for item in result.scored}) == 3
     assert result.api_requests == 3
@@ -387,7 +389,8 @@ def test_strict_filters_are_reported_not_relaxed(storage: Storage) -> None:
     engine = DiscoveryEngine(api, storage, settings())
     result = engine.run(Filters(), RankingSettings())
     assert [item.beatmapset.id for item in result.scored] == [3]
-    assert result.total_fetched == 3
+    assert result.total_fetched == 9
+    assert result.unique_raw == 3
     assert result.passed_filters == 1
     assert result.excluded["звёздность вне диапазона"] == 1
     assert result.excluded["длительность вне диапазона"] == 1

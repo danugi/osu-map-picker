@@ -2320,6 +2320,7 @@ def _execute_search(
     *,
     local_only: bool = False,
     expand_limits: bool = False,
+    fresh: bool = False,
 ) -> bool:
     try:
         validate_filters(cfg.filters)
@@ -2385,13 +2386,16 @@ def _execute_search(
         discovery_settings = copy.deepcopy(cfg.discovery)
         if expand_limits:
             discovery_settings.max_requests = min(
-                60, int(discovery_settings.max_requests) + 6
+                60, int(discovery_settings.max_requests) + 8
             )
             discovery_settings.max_pages_per_strategy = min(
-                10, int(discovery_settings.max_pages_per_strategy) + 2
+                10, int(discovery_settings.max_pages_per_strategy) + 1
             )
             discovery_settings.max_candidates = min(
                 2000, int(discovery_settings.max_candidates) + 200
+            )
+            discovery_settings.fetch_attributes_limit = min(
+                50, int(discovery_settings.fetch_attributes_limit) + 8
             )
         engine = DiscoveryEngine(client, store, discovery_settings)
         with st.spinner(
@@ -2399,7 +2403,12 @@ def _execute_search(
             if not expand_limits
             else "Ищу больше карт: увеличены страницы и бюджет запросов…"
         ):
-            result = engine.run(cfg.filters, cfg.ranking, record=True)
+            result = engine.run(
+                cfg.filters,
+                cfg.ranking,
+                record=True,
+                fresh=fresh,
+            )
         if expand_limits:
             result = replace(
                 result,
@@ -2814,6 +2823,23 @@ def _render_result(
         f"{result.count} карт · {source} · {result.api_requests} API-запросов"
         f" · Recommendation — внутренний порядок 0–100, не вероятность."
     )
+    if result.raw_rows:
+        st.caption(
+            "Funnel: "
+            f"стратегий {sum(1 for run in result.strategy_runs if run.executed)}"
+            f"/{len(result.strategy_runs)} · сырых строк {result.raw_rows} → "
+            f"уникальных {result.unique_raw} → строгие фильтры "
+            f"{result.passed_filters} → relevance {result.passed_relevance} "
+            f"→ ranked {result.count}"
+            f" · stop: {result.stop_reason or '—'}"
+            + (" · candidate limit" if result.candidate_limit_hit else "")
+        )
+        if result.count > result.passed_relevance:
+            st.caption(
+                "Funnel относится к расширенному запуску; в итоговую выдачу "
+                f"добавлено {result.count - result.passed_relevance} карт из "
+                "предыдущей выдачи."
+            )
     if st.session_state.get("_library_after_search"):
         st.caption(
             "Карты сохранены в SQLite. При переходе в «Библиотеку» откроется "
@@ -2830,6 +2856,43 @@ def _render_result(
             f"{getattr(result, 'pages_attempted', 0)} · кэш-хитов: "
             f"{result.cache_hits}."
         )
+        if result.attributes_candidates or result.attributes_requested:
+            st.caption(
+                "Difficulty attributes: выбрано "
+                f"{result.attributes_candidates}, запрошено "
+                f"{result.attributes_requested}, получено "
+                f"{result.attributes_succeeded}, из кэша "
+                f"{result.attributes_cached}."
+            )
+        if result.strategy_runs:
+            st.markdown("**Стратегии и страницы**")
+            st.dataframe(
+                [
+                    {
+                        "Стратегия": run.name,
+                        "Запрос": run.query or "—",
+                        "Параметры": ", ".join(
+                            f"{key}={value}"
+                            for key, value in run.params.items()
+                            if key != "cursor_string"
+                        ),
+                        "Выполнена": "да" if run.executed else "нет",
+                        "Страниц": run.pages,
+                        "API": run.api_requests,
+                        "Кэш": run.cache_hits,
+                        "Сырых": run.raw_rows,
+                        "API raw": run.raw_response_rows,
+                        "Курсор вперёд": run.cursor_advances,
+                        "Есть ещё": "да" if run.last_has_more else "нет",
+                        "Статус": run.stop_reason or (
+                            "exhausted" if run.exhausted else "—"
+                        ),
+                    }
+                    for run in result.strategy_runs
+                ],
+                hide_index=True,
+                width="stretch",
+            )
         if result.origin in {"api", "mixed"}:
             raw_stop = getattr(result, "stop_reason", "") or "—"
             stop_labels = {
@@ -2841,7 +2904,9 @@ def _render_result(
                 "rate_limit": "HTTP 429",
                 "forbidden": "HTTP 403",
                 "request_failed": "ошибка запроса",
+                "api_error": "ошибка в ответе API",
                 "candidate_limit": "лимит кандидатов",
+                "attribute_limit": "бюджет difficulty attributes",
                 "limits": "лимиты",
             }
             stop = stop_labels.get(raw_stop, raw_stop)
@@ -2930,8 +2995,29 @@ def _render_result(
                 st.caption(f"• {note}")
             for error in result.errors:
                 st.caption(f"• Ошибка: {error}")
-            if result.excluded:
-                st.markdown("**Причины исключения**")
+            if result.filter_excluded:
+                st.markdown("**Строгие фильтры: причины исключения**")
+                st.dataframe(
+                    [
+                        {"Причина": reason, "Карт": count}
+                        for reason, count in result.filter_excluded.items()
+                    ],
+                    hide_index=True,
+                    width="stretch",
+                )
+            if result.relevance_excluded:
+                st.markdown("**Relevance gate: причины исключения**")
+                st.dataframe(
+                    [
+                        {"Причина": reason, "Карт": count}
+                        for reason, count in result.relevance_excluded.items()
+                    ],
+                    hide_index=True,
+                    width="stretch",
+                )
+            if result.excluded and not (
+                result.filter_excluded or result.relevance_excluded
+            ):
                 st.dataframe(
                     [
                         {"Причина": reason, "Карт": count}
@@ -3386,7 +3472,7 @@ def _search_advanced_filters(cfg: PresetConfig) -> None:
     )
 
     st.markdown("**Случайная подборка и лимиты API**")
-    random_cols = st.columns([1.0, 1.3, 1.3])
+    random_cols = st.columns([1.0, 1.2, 1.2, 1.2])
     random_cols[0].number_input(
         "Карт в подборке",
         min_value=3,
@@ -3409,6 +3495,14 @@ def _search_advanced_filters(cfg: PresetConfig) -> None:
         help="Отключает сеть только для явной кнопки «Искать». Случайная "
         "подборка всегда использует локальный каталог SQLite и не делает "
         "API-запросов.",
+    )
+    random_cols[3].checkbox(
+        "Свежий поиск",
+        value=bool(st.session_state.get("search_fresh", False)),
+        key="search_fresh",
+        help="Игнорировать кэш страниц для следующего явного поиска. "
+        "Уже сохранённые результаты и каталог не удаляются; новые страницы "
+        "снова попадут в кэш.",
     )
     discovery = cfg.discovery
     limit_cols = st.columns(4)
@@ -3555,6 +3649,61 @@ def page_search(store: Storage, cfg: PresetConfig) -> None:
         )
     )
 
+    active_id = st.session_state.get("active_preset_id")
+    saved_preset = (
+        store.get_preset(int(active_id)) if active_id is not None else None
+    )
+    builtin_preset = presets.builtin_by_name(cfg.name)
+    if (
+        saved_preset is not None
+        and saved_preset.is_builtin
+        and builtin_preset is not None
+    ):
+        drift = presets.preset_drift(saved_preset.config, builtin_preset)
+        if drift:
+            st.warning(
+                f"Сохранённый «{cfg.name}» отличается от текущего встроенного "
+                "профиля. Discovery и гейт могут работать по старым лимитам; "
+                "сбросить изменения можно в «Настройки → Пресеты»."
+            )
+            with st.expander("Чем сохранённый пресет отличается", expanded=False):
+                for label, config_value in (
+                    ("Сохранено", saved_preset.config),
+                    ("Встроено", builtin_preset),
+                ):
+                    st.caption(
+                        f"{label}: статусы {', '.join(config_value.filters.statuses)}; "
+                        f"звёзды {config_value.filters.stars_min}.."
+                        f"{config_value.filters.stars_max}; "
+                        f"длительность ≤{config_value.filters.duration_max}; "
+                        f"запросы {config_value.discovery.max_requests}; "
+                        f"страницы {config_value.discovery.max_pages_per_strategy}; "
+                        f"attributes {config_value.discovery.fetch_attributes_limit}; "
+                        "title-запросы "
+                        + (
+                            ", ".join(config_value.discovery.title_queries)
+                            if config_value.discovery.title_queries
+                            else "—"
+                        )
+                    )
+                for line in drift:
+                    st.caption(f"• {line}")
+                if st.button(
+                    "Сбросить к встроенному профилю",
+                    key="search_reset_preset_drift",
+                    help="Явно заменит сохранённую копию текущими встроенными "
+                    "значениями. Пользовательские изменения этого пресета "
+                    "будут потеряны.",
+                ):
+                    saved = presets.reset_preset_to_default(
+                        store, int(active_id)
+                    )
+                    st.session_state["active_config"] = PresetConfig.from_dict(
+                        saved.config.to_dict()
+                    )
+                    st.session_state["_reset_editors"] = True
+                    st.rerun()
+
     st.markdown(
         "<div class='section-label'>Поиск и быстрые фильтры</div>",
         unsafe_allow_html=True,
@@ -3650,6 +3799,7 @@ def page_search(store: Storage, cfg: PresetConfig) -> None:
             store,
             cfg,
             local_only=bool(st.session_state.get("search_local_only", False)),
+            fresh=bool(st.session_state.get("search_fresh", False)),
         ):
             st.rerun()
     if actions[1].button(
@@ -5912,7 +6062,7 @@ def page_diagnostics(store: Storage, cfg: PresetConfig) -> None:
     else:
         st.write(
             f"Запросов (попыток): {last['requests']} · из кеша: "
-            f"{last['cache_hits']} · уникальных: {last['total_fetched']} · "
+            f"{last['cache_hits']} · строк API: {last['total_fetched']} · "
             f"прошло фильтры: "
             f"{last['passed_filters']} · результатов: {last['result_count']} · "
             f"полнота: {'да' if last['complete'] else 'нет'}"

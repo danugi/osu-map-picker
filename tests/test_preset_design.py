@@ -309,6 +309,7 @@ def _old_aim_farm_config() -> object:
     cfg.ranking.factors["taste"].weight = 0.7
     cfg.ranking.factors["community"].weight = 0.35
     cfg.discovery.max_requests = 12
+    cfg.discovery.max_pages_per_strategy = 2
     cfg.discovery.fetch_attributes_limit = 4
     cfg.discovery.title_queries = []
     cfg.description = (
@@ -341,7 +342,7 @@ def test_v10_migration_upgrades_untouched_aim_farm(storage: Storage) -> None:
         "Sped Up",
     ]
     assert upgraded.config.ranking.relevance_targets == ["aim_classic"]
-    assert presets.BUILTIN_PRESETS_VERSION == 10
+    assert presets.BUILTIN_PRESETS_VERSION == 11
 
 
 def test_v10_migration_preserves_edited_builtin_and_user_data(
@@ -497,3 +498,53 @@ def test_v10_migration_corrects_untouched_legacy_aim_farm(storage: Storage) -> N
     assert upgraded is not None
     assert upgraded.config.filters.statuses == ["ranked"]
     assert "Ranked" in upgraded.config.description
+
+
+def test_stored_preset_drift_reports_search_affecting_differences() -> None:
+    modern = presets.builtin_by_name("Aim Farm")
+    assert modern is not None
+    assert presets.preset_drift(modern, modern) == []
+    changes = presets.preset_drift(_old_aim_farm_config(), modern)
+    assert any("статусы" in line for line in changes)
+    assert any("целевой гейт" in line for line in changes)
+    assert any("discovery" in line for line in changes)
+
+
+def test_v11_migration_updates_untouched_v10_aim_farm_limits(storage) -> None:
+    farm = storage.get_preset_by_name("Aim Farm")
+    assert farm is not None
+    old = copy.deepcopy(presets.builtin_by_name("Aim Farm"))
+    old.discovery.max_requests = 18
+    old.discovery.max_pages_per_strategy = 2
+    old.discovery.fetch_attributes_limit = 8
+    storage.update_preset(farm.id, old)
+    storage.set_preference("builtins_version", "10")
+
+    presets.ensure_builtin_presets(storage)
+
+    updated = storage.get_preset(farm.id)
+    assert updated is not None
+    assert presets.BUILTIN_PRESETS_VERSION == 11
+    assert updated.config.discovery.max_requests == 56
+    assert updated.config.discovery.max_pages_per_strategy == 3
+    assert updated.config.discovery.fetch_attributes_limit == 40
+    assert storage.get_preference("builtins_version") == "11"
+
+
+def test_v11_migration_preserves_edited_v10_aim_farm(storage) -> None:
+    farm = storage.get_preset_by_name("Aim Farm")
+    assert farm is not None
+    edited = copy.deepcopy(presets.builtin_by_name("Aim Farm"))
+    edited.discovery.max_requests = 18
+    edited.discovery.max_pages_per_strategy = 2
+    edited.discovery.fetch_attributes_limit = 8
+    edited.filters.stars_min = 4.5
+    storage.update_preset(farm.id, edited)
+    storage.set_preference("builtins_version", "10")
+
+    presets.ensure_builtin_presets(storage)
+
+    kept = storage.get_preset(farm.id)
+    assert kept is not None
+    assert kept.config.filters.stars_min == 4.5
+    assert kept.config.discovery.max_requests == 18
