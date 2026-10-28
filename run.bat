@@ -154,6 +154,7 @@ if defined OSU_PICKER_DB (
 
 echo.
 echo Starting the local app at 127.0.0.1 ...
+echo Browser opens automatically. Press Ctrl+C here to stop the app.
 echo Console stays open while the application is running.
 echo Data directory: !DATA!
 echo API setup: first-run screen or Settings ^> API. .env is also supported.

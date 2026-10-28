@@ -1,9 +1,10 @@
-"""Desktop launcher for the portable Windows build.
+"""Desktop launcher for the source Windows build.
 
 The launcher starts Streamlit as a child process on loopback only, waits for
 the local health endpoint, then opens the default browser. It never contacts
 osu! itself. Runtime logs go to the per-user data directory and contain safe
-startup errors only.
+startup errors only. No extra popup/control window is created; the run.bat
+console stays open and Ctrl+C stops the child cleanly.
 """
 
 from __future__ import annotations
@@ -162,55 +163,6 @@ def _wait_for_server(proc: subprocess.Popen[bytes], port: int, timeout: float) -
     )
 
 
-def _show_control_window(url: str, proc: subprocess.Popen[bytes]) -> None:
-    """Small local control window; closing it stops the child process."""
-
-    try:
-        import tkinter as tk
-    except Exception:  # noqa: BLE001 - fall back to process lifetime
-        LOGGER.exception("tkinter control window unavailable")
-        return
-    try:
-        root = tk.Tk()
-        root.title("OsuMapPicker")
-        root.geometry("360x120")
-        root.resizable(False, False)
-        tk.Label(
-            root,
-            text="osu! Map Picker запущен локально",
-            font=("Segoe UI", 10, "bold"),
-        ).pack(pady=(14, 4))
-        tk.Label(root, text=url, fg="#555555", font=("Segoe UI", 9)).pack(
-            pady=(0, 10)
-        )
-        buttons = tk.Frame(root)
-        buttons.pack()
-        tk.Button(
-            buttons,
-            text="Открыть браузер",
-            width=18,
-            command=lambda: webbrowser.open(url),
-        ).pack(side="left", padx=4)
-        tk.Button(
-            buttons,
-            text="Выход",
-            width=12,
-            command=root.destroy,
-        ).pack(side="left", padx=4)
-
-        def check_child() -> None:
-            if proc.poll() is not None:
-                root.destroy()
-                return
-            root.after(1000, check_child)
-
-        root.protocol("WM_DELETE_WINDOW", root.destroy)
-        root.after(1000, check_child)
-        root.mainloop()
-    except Exception:  # noqa: BLE001 - control UI must not prevent serving
-        LOGGER.exception("control window failed")
-
-
 def _stop(proc: subprocess.Popen[bytes] | None) -> None:
     if proc is None or proc.poll() is not None:
         return
@@ -280,7 +232,6 @@ def main(argv: list[str] | None = None) -> int:
                 webbrowser.open(url)
             except Exception:  # noqa: BLE001 - browser is optional
                 LOGGER.exception("could not open default browser")
-            _show_control_window(url, proc)
         LOGGER.info("server ready at %s", url)
         proc.wait()
         return int(proc.returncode or 0)
