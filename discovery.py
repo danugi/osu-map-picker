@@ -133,11 +133,16 @@ def build_strategies(
     primary = _status_priority(statuses)
     base_query = filters.query.strip() or None
     strategies: list[SearchStrategy] = []
+    seen_keys: set[tuple[str, str, str | None]] = set()
 
     def add(name: str, status: str, sort: str, query: str | None) -> None:
-        key = (name, status, sort, query)
-        if key not in {(s.name, s.status, s.sort, s.query) for s in strategies}:
-            strategies.append(SearchStrategy(name, status, sort, query))
+        # Two differently named strategies with the same request would spend
+        # the budget twice and return the same candidates.
+        key = (status, sort, query)
+        if key in seen_keys:
+            return
+        seen_keys.add(key)
+        strategies.append(SearchStrategy(name, status, sort, query))
 
     for status in statuses:
         add(f"{status}:recent", status, "ranked_desc", base_query)
@@ -150,6 +155,11 @@ def build_strategies(
     if settings.expand_seeds and not base_query:
         for seed in list(dict.fromkeys(s.strip() for s in seeds if s.strip()))[:3]:
             add(f"seed:{seed}", primary, "ranked_desc", seed)
+    if settings.title_queries and not base_query:
+        for query in list(dict.fromkeys(
+            text.strip() for text in settings.title_queries if text.strip()
+        ))[:6]:
+            add(f"title:{query}", primary, "ranked_desc", query)
     return strategies
 
 

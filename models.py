@@ -476,6 +476,7 @@ class RankingSettings:
     relevance_targets: list[str] = field(default_factory=list)
     relevance_threshold: float = config.DEFAULT_RELEVANCE_THRESHOLD
     farm_target_seconds: int = config.DEFAULT_FARM_TARGET_SECONDS
+    farm_tolerance_seconds: int = config.DEFAULT_FARM_TOLERANCE_SECONDS
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -493,6 +494,7 @@ class RankingSettings:
             "relevance_targets": list(self.relevance_targets),
             "relevance_threshold": self.relevance_threshold,
             "farm_target_seconds": self.farm_target_seconds,
+            "farm_tolerance_seconds": self.farm_tolerance_seconds,
         }
 
     @classmethod
@@ -560,6 +562,12 @@ class RankingSettings:
             farm_target_seconds=int(
                 data.get("farm_target_seconds", config.DEFAULT_FARM_TARGET_SECONDS)
             ),
+            farm_tolerance_seconds=int(
+                data.get(
+                    "farm_tolerance_seconds",
+                    config.DEFAULT_FARM_TOLERANCE_SECONDS,
+                )
+            ),
         )
 
 
@@ -575,9 +583,14 @@ class DiscoverySettings:
     use_rating: bool = config.DEFAULT_USE_RATING
     use_popular: bool = config.DEFAULT_USE_POPULAR
     expand_seeds: bool = config.DEFAULT_EXPAND_SEEDS
+    # Preset-owned title searches (for example short-version variants).
+    # They supplement the general search and never act as eligibility rules.
+    title_queries: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        return {f.name: getattr(self, f.name) for f in fields(self)}
+        data = {f.name: getattr(self, f.name) for f in fields(self)}
+        data["title_queries"] = list(self.title_queries)
+        return data
 
     @classmethod
     def from_dict(
@@ -590,8 +603,13 @@ class DiscoverySettings:
         for f in fields(cls):
             if f.name not in data:
                 continue
-            if isinstance(getattr(cls(), f.name), bool):
+            default = getattr(cls(), f.name)
+            if isinstance(default, bool):
                 kwargs[f.name] = _bool(data[f.name], f"{path}.{f.name}")
+            elif isinstance(default, list):
+                kwargs[f.name] = _as_str_list(
+                    data[f.name], f"{path}.{f.name}"
+                )
             else:
                 number = _opt_int(data[f.name], f"{path}.{f.name}")
                 if number is None:

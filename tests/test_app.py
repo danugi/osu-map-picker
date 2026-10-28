@@ -987,6 +987,7 @@ def _seed_short_cached_maps(store: Storage) -> None:
                     count_circles=500,
                     count_sliders=200,
                     count_spinners=0,
+                    ar=10.0,
                 ),
             ),
         )

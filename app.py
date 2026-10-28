@@ -1571,8 +1571,9 @@ def page_ranking(store: Storage, cfg: PresetConfig) -> None:
         )
     )
     if ranking.factors.get("farm_nm") and ranking.factors["farm_nm"].enabled:
+        farm_cols = st.columns(2)
         ranking.farm_target_seconds = int(
-            st.number_input(
+            farm_cols[0].number_input(
                 "Цель NM-фарма, сек",
                 min_value=10,
                 max_value=600,
@@ -1581,6 +1582,18 @@ def page_ranking(store: Storage, cfg: PresetConfig) -> None:
                 key=_ck("rnk_farm_target"),
                 help="Мягкая цель фактора NM-фарма. Жёсткий максимум длины "
                 "задаётся в фильтрах; это разные вещи.",
+            )
+        )
+        ranking.farm_tolerance_seconds = int(
+            farm_cols[1].number_input(
+                "Допуск цели, сек",
+                min_value=5,
+                max_value=300,
+                value=int(ranking.farm_tolerance_seconds),
+                step=5,
+                key=_ck("rnk_farm_tolerance"),
+                help="Ширина мягкого окна вокруг цели. Слишком короткие карты "
+                "не получают максимум автоматически.",
             )
         )
 
@@ -3467,12 +3480,19 @@ def _search_advanced_filters(cfg: PresetConfig) -> None:
         value=discovery.expand_seeds,
         key=_ck("dsc_seeds"),
     )
+    if discovery.title_queries:
+        st.caption(
+            "Дополнительные title-запросы активного пресета: "
+            + "; ".join(discovery.title_queries)
+            + ". Они дополняют общий поиск и не являются фильтром названий."
+        )
     st.caption(
         "Стратегии: recent по статусам + oldest/rating/favourites + до трёх "
-        "запросов по вашим положительным оценкам. Это относится только к "
-        "явной кнопке «Искать»: случайная подборка не углубляет пагинацию и "
-        "не делает сетевых запросов. Онлайн-поиск также ограничен общим "
-        "дедлайном discovery (120 с), который проверяется между запросами. "
+        "запросов по положительным оценкам + title-запросы пресета. Это "
+        "относится только к явной кнопке «Искать»: случайная подборка не "
+        "углубляет пагинацию и не делает сетевых запросов. Онлайн-поиск "
+        "также ограничен общим дедлайном discovery (120 с), который "
+        "проверяется между запросами. "
         "Streams/Bursts оцениваются только по найденным в .osu цепочкам: "
         "длиннее 9 нот — stream, 5–9 нот — burst."
     )
@@ -5987,9 +6007,9 @@ def page_diagnostics(store: Storage, cfg: PresetConfig) -> None:
         "- Flashlight и часть rhythm/tech-категорий поддержаны только через "
         "теги или косвенные признаки; это отмечено в разделе «Настройки → "
         "Скиллсеты».\n"
-        "- NM farm-потенциал — эвристика длины, звёзд, aim и плотности. "
-        "Оценка производительности не рассчитывается и не подставляется "
-        "числом из звёзд.\n"
+        "- NM farm-потенциал — эвристика мягкого окна длительности, звёзд, "
+        "aim-давления, плотности и числа объектов. Оценка производительности "
+        "и PP не рассчитываются.\n"
         "- Внутренний score 0–100 — порядок, а не вероятность и не абсолютная "
         "оценка «качества».\n"
         "- Превью геймплея требует доступа к публичному osu.ppy.sh/osu/{id}; "

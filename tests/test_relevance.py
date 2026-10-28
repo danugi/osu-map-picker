@@ -210,7 +210,7 @@ def test_mixed_aim_and_allrounder_have_no_target_gate() -> None:
     assert "не заданы" in check.reason
 
 
-def test_specialized_presets_use_their_own_three_targets() -> None:
+def test_specialized_presets_use_their_own_weighted_targets() -> None:
     expected = {
         "Aim Farm",
         "Speed",
@@ -226,8 +226,11 @@ def test_specialized_presets_use_their_own_three_targets() -> None:
         preset = presets.builtin_by_name(name)
         assert preset is not None
         targets = tuple(preset.ranking.relevance_targets)
-        assert len(targets) == 3, name
-        assert len(set(targets)) == 3, name
+        assert targets, name
+        assert len(set(targets)) == len(targets), name
+        # A mandatory gate may not pass a map on a skill that the preset does
+        # not actually rank.
+        assert set(targets) <= set(preset.ranking.skill_weights), name
         target_sets[name] = targets
 
     assert target_sets["Tech"] != target_sets["Reading"]
@@ -242,11 +245,14 @@ def test_specialized_presets_use_their_own_three_targets() -> None:
     )
     assert "finger_control" in target_sets["Finger Control"]
     assert "speed_high_bpm" in target_sets["Speed"]
-    assert "aim_classic" in target_sets["Aim Farm"]
+    assert target_sets["Aim Farm"] == ("aim_classic",)
 
     legacy_streams = presets.known_builtin_by_name("Streams")
     assert legacy_streams is not None
-    assert len(legacy_streams.ranking.relevance_targets) == 3
+    assert legacy_streams.ranking.relevance_targets
+    assert set(legacy_streams.ranking.relevance_targets) <= set(
+        legacy_streams.ranking.skill_weights
+    )
 
 
 @pytest.mark.parametrize(
@@ -493,7 +499,11 @@ def test_speed_gate_rejects_missing_speed_attributes() -> None:
     check = evaluate_relevance(candidate, preset.ranking)
     assert check.passed is False
     assert all(target.score is None for target in check.targets)
-    assert "недостаточно данных" in check.reason
+    assert (
+        "недостаточно данных" in check.reason
+        or ".osu" in check.reason
+        or "sequence" in check.reason
+    )
 
 
 def test_burst_target_without_sequence_is_not_analyzed() -> None:

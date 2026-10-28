@@ -210,6 +210,10 @@ def validate_ranking(settings: RankingSettings) -> None:
             raise RankingConfigError(f"trait_targets.{key} должен быть 0..1")
     if not 10 <= settings.farm_target_seconds <= 600:
         raise RankingConfigError("farm_target_seconds должен быть 10..600")
+    if not 5 <= settings.farm_tolerance_seconds <= 300:
+        raise RankingConfigError(
+            "farm_tolerance_seconds должен быть 5..300"
+        )
 
 
 def _finite(value: float | None) -> float | None:
@@ -314,11 +318,12 @@ def _mapping_fit(candidate: Candidate, settings: RankingSettings) -> FactorScore
 
 
 def _farm_nm(candidate: Candidate, ctx: RankingContext) -> FactorScore:
-    """Approximate NM farm potential from map data.
+    """Transparent short-aim farm-efficiency heuristic from local evidence.
 
-    It combines short length, stars near the user's comfort point, aim
-    pressure and moderate density. It never becomes the sole ordering key,
-    never adds mods and never invents a performance estimate.
+    Duration is a soft window around ``farm_target_seconds`` rather than a
+    saturating "shorter is always better" term. Aim evidence, difficulty fit,
+    density and enough playable objects balance the result. This is not an
+    expected-PP calculation and never adds mods or invented performance values.
     """
     weight, _ = _weight(ctx.settings, "farm_nm")
     beatmap = candidate.beatmap
@@ -332,25 +337,53 @@ def _farm_nm(candidate: Candidate, ctx: RankingContext) -> FactorScore:
             "Неизвестна длительность или звёздность — NM farm-потенциал не "
             "оценивается. Это не расчёт производительности.",
         )
+
     aim_pressure = candidate.traits.get("aim_pressure")
     aim_share = candidate.traits.get("aim")
+    measured_geometry = [
+        value
+        for value in (
+            candidate.traits.get("jump_share"),
+            candidate.traits.get("wide_jump_share"),
+        )
+        if value is not None
+    ]
+    base_aim: float | None
     if aim_pressure is not None and aim_share is not None:
-        aim_component = 0.65 * aim_pressure + 0.35 * aim_share
+        base_aim = 0.65 * aim_pressure + 0.35 * aim_share
     elif aim_pressure is not None:
-        aim_component = aim_pressure
+        base_aim = aim_pressure
     elif aim_share is not None:
-        aim_component = aim_share
+        base_aim = aim_share
+    else:
+        base_aim = None
+    local_aim = (
+        sum(measured_geometry) / len(measured_geometry)
+        if measured_geometry
+        else None
+    )
+    if base_aim is not None and local_aim is not None:
+        aim_component = 0.75 * base_aim + 0.25 * local_aim
+    elif base_aim is not None:
+        aim_component = base_aim
+    elif local_aim is not None:
+        aim_component = local_aim
     else:
         return _factor(
             "farm_nm",
             None,
             weight,
-            "Нет aim-признаков (difficulty attributes или тега) — нельзя "
-            "честно оценить NM farm-потенциал.",
+            "Нет aim-признаков (difficulty attributes, тега или локальной "
+            "геометрии) — нельзя честно оценить NM farm-потенциал.",
         )
 
     target = ctx.settings.farm_target_seconds
-    short_score = max(0.0, 1.0 - max(0, duration - target) / (target * 1.5))
+    tolerance = max(5, int(ctx.settings.farm_tolerance_seconds))
+    # A soft window. 50 s and 119 s are not equivalent: too-short maps lose
+    # gameplay/object evidence, while maps near the target retain it.
+    duration_score = math.exp(
+        -((duration - target) ** 2) / (2 * tolerance**2)
+    )
     width = max(0.8, ctx.settings.comfort_width)
     star_fit = math.exp(
         -((stars - ctx.settings.comfort_stars) ** 2) / (2 * width**2)
@@ -361,26 +394,37 @@ def _farm_nm(candidate: Candidate, ctx: RankingContext) -> FactorScore:
         if density is not None
         else None
     )
+    objects = beatmap.object_count
+    object_score = (
+        max(0.0, min(1.0, objects / 400.0))
+        if objects is not None
+        else None
+    )
 
     parts: list[tuple[str, float, float]] = [
-        ("короткая длительность", short_score, 0.32),
-        ("звёзды около комфорта", star_fit, 0.24),
-        ("aim-нагрузка", aim_component, 0.24),
+        ("длительность около цели", duration_score, 0.28),
+        ("aim-нагрузка", aim_component, 0.30),
+        ("звёзды около комфорта", star_fit, 0.20),
     ]
     if density_score is not None:
-        parts.append(("умеренная плотность", density_score, 0.14))
+        parts.append(("умеренная плотность", density_score, 0.12))
+    if object_score is not None:
+        parts.append(("достаточно игровых объектов", object_score, 0.10))
     total = sum(weight_part for _, _, weight_part in parts)
     value = sum(score * weight_part for _, score, weight_part in parts) / total
     details = (
-        f"{duration}с при цели ≤{target}с; {stars:.2f}★ при комфорте "
-        f"{ctx.settings.comfort_stars:.1f}★; aim {aim_component:.0%}"
+        f"{duration}с при цели {target}с ±{tolerance}с; "
+        f"{stars:.2f}★ при комфорте {ctx.settings.comfort_stars:.1f}★; "
+        f"aim {aim_component:.0%}"
     )
     if density is not None:
         details += f"; плотность {density:.0%}"
+    if objects is not None:
+        details += f"; объектов {objects}"
     explanation = (
         "NM-профиль без модов: " + details + ". Это эвристика практичности "
-        "короткой aim-карты, а не расчёт производительности и не гарантия "
-        "награды."
+        "короткой aim-карты, а не расчёт производительности и не прогноз "
+        "очков."
     )
     if candidate.traits.confidence == "low":
         explanation += " Признаки частично основаны на тегах/метаданных."

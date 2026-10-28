@@ -119,6 +119,7 @@ DEFAULT_COMFORT_WIDTH = 0.9
 DEFAULT_IDEAL_LENGTH = 140
 DEFAULT_LENGTH_TOLERANCE = 70
 DEFAULT_FARM_TARGET_SECONDS = 120
+DEFAULT_FARM_TOLERANCE_SECONDS = 45
 
 # A specialized preset may name up to three target skillsets. A map must be
 # above this share for at least one target before it can be ranked. The check

@@ -70,13 +70,22 @@ def test_aim_farm_is_nm_focused_without_mod_bonuses() -> None:
     preset = presets.builtin_by_name("Aim Farm")
     assert preset is not None
     assert preset.filters.duration_max == 150
-    assert preset.ranking.farm_target_seconds == 120
+    assert preset.filters.statuses == ["ranked"]
+    assert preset.ranking.farm_target_seconds == 90
+    assert preset.ranking.farm_tolerance_seconds == 30
     assert preset.ranking.skill_weights == {"aim_classic": 1.0}
     assert preset.ranking.trait_targets == {}
+    assert preset.ranking.relevance_targets == ["aim_classic"]
     assert preset.ranking.factors["farm_nm"].enabled is True
     assert preset.ranking.factors["mapping_fit"].enabled is True
-    assert "NM" in preset.description
-    assert "PP" not in preset.description
+    assert preset.discovery.title_queries == [
+        "Nightcore & Cut Ver",
+        "Cut Ver",
+        "Sped Up",
+    ]
+    assert "Ranked" in preset.description
+    assert "эвристика" in preset.description
+    assert "гарант" not in preset.description.lower()
     # There is no mod field at all: mod-specific bonuses cannot sneak into the preset.
     assert not hasattr(preset.ranking, "mods")
     assert not hasattr(preset.filters, "mods")
@@ -115,20 +124,26 @@ def test_bursts_and_streams_presets_use_separate_evidence() -> None:
     assert "stream_consistency" in streams.ranking.relevance_targets
 
 
-def test_non_sequence_presets_do_not_require_stream_or_burst_evidence() -> None:
+def test_non_sequence_presets_do_not_require_only_stream_or_burst_evidence() -> None:
+    # Speed may list a burst skillset as one optional gate target, but it also
+    # has measured speed-pressure/density targets; Aim Farm has none of them.
     for name in ("Aim Farm", "Speed"):
         preset = presets.builtin_by_name(name)
         assert preset is not None
-        assert all(
-            "stream" not in target and "burst" not in target
-            for target in preset.ranking.relevance_targets
-        ), name
+        targets = set(preset.ranking.relevance_targets)
+        measured_non_sequence = {
+            "aim_classic",
+            "speed_high_bpm",
+            "speed_density",
+        }
+        assert targets & measured_non_sequence, name
+        assert all(target in preset.ranking.skill_weights for target in targets)
     for name in ("Stamina", "Flow Aim", "Rhythm Control"):
         preset = presets.known_builtin_by_name(name)
         assert preset is not None
-        assert all(
-            "stream" not in target and "burst" not in target
-            for target in preset.ranking.relevance_targets
+        assert preset.ranking.relevance_targets
+        assert set(preset.ranking.relevance_targets) <= set(
+            preset.ranking.skill_weights
         ), name
 
 
@@ -368,7 +383,6 @@ def test_v9_migration_adds_bursts_and_updates_untouched_sequence_targets(
         if config.name == "Streams & Stamina":
             config.ranking.relevance_targets = [
                 "stream_consistency",
-                "stamina_finger",
                 "stream_long",
             ]
         if config.name == "Speed":
@@ -398,14 +412,13 @@ def test_v9_migration_adds_bursts_and_updates_untouched_sequence_targets(
     assert streams.config.ranking.relevance_targets == [
         "stream_consistency",
         "stream_long",
-        "speed_streams",
     ]
     speed = empty_storage.get_preset_by_name("Speed")
     assert speed is not None
     assert speed.config.ranking.relevance_targets == [
         "speed_high_bpm",
+        "speed_bursts",
         "speed_density",
-        "speed_consistency",
     ]
     # A user-edited built-in keeps its filters and is not silently rewritten.
     farm = empty_storage.get_preset_by_name("Aim Farm")

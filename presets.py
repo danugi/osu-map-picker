@@ -8,6 +8,7 @@ never mutates another preset or touches ratings, history and favourites.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from typing import Any
 
@@ -65,6 +66,24 @@ def validate_preset_config(preset: PresetConfig) -> None:
             raise PresetError(
                 f"discovery.{field_name} должен быть в диапазоне {low}..{high}"
             )
+    title_queries = preset.discovery.title_queries
+    if len(title_queries) > 6:
+        raise PresetError("discovery.title_queries: допускается не больше 6 запросов")
+    normalized: set[str] = set()
+    for query in title_queries:
+        text = query.strip()
+        if not text or len(text) > 64:
+            raise PresetError(
+                "discovery.title_queries: запрос должен быть длиной 1..64"
+            )
+        if any(ord(ch) < 32 for ch in text):
+            raise PresetError(
+                "discovery.title_queries: управляющие символы недопустимы"
+            )
+        key = text.casefold()
+        if key in normalized:
+            raise PresetError("discovery.title_queries: запросы повторяются")
+        normalized.add(key)
 
 
 def _clone_filters(filters: Filters) -> Filters:
@@ -166,36 +185,50 @@ def _any_taste() -> PresetConfig:
 def _aim_farm() -> PresetConfig:
     cfg = default_config(
         "Aim Farm",
-        "Короткие aim-карты для NM-фарма: до ~2:30, звёзды около вашего "
-        "комфорта, jump-паттерны и разумная плотность. Моды не учитываются.",
+        "Практичный NM aim-фарм: только Ranked-карты, которые могут дать PP. "
+        "Мягкое окно около 90 с (по умолчанию 60–120 с), aim-давление, "
+        "комфортная звёздность и достаточно игровых объектов. Длительность не "
+        "является единственным критерием; это farm-efficiency эвристика, а не "
+        "расчёт PP. Отдельный поиск коротких версий дополняет общий.",
     )
     cfg.filters.stars_min = 5.0
     cfg.filters.stars_max = 6.9
     cfg.filters.duration_max = 150
-    cfg.filters.statuses = ["ranked", "loved"]
+    # PP is awarded by Ranked maps. Loved/Qualified can be good aim maps, but
+    # presenting them as PP-eligible would be false.
+    cfg.filters.statuses = ["ranked"]
     cfg.ranking.trait_targets = {}
     cfg.ranking.skill_weights = {"aim_classic": 1.0}
     cfg.ranking.comfort_stars = 5.8
     cfg.ranking.comfort_width = 0.8
-    cfg.ranking.ideal_length = 105
-    cfg.ranking.length_tolerance = 45
+    cfg.ranking.ideal_length = 95
+    cfg.ranking.length_tolerance = 35
     cfg.ranking.diversity = 0.20
-    cfg.ranking.farm_target_seconds = 120
-    cfg.ranking.factors["mapping_fit"].weight = 1.2
+    cfg.ranking.farm_target_seconds = 90
+    cfg.ranking.farm_tolerance_seconds = 30
+    cfg.ranking.factors["mapping_fit"].weight = 1.3
     cfg.ranking.factors["farm_nm"].enabled = True
-    cfg.ranking.factors["farm_nm"].weight = 2.0
+    cfg.ranking.factors["farm_nm"].weight = 1.8
     cfg.ranking.factors["difficulty"].weight = 1.1
-    cfg.ranking.factors["length"].weight = 0.85
-    cfg.ranking.factors["taste"].weight = 0.7
+    cfg.ranking.factors["length"].weight = 0.45
+    cfg.ranking.factors["taste"].weight = 0.6
     cfg.ranking.factors["feedback"].weight = 1.2
     cfg.ranking.factors["music"].weight = 0.2
-    cfg.ranking.factors["community"].weight = 0.35
+    cfg.ranking.factors["community"].weight = 0.30
     cfg.ranking.factors["novelty"].weight = 0.1
     cfg.ranking.factors["repeat_penalty"].weight = 0.6
     cfg.discovery.use_oldest = False
     cfg.discovery.use_rating = True
     cfg.discovery.use_popular = False
     cfg.discovery.expand_seeds = False
+    cfg.discovery.max_requests = 18
+    cfg.discovery.max_pages_per_strategy = 2
+    cfg.discovery.fetch_attributes_limit = 8
+    cfg.discovery.title_queries = [
+        "Nightcore & Cut Ver",
+        "Cut Ver",
+        "Sped Up",
+    ]
     return cfg
 
 
@@ -221,6 +254,22 @@ def _legacy_aim_farm_config() -> PresetConfig:
     cfg.ranking.factors["community"].weight = 0.4
     cfg.discovery.use_oldest = False
     cfg.discovery.expand_seeds = False
+    return cfg
+
+
+def _legacy_aim_farm_pp_config() -> PresetConfig:
+    """Historical farm profile with corrected PP eligibility.
+
+    The old row remains available for users who selected it, but only Ranked
+    maps can award PP. Other historical search/ranking choices are preserved.
+    """
+
+    cfg = _legacy_aim_farm_config()
+    cfg.filters.statuses = ["ranked"]
+    cfg.description = (
+        "Исторический aim-farm профиль. Для PP оставлены только Ranked-карты; "
+        "остальные настройки сохранены как в старой версии."
+    )
     return cfg
 
 
@@ -379,9 +428,9 @@ def _speed() -> PresetConfig:
 def _streams() -> PresetConfig:
     cfg = _skill_preset(
         "Streams",
-        "Stream-карты: непрерывность, длина stream-участков и bursts. "
-        "Прокси по плотности и speed-доле; структура потоков не измеряется "
-        "без локального .osu.",
+        "Stream-карты: непрерывность и длина stream-участков, bursts. "
+        "Stream-признаки требуют локального .osu; без него кандидат не "
+        "получает выдуманный прокси и не проходит обязательный гейт.",
         {
             "stream_consistency": 1.0,
             "stream_long": 0.7,
@@ -400,8 +449,9 @@ def _streams() -> PresetConfig:
 def _stamina() -> PresetConfig:
     cfg = _skill_preset(
         "Stamina",
-        "Выносливость: длинные и плотные карты, finger stamina и alternation. "
-        "Длина — мягкое предпочтение, верхний предел можно изменить.",
+        "Выносливость: длинные и плотные карты, finger stamina и stream "
+        "stamina. Длина — мягкое предпочтение; stream-часть требует "
+        "локального .osu, остальное остаётся явным прокси.",
         {
             "stamina_finger": 1.0,
             "stream_long": 0.55,
@@ -420,9 +470,10 @@ def _stamina() -> PresetConfig:
 def _streams_stamina() -> PresetConfig:
     cfg = _skill_preset(
         "Streams & Stamina",
-        "Единый тренировочный профиль для потоков и выносливости: "
-        "непрерывность stream-участков, длина, finger stamina и alternation. "
-        "Длина остаётся мягким предпочтением, верхний предел можно изменить.",
+        "Потоки вместе с выносливостью: непрерывность и длина stream-участков, "
+        "finger stamina и speed stamina. Stream-доказательство берётся из "
+        "локального .osu; без него гейт честно не пропускает карту. Длина "
+        "остаётся мягким предпочтением.",
         {
             "stream_consistency": 0.90,
             "stamina_finger": 0.65,
@@ -493,8 +544,9 @@ def _accuracy() -> PresetConfig:
 def _reading() -> PresetConfig:
     return _skill_preset(
         "Reading",
-        "Чтение: AR-челлендж, высокая/низкая плотность и reading-теги. "
-        "Реальная читаемость паттернов не измеряется метаданными API.",
+        "Чтение: AR-челлендж, высокий или низкий AR и reading-теги. AR "
+        "измеряется напрямую, но реальная читаемость паттернов не доказывается "
+        "метаданными API; это ограничение показывается явно.",
         {
             "ar_challenge": 1.0,
             "high_ar": 0.6,
@@ -878,20 +930,16 @@ def _custom() -> PresetConfig:
 # All-rounder, Any Taste and the generic discovery presets deliberately have
 # no entry: they must not inherit the restrictions of specialized profiles.
 _RELEVANCE_TARGETS: dict[str, tuple[str, ...]] = {
-    "Aim Farm": ("aim_classic", "aim_control", "aim_precision"),
-    "Speed": ("speed_high_bpm", "speed_density", "speed_consistency"),
-    "Streams & Stamina": (
-        "stream_consistency",
-        "stream_long",
-        "speed_streams",
-    ),
+    "Aim Farm": ("aim_classic",),
+    "Speed": ("speed_high_bpm", "speed_bursts", "speed_density"),
+    "Streams & Stamina": ("stream_consistency", "stream_long"),
     "Bursts": (
         "burst_control",
         "speed_bursts",
         "speed_short_bursts",
     ),
     "Finger Control": ("finger_control", "alternating", "speed_control"),
-    "Reading": ("ar_challenge", "high_ar", "pattern_recognition"),
+    "Reading": ("ar_challenge", "high_ar", "low_ar"),
     "Accuracy": (
         "accuracy_focused",
         "od_precision",
@@ -901,17 +949,13 @@ _RELEVANCE_TARGETS: dict[str, tuple[str, ...]] = {
     "Flashlight": ("fl_friendly", "fl_reading", "fl_aim"),
     # Legacy profiles keep their own target sets instead of inheriting the
     # current preset that happens to have a similar name.
-    "Streams": ("stream_consistency", "stream_long", "speed_streams"),
-    "Stamina": ("stamina_finger", "speed_stamina", "tapping_consistency"),
-    "Wide Aim": ("aim_wide", "aim_classic", "aim_control"),
-    "Flow Aim": ("aim_flow", "aim_classic", "aim_control"),
+    "Streams": ("stream_consistency", "stream_long", "stream_burst"),
+    "Stamina": ("stamina_finger", "stream_long", "speed_stamina"),
+    "Wide Aim": ("aim_wide", "aim_classic"),
+    "Flow Aim": ("aim_flow", "aim_classic"),
     "Aim Control": ("aim_control", "aim_precision", "aim_classic"),
     "Aim + Alt": ("aim_classic", "finger_control", "alternating"),
-    "Aim + Bursts": (
-        "burst_control",
-        "speed_bursts",
-        "speed_short_bursts",
-    ),
+    "Aim + Bursts": ("aim_bursts", "speed_bursts"),
     "Speed + Aim": ("speed_aim", "speed_high_bpm", "aim_classic"),
     "Speed + Stamina": (
         "speed_high_bpm",
@@ -923,14 +967,14 @@ _RELEVANCE_TARGETS: dict[str, tuple[str, ...]] = {
     "Precision": ("accuracy_focused", "od_precision", "aim_precision"),
     "Reading + Aim": ("reading_aim", "aim_control", "ar_challenge"),
     "Reading + Streams": (
+        "stream_reading",
         "stream_consistency",
-        "stream_long",
-        "speed_streams",
+        "density_changes",
     ),
     "Jump Streams": (
-        "stream_consistency",
-        "stream_long",
-        "speed_streams",
+        "stream_jump",
+        "speed_aim",
+        "stream_burst",
     ),
     "Slider Tech": ("slider_heavy", "tech", "angular_control"),
     "Rhythm Control": (
@@ -993,10 +1037,10 @@ _LEGACY_BUILDERS = (
     _slider_tech,
     _rhythm_control,
     _custom,
-    _legacy_aim_farm_config,
+    _legacy_aim_farm_pp_config,
 )
 
-BUILTIN_PRESETS_VERSION = 9
+BUILTIN_PRESETS_VERSION = 10
 _V2_NEW_NAMES = frozenset(
     {
         "Speed",
@@ -1011,6 +1055,90 @@ _V2_NEW_NAMES = frozenset(
 _V5_NEW_NAMES = frozenset({"Streams & Stamina"})
 _V6_NEW_NAMES = frozenset({"Aim Farm"})
 _V9_NEW_NAMES = frozenset({"Bursts"})
+
+# Canonical fingerprints of the pre-v10 seeded configurations. The v10
+# migration only replaces rows that are still byte-for-byte equivalent to a
+# known untouched built-in; edited built-ins and user presets are preserved.
+_PRE_V10_FINGERPRINTS: dict[str, str] = {
+    "Accuracy": "f33337a20da993cac58a88f0b4e6d28e1553275081d85f71713b187bf7826fc5",
+    "Aim + Alt": "7565142c59812413ec7923647ac8c41ab3c66964730ee41e317c1a25dacaccca",
+    "Aim + Bursts": "f49beaf8324293cad1e1de1d6b84daf76f5de7a1948b8b279c9d1da505bccf9f",
+    "Aim Control": "ad4ed0d556db0982f3449d3c77ffbd07674d2eb37f9e1b32466152e45f1e84dd",
+    "Aim Farm": "845e2f74fefd117ededb30d471b3a94cf8ae632a435edf08819c2b6fdbb9e319",
+    "Aim Farm / PP": "a6339d0b9f91c844d882113c74081138f736d5cb73285c8d3bd94b0645c2aa21",
+    "All-rounder": "2596f777bdafb760e1af5555a7596a13a115a1871b611b0342560909f553f26d",
+    "Any Taste": "505b4c0a242e55e8b5885c88277b63d60059dc0d033a83a4cc3afc88ad7f9c8a",
+    "Bursts": "3780d3f93823364d046550ab2b9bf06225fa97f312772b7951a97e27c1697756",
+    "Custom": "24b506680dfc90bba989f374fdddf6e2b2955dc3ad7d76be3dd245bcd60bf8f2",
+    "Discovery": "4a436f52361d6b94891686ac90e3eb60b6b134c860ad967331db821a88942edb",
+    "Finger Control": "dc0b4bcfe2d9bbff9da4b9bdebf702e6430ad3c5fece871305dd69012bec74c6",
+    "Flashlight": "b37828f3a2888da767de7ca3e14f2d345564964e949ac1323f5e9cc5cc3e6a79",
+    "Flow Aim": "6e0bcedf14b122fd85ecd31f8562ebbfad2a80b6c55afc191c6cdf057f80b026",
+    "High AR Reading": "1af3443f795d3282b83e6b69da8af84c524965b5becb4ba331b18e2318ab17af",
+    "Jump Streams": "581b5c7563cb5ea9fb07f2ce7ce8f4c6119ad8c725be6a090f5322da857b93ae",
+    "Low AR Reading": "d2718421f445826d1cc3c0e74835d04aac755b4f4d64c6637b6317ef8e9efae8",
+    "Mixed Aim": "006283ad29fd617a28d1c11fcffd9d79430f597513672a352d465278fb4f13ad",
+    "Precision": "08b144b846783ea6da008e960734ecb3c7730ec6274275ef44183fcb62dc921e",
+    "Reading": "d073136b0599ab5e20f18e5f472f4a746a2caa24aaa8ab5cb56dd88f558861a2",
+    "Reading + Aim": "bc7d41cdfafc18ca16916bba81d432c8d5da8588fbb06779008c149f1bea68de",
+    "Reading + Streams": "137d4a7a1ee51eee7ba898dcd48d77c5634f69ba0b97fbedba67820c57f1862d",
+    "Rhythm Control": "8dc18e519f0fd9bbeefde94ed38261f197c5afd5d46313cc6d48aac54bb98b6c",
+    "Slider Tech": "8c51e90ab84b173c695eecc1a7b31fe054c6df09faaa6deadf01816cf95a255b",
+    "Speed": "98915be19f8d8b5a436772bbf56a5829afc8e7d630bc709e2f6bb6bf542fba57",
+    "Speed + Aim": "e957e942f28ceefc19bc11725871832a669483cbf5c11ed9635826efedef1ab0",
+    "Speed + Stamina": "4cd9881df3649a1243bb541ea90d4f086f7cd35257aaa06f9c0737a915782756",
+    "Stamina": "1d05ab568933f883a901051a0787a8296ccaf673d59b3323e477786cf82f136f",
+    "Streams": "98bcea74c342daed3257ab6f422170b985bc816a95e466b34ebe4a43f404012b",
+    "Streams & Stamina": "99beae62a0aace7ddf6cb2f5937ead26937b8991081b6f99aee551a22016e98e",
+    "Tech": "038f5db26d1648a562e4ffaabd51433aae3e438cd6bb4c1a5ec461fa410fd799",
+    "Weird Aim": "b3873cea35b5160a082192c21949e544ff30675ce90b35ab4e131039117a574f",
+    "Wide Aim": "c5ef189575ee6ce0bcf473b08c97dd9af39b7b41a1c69a52269c35b12e9a6ea6",
+}
+
+def _canonical_config_value(value: Any) -> Any:
+    """Make SQLite JSON round-trips (150 vs 150.0) hash-comparable."""
+
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, dict):
+        return {
+            key: _canonical_config_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_canonical_config_value(item) for item in value]
+    return value
+
+
+def _preset_fingerprint(cfg: PresetConfig) -> str:
+    data = _canonical_config_value(_normalized_config_dict(cfg))
+    # Fields introduced by v10 are absent from every old row. Strip them so
+    # an old untouched definition keeps a stable fingerprint after parsing.
+    data.get("ranking", {}).pop("farm_tolerance_seconds", None)
+    data.get("discovery", {}).pop("title_queries", None)
+    raw = json.dumps(
+        data, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _upgrade_v10_definitions(storage: Any) -> int:
+    changed = 0
+    for preset in storage.list_presets():
+        if not preset.is_builtin:
+            continue
+        expected = _PRE_V10_FINGERPRINTS.get(preset.name)
+        if expected is None or _preset_fingerprint(preset.config) != expected:
+            continue
+        modern = builtin_by_name(preset.name) or known_builtin_by_name(
+            preset.name
+        )
+        if modern is None or _matches_legacy(preset.config, modern):
+            continue
+        storage.update_preset(preset.id, modern)
+        changed += 1
+    return changed
+
 
 _BUILTIN_NAMES = frozenset(builder().name for builder in _BUILDERS)
 LEGACY_BUILTIN_NAMES = frozenset(
@@ -1237,6 +1365,9 @@ def ensure_builtin_presets(storage: Any) -> int:
         upgraded_profile = builtin_by_name(name)
         if upgraded_profile is not None:
             storage.update_preset(existing_profile.id, upgraded_profile)
+
+    if version < 10:
+        _upgrade_v10_definitions(storage)
 
     storage.set_preference("builtins_version", str(BUILTIN_PRESETS_VERSION))
     return created
