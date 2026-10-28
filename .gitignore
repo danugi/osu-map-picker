@@ -9,3 +9,6 @@ __pycache__/
 data/
 *.log
 .DS_Store
+build/
+dist/
+release-smoke-data*/

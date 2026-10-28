@@ -27,6 +27,7 @@ import analysis_worker
 import appearance
 import catalog
 import config
+import credentials
 import library
 import library_preset
 import evidence
@@ -135,6 +136,7 @@ SETTINGS_SECTIONS = (
     "ranking",
     "feedback",
     "appearance",
+    "api",
     "diagnostics",
 )
 SETTINGS_LABELS = {
@@ -144,6 +146,7 @@ SETTINGS_LABELS = {
     "ranking": "⚖️ Ранжирование",
     "feedback": "⭐ Оценки",
     "appearance": "🎨 Оформление",
+    "api": "🔑 API",
     "diagnostics": "🩺 Диагностика",
 }
 NAV_ALIASES = {
@@ -170,6 +173,7 @@ NAV_SETTINGS_SECTION = {
     "filters": "filters",
     "ranking": "ranking",
     "appearance": "appearance",
+    "api": "api",
     "diagnostics": "diagnostics",
     "settings": "feedback",
     "📦 Пресеты": "presets",
@@ -656,10 +660,12 @@ def _sidebar(store: Storage) -> str:
     try:
         api_config = config.load_api_config()
         configured = api_config.configured
+        source = _api_source_label(api_config.source)
     except ValueError:
         configured = False
+        source = "ошибка конфигурации"
     st.sidebar.caption(
-        "API: " + ("настроен" if configured else "не настроен (.env)")
+        "API: " + (f"настроен · {source}" if configured else "не настроен")
     )
     st.sidebar.caption(f"БД: {store.path.name}")
     return page
@@ -3608,7 +3614,8 @@ def page_search(store: Storage, cfg: PresetConfig) -> None:
         st.error(f"Некорректная конфигурация API: {exc}")
     if not configured:
         st.warning(
-            "Онлайн-поиск недоступен без OSU_CLIENT_ID / OSU_CLIENT_SECRET. "
+            "Онлайн-поиск недоступен без OSU_CLIENT_ID / OSU_CLIENT_SECRET "
+            "или сохранённых credentials. Настройте их в «Настройки → API». "
             "Обзор и библиотека работают по локальному каталогу SQLite."
         )
 
@@ -4721,40 +4728,44 @@ def page_library(store: Storage, cfg: PresetConfig) -> None:
                         else None
                     ),
                 )
-    navigation = st.columns([1.0, 1.0, 2.5, 1.0, 1.0])
+    navigation = st.columns([0.55, 0.55, 3.6, 0.55, 0.55])
     if navigation[0].button(
-        "← Назад",
+        "←",
         key="library_prev",
         disabled=page.page <= 1,
         use_container_width=True,
+        help="Предыдущая страница",
     ):
         st.session_state["library_page"] = page.page - 1
         st.rerun()
     if navigation[1].button(
-        "Вперёд →",
+        "→",
         key="library_next",
         disabled=page.page >= page.pages,
         use_container_width=True,
+        help="Следующая страница",
     ):
         st.session_state["library_page"] = page.page + 1
         st.rerun()
     navigation[2].caption(
-        f"Страница {page.page} из {page.pages} · "
+        f"{page.page} / {page.pages} · Страница {page.page} из {page.pages} · "
         f"{page.total_sets} beatmapsets / {page.total_difficulties} difficulty"
     )
     if navigation[3].button(
-        "В начало",
+        "⇤",
         key="library_first",
         disabled=page.page <= 1,
         use_container_width=True,
+        help="В начало",
     ):
         st.session_state["library_page"] = 1
         st.rerun()
     if navigation[4].button(
-        "В конец",
+        "⇥",
         key="library_last",
         disabled=page.page >= page.pages,
         use_container_width=True,
+        help="В конец",
     ):
         st.session_state["library_page"] = page.pages
         st.rerun()
@@ -5407,6 +5418,257 @@ def page_feedback(store: Storage) -> None:
 # ---------------------------------------------------------------------------
 
 
+API_SETUP_LINK = "https://osu.ppy.sh/home/account/edit#new-oauth-application"
+
+
+def _api_source_label(source: str) -> str:
+    return {
+        "environment": "переменные окружения / .env",
+        "local": "Windows Credential Manager",
+        "none": "не настроен",
+    }.get(source, source)
+
+
+def _redact_secret(text: str, secret: str) -> str:
+    if secret:
+        return str(text).replace(secret, "[секрет скрыт]")
+    return str(text)
+
+
+def _validate_api_credentials(client_id: str, client_secret: str) -> str | None:
+    """Return a safe error message, or None when OAuth succeeds.
+
+    The network operation happens only from an explicit form submit. Tokens and
+    the secret are never returned, logged, or placed in Streamlit state after
+    the form is cleared.
+    """
+
+    client_id = client_id.strip()
+    client_secret = client_secret.strip()
+    if not client_id or not client_secret:
+        return "Client ID и Client Secret не могут быть пустыми."
+    if not client_id.isdigit():
+        return "Client ID должен состоять только из цифр."
+    try:
+        api_config = config.ApiConfig(
+            client_id=client_id,
+            client_secret=client_secret,
+            source="input",
+        )
+        with OsuApiClient(api_config) as client:
+            outcome = client.check_connection()
+    except (OsuApiError, ValueError) as exc:
+        message = (
+            exc.user_message() if isinstance(exc, OsuApiError) else str(exc)
+        )
+        return _redact_secret(message, client_secret)
+    if outcome.get("ok"):
+        return None
+    return _redact_secret(outcome.get("message", "OAuth не принял credentials."), client_secret)
+
+
+def _save_api_credentials(client_id: str, client_secret: str) -> str | None:
+    try:
+        credentials.save_credentials(client_id, client_secret)
+    except credentials.CredentialError as exc:
+        return str(exc)
+    return None
+
+
+def _api_form_key(prefix: str, name: str) -> str:
+    version = int(st.session_state.get("_api_form_version", 0))
+    suffix = "" if version == 0 else f"__v{version}"
+    return f"{prefix}_{name}{suffix}"
+
+
+def _clear_api_form_state(prefix: str) -> None:
+    st.session_state["_api_form_version"] = (
+        int(st.session_state.get("_api_form_version", 0)) + 1
+    )
+    for key in list(st.session_state.keys()):
+        if str(key).startswith(f"{prefix}_"):
+            st.session_state.pop(key, None)
+
+
+def _render_api_status(
+    api_config: config.ApiConfig | None = None,
+    *,
+    error: str = "",
+) -> config.ApiConfig | None:
+    if api_config is None and not error:
+        try:
+            api_config = config.load_api_config()
+        except ValueError as exc:
+            error = str(exc)
+    if error:
+        st.error(f"Конфигурация API: {error}")
+    if api_config is not None and api_config.credential_error:
+        st.warning(api_config.credential_error)
+    if api_config is not None and api_config.configured:
+        st.success(
+            "API настроен. Источник: "
+            f"{_api_source_label(api_config.source)}. "
+            "Client Secret и OAuth-токен не отображаются."
+        )
+    else:
+        st.info(
+            "API не настроен. Поиск, библиотека, избранное и история работают "
+            "локально; для онлайн-поиска настройте свои osu! OAuth credentials."
+        )
+    return api_config
+
+
+def _render_api_setup_form(
+    store: Storage,
+    *,
+    prefix: str,
+    first_run: bool = False,
+) -> None:
+    source_help = (
+        "Если заданы полные OSU_CLIENT_ID и OSU_CLIENT_SECRET (в окружении "
+        "или .env), они имеют приоритет над сохранёнными локально. Если "
+        "задана только одна переменная, приложение не смешивает источники и "
+        "сообщает об ошибке."
+    )
+    with st.form(f"{prefix}_form", clear_on_submit=False):
+        st.text_input(
+            "Client ID",
+            key=_api_form_key(prefix, "client_id"),
+            placeholder="например, 123456",
+            help="Числовой Client ID вашего OAuth-приложения osu!.",
+        )
+        st.text_input(
+            "Client Secret",
+            key=_api_form_key(prefix, "secret"),
+            type="password",
+            placeholder="секрет не отображается",
+            help="Секрет сохраняется только в Windows Credential Manager.",
+        )
+        st.caption(source_help)
+        submitted = st.form_submit_button(
+            "Проверить и сохранить",
+            type="primary",
+            use_container_width=True,
+        )
+    if not submitted:
+        return
+    client_id = str(
+        st.session_state.get(_api_form_key(prefix, "client_id"), "")
+    ).strip()
+    client_secret = str(
+        st.session_state.get(_api_form_key(prefix, "secret"), "")
+    )
+    error = _validate_api_credentials(client_id, client_secret)
+    if error:
+        st.error(f"Credentials не сохранены: {error}")
+        return
+    save_error = _save_api_credentials(client_id, client_secret)
+    if save_error:
+        st.error(f"Credentials не сохранены: {save_error}")
+        return
+    store.set_preference("api_setup_dismissed", "1")
+    _clear_api_form_state(prefix)
+    _flash(
+        "OAuth проверен, credentials сохранены в Windows Credential Manager."
+        if not first_run
+        else "OAuth проверен. Можно пользоваться онлайн-поиском."
+    )
+    st.rerun()
+
+
+def _needs_first_run_api_setup(store: Storage) -> bool:
+    if not config.is_portable_build():
+        return False
+    if store.get_preference("api_setup_dismissed") == "1":
+        return False
+    try:
+        api_config = config.load_api_config()
+    except ValueError:
+        return True
+    return not api_config.configured
+
+
+def _render_first_run_api_setup(store: Storage) -> None:
+    st.markdown(
+        "<div class='page-kicker'>ПЕРВЫЙ ЗАПУСК</div>",
+        unsafe_allow_html=True,
+    )
+    st.title("Добро пожаловать в osu! Map Picker")
+    st.markdown(
+        "Это локальное приложение. Каталог, настройки и credentials остаются "
+        "на этом компьютере; облачный аккаунт не требуется."
+    )
+    st.info(
+        "Без API доступны локальная библиотека, пресеты, фильтры, история, "
+        "избранное и анализ уже сохранённых карт. Онлайн-поиск включается "
+        "только после настройки OAuth."
+    )
+    st.markdown(
+        f"Создайте OAuth-приложение в [настройках osu!]({API_SETUP_LINK}). "
+        "Для Client Credentials callback URL можно оставить пустым. "
+        "Скопируйте Client ID и Client Secret сюда — секрет попадёт только в "
+        "Windows Credential Manager."
+    )
+    _render_api_setup_form(store, prefix="firstrun_api", first_run=True)
+    if st.button(
+        "Продолжить без API",
+        key="firstrun_api_skip",
+        use_container_width=True,
+        help="Локальные функции останутся доступны; API можно настроить позже "
+        "в «Настройки → API».",
+    ):
+        store.set_preference("api_setup_dismissed", "1")
+        st.rerun()
+    st.caption(
+        "Приложение не запрашивает API-секреты у посетителей публичного "
+        "хостинга. Этот экран предназначен для локальной portable-сборки."
+    )
+
+
+def page_api(store: Storage) -> None:
+    st.header("🔑 osu! API")
+    st.caption(
+        "Личные OAuth Client Credentials. Секрет хранится в Windows Credential "
+        "Manager и никогда не попадает в SQLite, экспорт, логи или имена файлов."
+    )
+    try:
+        api_config = config.load_api_config()
+    except ValueError as exc:
+        api_config = None
+        _render_api_status(error=str(exc))
+    else:
+        _render_api_status(api_config)
+    local_status = credentials.status()
+    if local_status.error:
+        st.warning(local_status.error)
+    st.markdown(
+        f"1. Создайте приложение в [настройках osu!]({API_SETUP_LINK}).  \n"
+        "2. Callback URL можно оставить пустым: используется OAuth 2.0 "
+        "Client Credentials, без входа пользователя.  \n"
+        "3. Скопируйте Client ID и Client Secret в форму ниже."
+    )
+    _render_api_setup_form(store, prefix="api_settings")
+    if st.button(
+        "Удалить сохранённые credentials",
+        key="api_delete_credentials",
+        disabled=not local_status.configured,
+        help="Удаляет запись только из Windows Credential Manager. "
+        "Переменные окружения и данные SQLite не изменяются.",
+    ):
+        try:
+            credentials.delete_credentials()
+        except credentials.CredentialError as exc:
+            st.error(str(exc))
+        else:
+            _flash("Сохранённые credentials удалены.")
+            st.rerun()
+    st.caption(
+        "Переменные окружения и .env остаются доступны для разработки и "
+        "развёртывания. Полная пара env имеет приоритет над локальной "
+        "записью; частичная пара считается ошибкой конфигурации."
+    )
+
+
 def page_settings(store: Storage, cfg: PresetConfig) -> None:
     _page_intro(
         "WORKSPACE",
@@ -5443,6 +5705,8 @@ def page_settings(store: Storage, cfg: PresetConfig) -> None:
         page_feedback(store)
     elif selected == "appearance":
         page_appearance(store)
+    elif selected == "api":
+        page_api(store)
     elif selected == "diagnostics":
         page_diagnostics(store, cfg)
 
@@ -5950,15 +6214,19 @@ def page_diagnostics(store: Storage, cfg: PresetConfig) -> None:
     try:
         api_config = config.load_api_config()
     except ValueError as exc:
-        st.error(f".env: {exc}")
+        st.error(f"Конфигурация API: {exc}")
         api_config = None
     if api_config is None or not api_config.configured:
         st.warning(
             "Credentials не заданы. Реальная интеграция не проверена в этой "
             "установке; тесты используют httpx.MockTransport и не ходят в сеть."
         )
+        st.caption("Настроить API можно в «Настройки → API».")
     else:
-        st.success("Credentials заданы (значения скрыты).")
+        st.success(
+            "Credentials заданы (значения скрыты). Источник: "
+            f"{_api_source_label(api_config.source)}."
+        )
         if st.button("Проверить OAuth и соединение", key="diag_check_api"):
             try:
                 client = _get_api(api_config)
@@ -6182,7 +6450,15 @@ def main() -> None:
         layout="wide",
         initial_sidebar_state="expanded",
     )
-    store = load_storage(str(config.db_path()))
+    try:
+        config.ensure_data_dir()
+        store = load_storage(str(config.db_path()))
+    except (ValueError, OSError, StorageError) as exc:
+        st.error(
+            "Не удалось открыть локальные данные. Существующая база не будет "
+            f"заменена пустой. Путь: {config.db_path()}. Причина: {exc}"
+        )
+        st.stop()
     analysis_worker.ensure_worker(store)
     _render_appearance(store)
 
@@ -6200,6 +6476,10 @@ def main() -> None:
             "diag_restore_file",
         ):
             st.session_state.pop(key, None)
+
+    if _needs_first_run_api_setup(store):
+        _render_first_run_api_setup(store)
+        return
 
     if "active_preset_id" not in st.session_state:
         pid = _choose_preset(store)

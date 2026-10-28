@@ -522,6 +522,15 @@ class AnalysisWorker:
 
     def _maybe_discovery(self, store: Storage) -> None:
         requested = store.consume_worker_discovery_request()
+        # The portable launcher opens the browser without making an osu! API
+        # request. Scheduled discovery is deferred until the user explicitly
+        # requests it from the Analysis page; queued analysis work is separate.
+        if (
+            not requested
+            and os.getenv("OSU_PICKER_DEFER_AUTO_DISCOVERY", "").strip()
+            in {"1", "true", "yes"}
+        ):
+            return
         if not _configured():
             if requested:
                 store.set_worker_error("Discovery запрошен, но API не настроен.")

@@ -250,10 +250,23 @@ class Storage:
             raise StorageError(
                 "Для этого приложения нужен файл БД, :memory: не поддерживается"
             )
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.connection() as conn:
-            conn.execute("PRAGMA journal_mode = WAL")
-        self._migrate()
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise StorageError(
+                f"Папка для базы данных недоступна: {self.path.parent}. "
+                f"Причина: {config.os_error_detail(exc)}. Существующая база "
+                "не будет заменена пустой."
+            ) from exc
+        try:
+            with self.connection() as conn:
+                conn.execute("PRAGMA journal_mode = WAL")
+            self._migrate()
+        except sqlite3.Error as exc:
+            raise StorageError(
+                f"Не удалось открыть или проверить базу данных: {self.path}. "
+                f"Причина: {config.os_error_detail(exc)}. Файл не заменён."
+            ) from exc
 
     # -- infrastructure ----------------------------------------------------
     @contextlib.contextmanager

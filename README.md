@@ -324,6 +324,21 @@ OSU_CLIENT_SECRET=ваш_client_secret
 SQLite и не попадают в экспорт. Приложение использует OAuth 2.0 Client
 Credentials и официальный API v2.
 
+В portable-сборке те же credentials можно ввести на первом запуске или в
+**Настройки → 🔑 API**. Значения сохраняются только в Windows Credential
+Manager; при недоступном безопасном backend приложение не делает plaintext
+fallback и продолжает работать офлайн. Форма проверяет OAuth перед сохранением.
+
+Приоритет источников явный:
+
+1. полная пара `OSU_CLIENT_ID` + `OSU_CLIENT_SECRET` (окружение или `.env`);
+2. сохранённая запись Windows Credential Manager;
+3. API не настроен, доступен локальный каталог.
+
+Если задана только одна переменная, это ошибка конфигурации: приложение не
+смешивает её с локальным секретом. `.env` читается рядом с исполняемым файлом
+portable-сборки или из корня checkout при разработке.
+
 Для ручной проверки реального контракта `/beatmapsets/search` есть отдельный
 smoke-скрипт, который **не запускается pytest-ом** и не печатает секреты:
 
@@ -365,7 +380,10 @@ Streamlit, координируется через SQLite (`analysis_queue`,
 | `OSU_PICKER_WORKER=0` | отключить фоновый worker (по умолчанию включён) |
 | `OSU_PICKER_ANALYSIS_CONCURRENCY` | параллельные analysis jobs, 1–8 (по умолчанию 4) |
 | `OSU_PICKER_DB` | путь к SQLite, как и раньше |
-| `OSU_PICKER_DATA_DIR` | каталог данных и `gameplay_cache` |
+| `OSU_PICKER_DATA_DIR` | каталог БД, оформления, gameplay cache, backups и logs |
+| `OSU_PICKER_PORTABLE=1` | включить первый API-экран в source-checkout |
+| `OSU_PICKER_HOSTED=1` | не показывать запрос личных API-секретов |
+| `OSU_PICKER_DEFER_AUTO_DISCOVERY=1` | не запускать scheduled discovery при старте |
 
 Внутренние ограничения worker: batch 8 difficulty, до 4 параллельных
 analysis jobs, download starts не чаще одного раза в секунду, lease 180 с,
@@ -377,6 +395,132 @@ analysis jobs, download starts не чаще одного раза в секун
 Пауза, возобновление, переочередь и запрос discovery доступны на странице
 **🧪 Анализ**. Все сетевые загрузки и разбор `.osu` идут в worker-потоке,
 а не в rerun-пути Streamlit.
+
+---
+
+## Windows source launcher
+
+### Download and prerequisites
+
+Clone or download this repository, then install **Python 3.12 or newer** from
+the official Windows installer:
+
+<https://www.python.org/downloads/windows/>
+
+During installation enable **Add python.exe to PATH**. Python is only needed
+for this source launcher; users do not need a separate packaged runtime.
+
+### Double-click launch
+
+Double-click [run.bat](run.bat). It:
+
+1. checks for Python 3.12+;
+2. creates a project-local `.venv` when needed;
+3. installs `requirements.txt` in that environment on first use;
+4. skips dependency installation on later launches when imports are available;
+5. binds Streamlit to `127.0.0.1` only;
+6. opens the app in the default browser after the local server is ready;
+7. keeps the console open while the app runs and after it stops, so failures
+   remain visible.
+
+If Python is missing, the script prints the official download link and exits
+without changing the repository or user data.
+
+### Per-user data
+
+`run.bat` selects a stable directory outside the checkout:
+
+```text
+%LOCALAPPDATA%\OsuMapPicker\
+  osu_picker.db
+  appearance\
+  gameplay_cache\
+  backups\
+  logs\launcher.log
+```
+
+If the preferred directory does not exist and cannot be created/written, the
+script explicitly falls back to `%USERPROFILE%\OsuMapPicker`. It does not
+fall back when an existing data directory fails: that directory may contain a
+database, so the app stops and preserves it. Existing databases are never
+deleted, overwritten, or replaced with empty ones.
+
+Overrides remain supported and are printed by the launcher:
+
+```powershell
+set OSU_PICKER_DATA_DIR=D:\osu-picker-data
+set OSU_PICKER_DB=D:\osu-picker-data\my.db
+run.bat
+```
+
+Each Windows user gets their own `%LOCALAPPDATA%`/profile data by default.
+
+### API credentials
+
+Developers can keep using a repository-root `.env` copied from `.env.example`:
+
+```dotenv
+OSU_CLIENT_ID=...
+OSU_CLIENT_SECRET=...
+```
+
+In the source launcher, `run.bat` enables the first-run setup screen. Users can
+also open **Настройки → 🔑 API** and save credentials in Windows Credential
+Manager. No Python source editing and no SQLite credential storage are needed.
+
+Precedence is:
+
+1. complete `OSU_CLIENT_ID` + `OSU_CLIENT_SECRET` pair from the environment or
+   `.env`;
+2. Windows Credential Manager entry saved by the app;
+3. API not configured, with local catalog functionality still available.
+
+A partial environment pair is a configuration error; it is not silently mixed
+with a saved secret. Never commit `.env` or real credentials.
+
+### Backup and restore
+
+Use **Настройки → Диагностика**:
+
+- **Создать backup сейчас** creates a SQLite backup under the data directory;
+- **Скачать backup** downloads a validated copy;
+- restore validates `PRAGMA integrity_check` and creates a safety backup before
+  replacing the active database.
+
+For a manual restore, close the app, keep a copy of the current
+`osu_picker.db`, then copy a validated backup over it. Do not delete the old
+file until the new one starts successfully.
+
+### Troubleshooting the data directory
+
+The current validation now checks:
+
+- whether the path exists;
+- whether it is a directory rather than a file;
+- whether it is writable, using a temporary write probe that is removed;
+- the actual `OSError`/`WinError`/`errno` text.
+
+If startup reports an error, read the complete operation and OS cause in the
+message. Common causes are a path occupied by a file, OneDrive/enterprise
+permission restrictions, antivirus/Controlled Folder Access, or a read-only
+location. Set a writable alternative explicitly:
+
+```powershell
+set OSU_PICKER_DATA_DIR=%USERPROFILE%\OsuMapPicker
+run.bat
+```
+
+`OSU_PICKER_DB` likewise points at a specific database file. An existing
+database at that path is preserved; if its parent cannot be opened, startup
+stops instead of creating a new database elsewhere.
+
+### Verification status
+
+`run.bat` was executed from this checkout with the existing `.venv`; it skipped
+the dependency reinstall, bound to `127.0.0.1`, launched the app, and the
+first-run/offline UI was exercised through Chromium against that source
+launch. A clean machine with no Python and a fresh clone were **not** available
+to test.
 
 ---
 
@@ -510,7 +654,7 @@ stub-клиент, `gameplay.py` — на локальном образце `.os
   сохранённых карт в «Весь каталог» Библиотеки;
 - Streamlit AppTest для шести страниц и всех разделов настроек.
 
-Всего в текущем наборе **484 теста**, все проходят без сети.
+Всего в текущем наборе **513 тестов**, все проходят без сети.
 
 ### Что проверено, а что нет
 

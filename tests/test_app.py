@@ -60,6 +60,7 @@ SETTINGS_SECTIONS = (
     "ranking",
     "feedback",
     "appearance",
+    "api",
     "diagnostics",
 )
 
@@ -2503,3 +2504,153 @@ def test_search_warns_when_saved_builtin_differs_from_defaults(app_env) -> None:
         item.label == "Чем сохранённый пресет отличается"
         for item in at.expander
     )
+
+
+def test_portable_first_run_offers_offline_continue(app_env, monkeypatch):
+    monkeypatch.setenv("OSU_PICKER_PORTABLE", "1")
+    monkeypatch.setattr(
+        app_module.config,
+        "load_api_config",
+        lambda: app_module.config.ApiConfig(),
+    )
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.run()
+    assert not at.exception, _texts(at)
+    assert "Добро пожаловать в osu! Map Picker" in [
+        item.value for item in at.title
+    ]
+    assert _button(at, "firstrun_api_skip") is not None
+    _button(at, "firstrun_api_skip").click().run()
+    assert not at.exception, _texts(at)
+    assert "Добро пожаловать в osu! Map Picker" not in [
+        item.value for item in at.title
+    ]
+    assert any(button.key == "nav_search" for button in at.button)
+    store = Storage(app_env)
+    assert store.get_preference("api_setup_dismissed") == "1"
+
+
+def test_api_settings_validates_then_saves_without_leaking_secret(
+    app_env, monkeypatch
+):
+    saved: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        osu_api.OsuApiClient,
+        "check_connection",
+        lambda self: {"ok": True, "message": "ok"},
+    )
+    monkeypatch.setattr(
+        app_module.credentials,
+        "save_credentials",
+        lambda client_id, secret: saved.append((client_id, secret)),
+    )
+    monkeypatch.setattr(
+        app_module.config,
+        "load_api_config",
+        lambda: app_module.config.ApiConfig(),
+    )
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.session_state["nav"] = "settings"
+    at.session_state["settings_section"] = "api"
+    at.run()
+    assert not at.exception, _texts(at)
+    next(
+        item for item in at.text_input if item.key == "api_settings_client_id"
+    ).set_value("12345")
+    next(
+        item for item in at.text_input if item.key == "api_settings_secret"
+    ).set_value("super-secret-value")
+    next(
+        item for item in at.button if item.label == "Проверить и сохранить"
+    ).click().run()
+    assert not at.exception, _texts(at)
+    assert saved == [("12345", "super-secret-value")]
+    assert "super-secret-value" not in _texts(at)
+    store = Storage(app_env)
+    assert store.get_preference("api_setup_dismissed") == "1"
+
+
+def test_api_settings_invalid_credentials_are_safe(app_env, monkeypatch):
+    saved: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        osu_api.OsuApiClient,
+        "check_connection",
+        lambda self: {"ok": False, "message": "OAuth отклонил credentials"},
+    )
+    monkeypatch.setattr(
+        app_module.credentials,
+        "save_credentials",
+        lambda client_id, secret: saved.append((client_id, secret)),
+    )
+    monkeypatch.setattr(
+        app_module.config,
+        "load_api_config",
+        lambda: app_module.config.ApiConfig(),
+    )
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.session_state["nav"] = "settings"
+    at.session_state["settings_section"] = "api"
+    at.run()
+    next(
+        item for item in at.text_input if item.key == "api_settings_client_id"
+    ).set_value("12345")
+    next(
+        item for item in at.text_input if item.key == "api_settings_secret"
+    ).set_value("super-secret-value")
+    next(
+        item for item in at.button if item.label == "Проверить и сохранить"
+    ).click().run()
+    assert not at.exception, _texts(at)
+    text = _texts(at)
+    assert "OAuth отклонил credentials" in text
+    assert "super-secret-value" not in text
+    assert saved == []
+
+
+def test_api_validation_redacts_secret_from_error(monkeypatch):
+    monkeypatch.setattr(
+        osu_api.OsuApiClient,
+        "check_connection",
+        lambda self: {
+            "ok": False,
+            "message": "bad credential super-secret-value",
+        },
+    )
+    message = app_module._validate_api_credentials(
+        "12345", "super-secret-value"
+    )
+    assert message is not None
+    assert "super-secret-value" not in message
+    assert "[секрет скрыт]" in message
+
+
+def test_unavailable_data_directory_is_reported_without_empty_db(
+    app_env, tmp_path, monkeypatch
+):
+    blocker = tmp_path / "blocked-data"
+    blocker.write_text("not a directory", encoding="utf-8")
+    monkeypatch.setenv("OSU_PICKER_DATA_DIR", str(blocker))
+    at = AppTest.from_file(APP, default_timeout=60)
+    at.run()
+    assert not at.exception, _texts(at)
+    assert any("Папка данных недоступна" in item.value for item in at.error)
+    assert any("не будет" in item.value for item in at.error)
+
+
+def test_hosted_mode_never_prompts_for_personal_api_credentials(
+    app_env, monkeypatch
+):
+    monkeypatch.setenv("OSU_PICKER_PORTABLE", "1")
+    monkeypatch.setenv("OSU_PICKER_HOSTED", "1")
+    monkeypatch.setattr(
+        app_module.config,
+        "load_api_config",
+        lambda: app_module.config.ApiConfig(),
+    )
+    at = AppTest.from_file(APP, default_timeout=60)
+    at.run()
+    assert not at.exception, _texts(at)
+    assert not any("Добро пожаловать" in str(item.value) for item in at.title)
+    assert any(button.key == "nav_search" for button in at.button)

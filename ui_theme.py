@@ -908,6 +908,21 @@ section[data-testid="stSidebar"] .block-container {
   text-transform: none;
   transform: none !important;
 }
+[class*="st-key-library_prev"] .stButton > button,
+[class*="st-key-library_next"] .stButton > button,
+[class*="st-key-library_first"] .stButton > button,
+[class*="st-key-library_last"] .stButton > button {
+  min-height: 30px !important;
+  height: 30px !important;
+  padding: 0.05rem 0.25rem !important;
+  font-size: 1rem !important;
+  line-height: 1 !important;
+}
+[class*="st-key-library_prev"] [data-testid="stCaptionContainer"],
+[class*="st-key-library_next"] [data-testid="stCaptionContainer"] {
+  margin-top: 0;
+}
+
 .st-key-site_nav .stButton > button:hover {
   color: var(--osu-text) !important;
   background: var(--osu-surface) !important;

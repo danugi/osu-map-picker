@@ -8,13 +8,48 @@ to the database, logs, or exported settings.
 from __future__ import annotations
 
 import os
+import sys
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-load_dotenv(PROJECT_ROOT / ".env")
+
+
+def is_frozen() -> bool:
+    """True inside a PyInstaller onedir build."""
+
+    return bool(getattr(sys, "frozen", False))
+
+
+def app_dir() -> Path:
+    """Directory beside the executable, or the source checkout."""
+
+    if is_frozen():
+        return Path(sys.executable).resolve().parent
+    return PROJECT_ROOT
+
+
+def is_portable_build() -> bool:
+    """Whether first-run desktop setup should be shown.
+
+    Source/development runs and hosted deployments are not prompted.  The
+    environment switch is useful for testing a source checkout as a portable
+    build; it is documented as a local-only release switch.
+    """
+
+    if os.getenv("OSU_PICKER_HOSTED", "").strip().lower() in {"1", "true", "yes"}:
+        return False
+    if is_frozen():
+        return True
+    return os.getenv("OSU_PICKER_PORTABLE", "").strip() in {"1", "true", "yes"}
+
+
+# .env is loaded from beside the executable (portable) or the checkout.  It is
+# deliberately not read from PyInstaller's temporary extraction directory.
+load_dotenv(app_dir() / ".env")
 
 APP_NAME = "Personal osu! Map Picker"
 APP_VERSION = "0.4.0"
@@ -131,9 +166,114 @@ DEFAULT_RELEVANCE_THRESHOLD = 0.55
 DEFAULT_DATA_DIR = PROJECT_ROOT / "data"
 
 
+class DataDirectoryError(ValueError):
+    """Data directory cannot be created/verified, including the OS cause."""
+
+    def __init__(
+        self,
+        path: Path,
+        operation: str,
+        cause: OSError | None = None,
+        *,
+        detail: str | None = None,
+    ):
+        self.path = Path(path)
+        self.operation = operation
+        self.cause = cause
+        explanation = (
+            detail
+            if detail is not None
+            else os_error_detail(cause)
+            if cause is not None
+            else "неизвестно"
+        )
+        super().__init__(
+            f"Папка данных недоступна: {self.path}. Операция: {operation}. "
+            f"Причина: {explanation}. Существующая база не будет перезаписана "
+            "или заменена пустой."
+        )
+
+
+def os_error_detail(exc: OSError | BaseException) -> str:
+    """Human-readable OS error including errno/WinError; never secrets."""
+
+    parts: list[str] = []
+    winerror = getattr(exc, "winerror", None)
+    errno_value = getattr(exc, "errno", None)
+    if winerror is not None:
+        parts.append(f"WinError {winerror}")
+    if errno_value is not None:
+        parts.append(f"errno {errno_value}")
+    text = str(exc).strip()
+    if text:
+        parts.append(text)
+    return "; ".join(parts) or type(exc).__name__
+
+
+def portable_data_dir() -> Path:
+    """Stable per-user location for packaged builds.
+
+    Never use ``sys._MEIPASS`` here: that directory is deleted by PyInstaller
+    when the process exits and must not contain persistent user data.
+    """
+
+    local_appdata = os.getenv("LOCALAPPDATA", "").strip()
+    if local_appdata:
+        base = Path(local_appdata)
+    else:
+        base = Path.home() / "AppData" / "Local"
+    return base / "OsuMapPicker"
+
+
 def data_dir() -> Path:
     raw = os.getenv("OSU_PICKER_DATA_DIR", "").strip()
-    return Path(raw).expanduser() if raw else DEFAULT_DATA_DIR
+    if raw:
+        return Path(raw).expanduser()
+    if is_frozen():
+        return portable_data_dir()
+    return DEFAULT_DATA_DIR
+
+
+def ensure_data_dir() -> Path:
+    """Create and write-probe the configured data directory.
+
+    This is deliberately not a fallback mechanism. If a path exists but is not
+    a directory, is read-only, or cannot be written, the caller receives the
+    real OS cause. The database/backups inside an existing directory are never
+    touched or replaced.
+    """
+
+    path = data_dir()
+    if path.exists() and not path.is_dir():
+        raise DataDirectoryError(
+            path,
+            "проверка типа пути",
+            detail="путь существует, но не является папкой",
+        )
+    if not path.exists():
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise DataDirectoryError(path, "создание папки", exc) from exc
+    if not path.is_dir():
+        raise DataDirectoryError(path, "проверка папки")
+    probe = (
+        path
+        / f".osu-map-picker-write-test-{os.getpid()}-{uuid.uuid4().hex}"
+    )
+    try:
+        with probe.open("x", encoding="utf-8") as handle:
+            handle.write("write probe")
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError as exc:
+        raise DataDirectoryError(path, "проверка записи", exc) from exc
+    finally:
+        try:
+            probe.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return path
 
 
 def db_path() -> Path:
@@ -147,6 +287,10 @@ def backups_dir() -> Path:
     return data_dir() / "backups"
 
 
+def logs_dir() -> Path:
+    return data_dir() / "logs"
+
+
 @dataclass(frozen=True)
 class ApiConfig:
     """OAuth client-credentials configuration. Never log `client_secret`."""
@@ -158,6 +302,10 @@ class ApiConfig:
     max_retries: int = DEFAULT_MAX_RETRIES
     api_base: str = OSU_API_BASE
     token_url: str = OSU_TOKEN_URL
+    # "environment", "local" or "none". The secret itself is never included
+    # in diagnostics or error text.
+    source: str = "none"
+    credential_error: str = ""
 
     @property
     def configured(self) -> bool:
@@ -166,7 +314,8 @@ class ApiConfig:
     def validate(self) -> None:
         if not self.configured:
             raise ValueError(
-                "OSU_CLIENT_ID и OSU_CLIENT_SECRET должны быть заданы в .env"
+                "Client ID и Client Secret должны быть заданы в Настройки → "
+                "API или в OSU_CLIENT_ID / OSU_CLIENT_SECRET."
             )
         if self.timeout <= 0:
             raise ValueError("timeout должен быть больше нуля")
@@ -174,6 +323,37 @@ class ApiConfig:
             raise ValueError("min_interval не может быть отрицательным")
         if self.max_retries < 0:
             raise ValueError("max_retries не может быть отрицательным")
+
+
+def _credential_source(
+    env_id: str, env_secret: str
+) -> tuple[str, str, str, str]:
+    """Resolve explicit env precedence over locally saved credentials.
+
+    Returns ``(client_id, client_secret, source, error)``.  A complete
+    environment pair always wins.  A partial environment pair is an explicit
+    configuration error; it is never silently completed from Credential
+    Manager.
+    """
+
+    if env_id and env_secret:
+        return env_id, env_secret, "environment", ""
+    if env_id or env_secret:
+        raise ValueError(
+            "OSU_CLIENT_ID и OSU_CLIENT_SECRET должны быть заданы вместе "
+            "(или оба удалены, чтобы использовать локальные credentials)."
+        )
+    try:
+        import credentials as credential_store
+    except ImportError:
+        return "", "", "none", ""
+    try:
+        saved = credential_store.load_credentials()
+    except credential_store.CredentialError as exc:
+        return "", "", "none", str(exc)
+    if saved is None:
+        return "", "", "none", ""
+    return saved.client_id, saved.client_secret, "local", ""
 
 
 def load_api_config() -> ApiConfig:
@@ -195,12 +375,19 @@ def load_api_config() -> ApiConfig:
         except ValueError as exc:
             raise ValueError(f"{name} должен быть целым числом") from exc
 
+    env_id = os.getenv("OSU_CLIENT_ID", "").strip()
+    env_secret = os.getenv("OSU_CLIENT_SECRET", "").strip()
+    client_id, client_secret, source, credential_error = _credential_source(
+        env_id, env_secret
+    )
     return ApiConfig(
-        client_id=os.getenv("OSU_CLIENT_ID", "").strip(),
-        client_secret=os.getenv("OSU_CLIENT_SECRET", "").strip(),
+        client_id=client_id,
+        client_secret=client_secret,
         timeout=_float("OSU_REQUEST_TIMEOUT", DEFAULT_REQUEST_TIMEOUT),
         min_interval=_float("OSU_MIN_INTERVAL_SECONDS", DEFAULT_MIN_REQUEST_INTERVAL),
         max_retries=_int("OSU_MAX_RETRIES", DEFAULT_MAX_RETRIES),
+        source=source,
+        credential_error=credential_error,
     )
 
 
