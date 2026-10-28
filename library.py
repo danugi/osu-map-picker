@@ -79,6 +79,7 @@ SCOPE_STATES = {
 }
 
 SORT_OPTIONS = (
+    "recent_added",
     "recent_analysis",
     "stars_desc",
     "stars_asc",
@@ -88,6 +89,7 @@ SORT_OPTIONS = (
     "ranked",
 )
 SORT_LABELS = {
+    "recent_added": "Недавно добавленные",
     "recent_analysis": "Недавно проанализированные",
     "stars_desc": "Звёзды: сначала сложные",
     "stars_asc": "Звёзды: сначала простые",
@@ -98,6 +100,7 @@ SORT_LABELS = {
 }
 
 _SORT_SQL = {
+    "recent_added": "fetched_at IS NULL, fetched_at DESC, max_stars DESC",
     "recent_analysis": (
         "last_analyzed IS NULL, last_analyzed DESC, max_stars DESC"
     ),
@@ -136,6 +139,7 @@ SELECT
     bs.cover_url,
     bs.preview_url,
     bs.ranked_date,
+    bs.fetched_at,
     COALESCE(attr.star_rating, bm.difficulty_rating) AS stars,
     a.status AS analysis_status,
     a.source AS analysis_source,
@@ -512,8 +516,12 @@ def _sort_rows(rows: list[dict[str, Any]], sort: str) -> list[dict[str, Any]]:
         )
     if sort == "title":
         return sorted(rows, key=lambda row: (row["artist_key"], row["title_key"]))
-    if sort in {"ranked", "recent_analysis"}:
-        field_name = "ranked_date" if sort == "ranked" else "last_analyzed"
+    if sort in {"ranked", "recent_analysis", "recent_added"}:
+        field_name = {
+            "ranked": "ranked_date",
+            "recent_analysis": "last_analyzed",
+            "recent_added": "fetched_at",
+        }[sort]
         non_empty = [row for row in rows if row[field_name]]
         empty = [row for row in rows if not row[field_name]]
         non_empty.sort(
@@ -562,6 +570,7 @@ def query_sets(
                 "MAX(COALESCE(total_length, hit_length, 0)) AS max_length, "
                 "MAX(analyzed_at) AS last_analyzed, "
                 "MAX(ranked_date) AS ranked_date, "
+                "MAX(fetched_at) AS fetched_at, "
                 "MIN(LOWER(COALESCE(NULLIF(artist_unicode,''), artist))) "
                 "AS artist_key, "
                 "MIN(LOWER(COALESCE(NULLIF(title_unicode,''), title))) "
@@ -690,6 +699,7 @@ def query_sets(
                 "MAX(COALESCE(total_length, hit_length, 0)) AS max_length, "
                 "MAX(analyzed_at) AS last_analyzed, "
                 "MAX(ranked_date) AS ranked_date, "
+                "MAX(fetched_at) AS fetched_at, "
                 "MIN(LOWER(COALESCE(NULLIF(artist_unicode,''), artist))) "
                 "AS artist_key, "
                 "MIN(LOWER(COALESCE(NULLIF(title_unicode,''), title))) "

@@ -21,8 +21,11 @@ import osu_api
 import patterns
 import presets
 from models import (
+    Candidate,
     DifficultyAttributes,
     DiscoveryResult,
+    RankingSettings,
+    ScoredCandidate,
     SearchPage,
     SequenceAnalysis,
 )
@@ -127,6 +130,113 @@ def test_search_button_without_credentials_is_honest(app_env) -> None:
     store = Storage(app_env)
     assert store.history_count() == 0
     assert store.search_run_count() == 0
+
+
+def _result_with_cards(count: int) -> DiscoveryResult:
+    scored = []
+    for index in range(1, count + 1):
+        beatmap = make_beatmap(10_000 + index, index, version=f"Diff {index}")
+        beatmapset = make_beatmapset(
+            index,
+            title=f"Result {index}",
+            beatmaps=(beatmap,),
+        )
+        scored.append(
+            ScoredCandidate(
+                Candidate(beatmapset=beatmapset, beatmap=beatmap),
+                0.7,
+                (),
+            )
+        )
+    return DiscoveryResult(
+        scored=tuple(scored),
+        ranking_used=RankingSettings(),
+    )
+
+
+def test_search_result_expand_control_is_visible_and_works(app_env) -> None:
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.session_state["nav"] = "search"
+    at.session_state["result"] = _result_with_cards(21)
+    at.session_state["result_visible"] = 15
+    at.run()
+    assert not at.exception, _texts(at)
+    captions = [str(item.value) for item in at.caption]
+    assert any("Показано 15 из 21" in item for item in captions)
+    top = _button(at, "show_more_results_top")
+    assert top is not None
+    top.click().run()
+    assert not at.exception, _texts(at)
+    captions = [str(item.value) for item in at.caption]
+    assert any("Показано 21 из 21" in item for item in captions)
+    assert any("Все загруженные совпадения показаны" in item for item in captions)
+    assert not any(
+        item.key == "show_more_results_top" for item in at.button
+    )
+
+
+def test_expanded_search_can_show_only_new_maps(app_env) -> None:
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.session_state["nav"] = "search"
+    at.session_state["result"] = _result_with_cards(21)
+    at.session_state["result_visible"] = 15
+    at.session_state["result_new_ids"] = [1, 2, 3]
+    at.session_state["result_only_new"] = True
+    at.session_state["result_expand_notice"] = "Поиск добавил 3 новые карты."
+    at.run()
+    assert not at.exception, _texts(at)
+    captions = [str(item.value) for item in at.caption]
+    assert any("Новых: 3" in item for item in captions)
+    assert any("Показано 3 из 3" in item for item in captions)
+    assert "Поиск добавил 3 новые карты" in _texts(at)
+    toggle = _button(at, "toggle_new_results")
+    assert toggle is not None
+    toggle.click().run()
+    assert not at.exception, _texts(at)
+    assert any(
+        "Показано 15 из 21" in item.value for item in at.caption
+    )
+    assert _button(at, "toggle_new_results") is not None
+
+
+def test_search_result_short_list_explains_that_all_are_shown(app_env) -> None:
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.session_state["nav"] = "search"
+    at.session_state["result"] = _result_with_cards(12)
+    at.session_state["result_visible"] = 15
+    at.run()
+    assert not at.exception, _texts(at)
+    captions = [str(item.value) for item in at.caption]
+    assert any("Показано 12 из 12" in item for item in captions)
+    assert any("Все загруженные совпадения показаны" in item for item in captions)
+    assert not any(
+        item.key == "show_more_results_top" for item in at.button
+    )
+
+
+def test_successful_search_reveals_saved_maps_in_library(app_env) -> None:
+    store = Storage(app_env)
+    _seed_app_library(store, 2)
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.session_state["nav"] = "search"
+    at.session_state["search_local_only"] = True
+    at.run()
+    assert not at.exception, _texts(at)
+    _button(at, "run_search").click().run()
+    assert not at.exception, _texts(at)
+    assert at.session_state["library_scope"] == "all"
+    assert at.session_state["library_preset_mode"] is False
+    assert at.session_state["library_sort"] == "recent_added"
+
+    at.session_state["nav"] = "library"
+    at.run()
+    assert not at.exception, _texts(at)
+    assert at.session_state["library_scope"] == "all"
+    assert any(
+        "Поиск сохранил карты в SQLite" in item.value
+        for item in at.info
+    )
+    assert _visible_library_ids(at) == {1, 2}
 
 
 @pytest.mark.parametrize("index", range(len(NAV)))

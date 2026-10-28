@@ -359,6 +359,9 @@ def _clear_result_display() -> None:
         "result_pick_id",
         "result_display_order",
         "result_sort_mode",
+        "result_new_ids",
+        "result_only_new",
+        "result_expand_notice",
         "preview_beatmap_id",
         "random_meta",
     ):
@@ -2183,11 +2186,60 @@ def _render_gameplay_preview(
     )
 
 
+def _reveal_search_in_library() -> None:
+    """Make newly fetched sets visible instead of hiding them behind scopes."""
+
+    st.session_state["library_scope"] = "all"
+    st.session_state["library_preset_mode"] = False
+    st.session_state["library_sort"] = "recent_added"
+    st.session_state["library_page"] = 1
+    st.session_state["_library_after_search"] = True
+
+
+def _mark_search_expansion(previous_set_ids: set[int]) -> None:
+    """Remember which maps are genuinely new after an expanded API search."""
+
+    result = st.session_state.get("result")
+    if not isinstance(result, DiscoveryResult):
+        return
+    current_ids = [item.beatmapset.id for item in result.scored]
+    added = [
+        set_id for set_id in current_ids if set_id not in previous_set_ids
+    ]
+    if added:
+        st.session_state["result_new_ids"] = added
+        st.session_state["result_only_new"] = True
+        st.session_state["result_expand_notice"] = (
+            f"Расширенный поиск добавил {len(added)} новых карт. "
+            "Они сохранены в SQLite; ниже можно показать только новые."
+        )
+    else:
+        st.session_state.pop("result_new_ids", None)
+        st.session_state.pop("result_only_new", None)
+        st.session_state["result_expand_notice"] = (
+            "Расширенный поиск не нашёл новых карт: API вернул те же "
+            "совпадения после текущих фильтров и целевого гейта."
+        )
+
+
+def _run_expanded_search(store: Storage, cfg: PresetConfig) -> None:
+    result = st.session_state.get("result")
+    previous_ids = (
+        {item.beatmapset.id for item in result.scored}
+        if isinstance(result, DiscoveryResult)
+        else set()
+    )
+    if _execute_search(store, cfg, expand_limits=True):
+        _mark_search_expansion(previous_ids)
+        st.rerun()
+
+
 def _execute_search(
     store: Storage,
     cfg: PresetConfig,
     *,
     local_only: bool = False,
+    expand_limits: bool = False,
 ) -> bool:
     try:
         validate_filters(cfg.filters)
@@ -2245,18 +2297,47 @@ def _execute_search(
             notes=tuple([*cached.notes, note])[:12],
         )
         _remember_result(store, cfg, cached, surface="search")
+        _reveal_search_in_library()
         return True
 
     try:
         client = _get_api(api_config)
-        engine = DiscoveryEngine(client, store, copy.deepcopy(cfg.discovery))
-        with st.spinner("Ищу карты в osu! API: несколько стратегий и страниц…"):
+        discovery_settings = copy.deepcopy(cfg.discovery)
+        if expand_limits:
+            discovery_settings.max_requests = min(
+                60, int(discovery_settings.max_requests) + 6
+            )
+            discovery_settings.max_pages_per_strategy = min(
+                10, int(discovery_settings.max_pages_per_strategy) + 2
+            )
+            discovery_settings.max_candidates = min(
+                2000, int(discovery_settings.max_candidates) + 200
+            )
+        engine = DiscoveryEngine(client, store, discovery_settings)
+        with st.spinner(
+            "Ищу карты в osu! API: несколько стратегий и страниц…"
+            if not expand_limits
+            else "Ищу больше карт: увеличены страницы и бюджет запросов…"
+        ):
             result = engine.run(cfg.filters, cfg.ranking, record=True)
+        if expand_limits:
+            result = replace(
+                result,
+                notes=tuple(
+                    [
+                        "Поиск повторён с увеличенными лимитами страниц и "
+                        "запросов (только для этого запуска; настройки пресета "
+                        "не изменены).",
+                        *result.notes,
+                    ]
+                )[:12],
+            )
     except OsuApiError as exc:
         cached = local_fallback()
         if cached is not None and cached.scored:
             st.warning(f"osu! API: {exc.user_message()}. Показан локальный кеш.")
             _remember_result(store, cfg, cached, surface="search")
+            _reveal_search_in_library()
             return True
         st.error(f"osu! API: {exc.user_message()}")
         return False
@@ -2272,6 +2353,7 @@ def _execute_search(
         return False
 
     _remember_result(store, cfg, result, surface="search")
+    _reveal_search_in_library()
     return True
 
 
@@ -2568,13 +2650,24 @@ def _pick_random_result(store: Storage) -> None:
     result = st.session_state.get("result")
     if not isinstance(result, DiscoveryResult) or not result.scored:
         return
+    pool = list(result.scored)
+    if st.session_state.get("result_only_new"):
+        new_ids = {
+            int(value)
+            for value in (st.session_state.get("result_new_ids") or ())
+        }
+        filtered = [
+            item for item in pool if item.beatmapset.id in new_ids
+        ]
+        if filtered:
+            pool = filtered
     current = st.session_state.get("result_pick_id")
     avoid: set[int] = set()
-    if isinstance(current, int) and len(result.scored) > 1:
+    if isinstance(current, int) and len(pool) > 1:
         current_item = next(
             (
                 item
-                for item in result.scored
+                for item in pool
                 if item.beatmap.id == current
             ),
             None,
@@ -2582,7 +2675,7 @@ def _pick_random_result(store: Storage) -> None:
         if current_item is not None:
             avoid.add(current_item.beatmapset.id)
     selection = randomizer.select_random_subset(
-        result.scored,
+        pool,
         1,
         seed=secrets.randbits(64),
         avoid_ids=avoid,
@@ -2614,12 +2707,24 @@ def _reset_result_order() -> None:
     st.session_state["result_sort_mode"] = "Рекомендация"
 
 
+def _show_more_results() -> None:
+    st.session_state["result_visible"] = (
+        int(st.session_state.get("result_visible", 15)) + 15
+    )
+
+
 # ---------------------------------------------------------------------------
 # Results
 # ---------------------------------------------------------------------------
 
 
-def _render_result(store: Storage, result: DiscoveryResult) -> None:
+def _render_result(
+    store: Storage,
+    result: DiscoveryResult,
+    *,
+    cfg: PresetConfig | None = None,
+    can_expand_search: bool = False,
+) -> None:
     source = {
         "api": "osu! API",
         "mixed": "osu! API + локальный кеш",
@@ -2629,6 +2734,12 @@ def _render_result(store: Storage, result: DiscoveryResult) -> None:
         f"{result.count} карт · {source} · {result.api_requests} API-запросов"
         f" · Recommendation — внутренний порядок 0–100, не вероятность."
     )
+    if st.session_state.get("_library_after_search"):
+        st.caption(
+            "Карты сохранены в SQLite. При переходе в «Библиотеку» откроется "
+            "весь каталог с сортировкой «Недавно добавленные», включая карты, "
+            "которые ещё ждут анализа."
+        )
     with st.expander("Детали выдачи", expanded=False):
         st.caption(
             f"Запросов: {result.api_requests} (успешно "
@@ -2771,6 +2882,42 @@ def _render_result(store: Storage, result: DiscoveryResult) -> None:
         return
 
     items = list(result.scored)
+    expand_notice = st.session_state.get("result_expand_notice")
+    if expand_notice:
+        st.info(str(expand_notice))
+    new_ids = {
+        int(value)
+        for value in (st.session_state.get("result_new_ids") or ())
+    }
+    show_only_new = bool(
+        new_ids and st.session_state.get("result_only_new", False)
+    )
+    if new_ids:
+        new_cols = st.columns([2.2, 1.2, 2.2])
+        if new_cols[0].button(
+            "Показать всю выдачу" if show_only_new else "Только новые карты",
+            key="toggle_new_results",
+            use_container_width=True,
+            help="Оставить только beatmapsets, которых не было в прошлой "
+            "выдаче, или снова показать всю выдачу.",
+        ):
+            st.session_state["result_only_new"] = not show_only_new
+            st.rerun()
+        new_cols[1].caption(f"Новых: {len(new_ids)}")
+        new_cols[2].caption(
+            "Новые карты также сохранены в SQLite для локальной библиотеки."
+            if show_only_new
+            else "Показана вся выдача; новые карты отмечены в уведомлении."
+        )
+        if show_only_new:
+            items = [
+                item
+                for item in items
+                if item.beatmapset.id in new_ids
+            ]
+            if not items:
+                items = list(result.scored)
+                show_only_new = False
     weights = result.ranking_used.skill_weights if result.ranking_used else {}
     order = st.session_state.get("result_display_order")
     if not isinstance(order, list):
@@ -2903,6 +3050,39 @@ def _render_result(store: Storage, result: DiscoveryResult) -> None:
     else:
         shown = items[:visible]
 
+    if picked is None:
+        total = len(items)
+        summary_cols = st.columns([2.4, 1.4, 1.2])
+        summary_cols[0].caption(
+            f"Показано {len(shown)} из {total}. Сортировка не меняет "
+            "фильтры, score и целевой гейт."
+        )
+        if total > visible:
+            remaining = total - len(shown)
+            summary_cols[1].button(
+                f"Показать ещё {min(15, remaining)}",
+                key="show_more_results_top",
+                on_click=_show_more_results,
+                use_container_width=True,
+            )
+        else:
+            summary_cols[1].caption("Все загруженные совпадения показаны")
+            if can_expand_search and cfg is not None:
+                if summary_cols[2].button(
+                    "Искать больше",
+                    key="expand_search_limits",
+                    use_container_width=True,
+                    help="Повторит API-поиск с увеличенным числом страниц и "
+                    "бюджетом запросов. Изменения лимитов действуют только "
+                    "на этот запуск и не сохраняются в пресет.",
+                ):
+                    _run_expanded_search(store, cfg)
+            else:
+                summary_cols[2].caption(
+                    "Больше карт после фильтров и гейта нет; причины — в "
+                    "«Почему карт мало»."
+                )
+
     if picked is not None:
         _render_card(
             store,
@@ -2924,9 +3104,20 @@ def _render_result(store: Storage, result: DiscoveryResult) -> None:
                         weights,
                     )
     if picked is None and len(items) > visible:
-        if st.button("Показать ещё 15", key="show_more_results"):
-            st.session_state["result_visible"] = visible + 15
-            st.rerun()
+        remaining = len(items) - len(shown)
+        st.button(
+            f"Показать ещё {min(15, remaining)}",
+            key="show_more_results",
+            on_click=_show_more_results,
+        )
+    elif picked is None and can_expand_search and cfg is not None:
+        if st.button(
+            "Искать больше",
+            key="expand_search_limits_bottom",
+            help="Повторит API-поиск с увеличенным числом страниц и бюджетом "
+            "запросов. Настройки пресета не изменяются.",
+        ):
+            _run_expanded_search(store, cfg)
 
     st.caption(
         "Ссылки ведут только на официальные beatmapsets. Превью строится из "
@@ -3425,7 +3616,17 @@ def page_search(store: Storage, cfg: PresetConfig) -> None:
                 "относятся к прежней конфигурации — запустите поиск или "
                 "случайную подборку заново."
             )
-        _render_result(store, result)
+        can_expand_search = bool(
+            configured
+            and not result.complete
+            and not st.session_state.get("search_local_only", False)
+        )
+        _render_result(
+            store,
+            result,
+            cfg=cfg,
+            can_expand_search=can_expand_search,
+        )
     else:
         st.info(
             "Результатов пока нет. Нажмите «Искать» или «Случайная подборка»."
@@ -3838,6 +4039,17 @@ def page_library(store: Storage, cfg: PresetConfig) -> None:
         "Источник: SQLite. Счётчики синхронизированы с analysis_queue; "
         "фильтры и сортировка не делают сетевых запросов."
     )
+    after_search = bool(
+        st.session_state.pop("_library_after_search", False)
+    )
+    if after_search:
+        st.info(
+            "Поиск сохранил карты в SQLite. Открыт весь каталог без "
+            "preset-гейта и сортировка «Недавно добавленные», чтобы новые "
+            "карты были видны; не прошедшие анализ остаются в состоянии "
+            "очереди/ожидания. Если включены ручные фильтры Библиотеки, "
+            "сбросьте их, чтобы увидеть весь каталог."
+        )
 
     scope = st.segmented_control(
         "Коллекция",
@@ -3878,9 +4090,10 @@ def page_library(store: Storage, cfg: PresetConfig) -> None:
 
     if st.session_state.get("_library_last_effective_preset") != effective_preset:
         st.session_state["_library_last_effective_preset"] = effective_preset
-        st.session_state["library_sort"] = (
-            "preset_fit" if effective_preset else "recent_analysis"
-        )
+        if not after_search:
+            st.session_state["library_sort"] = (
+                "preset_fit" if effective_preset else "recent_analysis"
+            )
         st.session_state["library_page"] = 1
 
     relevant_patterns = pattern_filters.relevant_patterns(
