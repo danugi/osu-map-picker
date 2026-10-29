@@ -8,6 +8,7 @@ from conftest import make_beatmap, make_beatmapset
 
 import config
 import evidence
+import patterns
 import presets
 from discovery import DiscoveryEngine
 from models import (
@@ -15,6 +16,7 @@ from models import (
     Candidate,
     DiscoverySettings,
     Filters,
+    PatternChain,
     RankingSettings,
     SearchPage,
     SearchQuery,
@@ -713,11 +715,10 @@ def test_flashlight_requires_its_tag_and_primary_target() -> None:
     ).passed is True
 
 
-def test_speed_and_sequence_policies_require_measured_support() -> None:
+def test_speed_and_streams_policies_require_measured_support() -> None:
     for name, target, feature in (
         ("Speed", "speed_high_bpm", "speed_pressure"),
         ("Streams & Stamina", "stream_consistency", "streams"),
-        ("Bursts", "burst_control", "bursts"),
     ):
         preset = presets.builtin_by_name(name)
         assert preset is not None
@@ -734,6 +735,18 @@ def test_speed_and_sequence_policies_require_measured_support() -> None:
             score_candidate(1, scores, features={feature: 1.0}),
             preset.ranking,
         ).passed is True
+
+    # Bursts no longer uses the raw burst-note share as a separate gate. A
+    # target that already requires burst evidence can pass on its own.
+    bursts = presets.builtin_by_name("Bursts")
+    assert bursts is not None
+    assert evaluate_relevance(
+        score_candidate(
+            1,
+            {"burst_control": 0.80, "speed_bursts": 0.10, "speed_short_bursts": 0.10},
+        ),
+        bursts.ranking,
+    ).passed is True
 
 
 def test_aim_farm_legacy_policy_is_empty_and_fingerprint_stable() -> None:
@@ -893,6 +906,109 @@ def test_aim_control_rejects_actual_partial_sequence_contribution() -> None:
     assert "частичный анализ" in check.reason.casefold()
 
 
+def test_aim_control_rejects_partial_feature_status_without_partial_score_source() -> None:
+    preset = presets.builtin_by_name("Mixed Aim")
+    assert preset is not None
+    candidate = score_candidate(
+        1,
+        {"aim_classic": 0.10, "aim_control": 0.10, "aim_bursts": 0.10},
+        features={
+            "angle_change_share": 0.90,
+            "control": 0.85,
+            "aim_pressure": 0.20,
+            "slider_factor": 0.65,
+            "cs": 0.80,
+        },
+        feature_statuses={
+            "angle_change_share": evidence.PARTIAL,
+            "control": evidence.MEASURED,
+            "aim_pressure": evidence.MEASURED,
+            "slider_factor": evidence.MEASURED,
+            "cs": evidence.MEASURED,
+        },
+        feature_sources={
+            "angle_change_share": "osu_sequence",
+            "control": "osu_api_attributes",
+            "aim_pressure": "osu_api_attributes",
+            "slider_factor": "osu_api_attributes",
+            "cs": "beatmap_cs",
+        },
+    )
+    candidate = replace(candidate, skillsets=evaluate_skills(candidate.traits))
+    aim_control = candidate.skillsets["aim_control"]
+    assert aim_control.score is not None and aim_control.score > 0.55
+    assert aim_control.status == evidence.PARTIAL
+    assert "osu_sequence_partial" not in aim_control.sources
+    check = evaluate_relevance(candidate, preset.ranking)
+    assert check.passed is False
+    assert "частичный анализ" in check.reason.casefold()
+
+
+def _sequence_traits(
+    *,
+    burst_chains: int,
+    total_notes: int = 480,
+) -> BeatmapFeatures:
+    chains = tuple(
+        PatternChain(
+            kind="burst",
+            start_index=index * 9,
+            length=9,
+            start_ms=1000 + index * 1000,
+            end_ms=1000 + index * 1000 + 1000,
+            median_gap_ms=125.0,
+            rhythm_quality=1.0,
+            compact_share=1.0,
+        )
+        for index in range(burst_chains)
+    )
+    analysis = SequenceAnalysis(
+        burst_chains=chains,
+        analyzed_notes=total_notes,
+        total_notes=total_notes,
+    )
+    values = patterns.sequence_features(analysis)
+    return BeatmapFeatures(
+        scores=values,
+        sources={key: "osu_sequence" for key in values},
+        statuses={key: evidence.MEASURED for key in values},
+        confidence="high",
+    )
+
+
+def test_bursts_accepts_a_real_burst_heavy_map_with_low_raw_share() -> None:
+    preset = presets.builtin_by_name("Bursts")
+    assert preset is not None
+    traits = _sequence_traits(burst_chains=8)
+    assert traits.scores["bursts"] == pytest.approx(72 / 480)
+    skills = evaluate_skills(traits)
+    burst_control = skills["burst_control"]
+    assert burst_control.score is not None and burst_control.score > 0.55
+
+    candidate = score_candidate(1, {})
+    candidate = replace(candidate, traits=traits, skillsets=skills)
+    check = evaluate_relevance(candidate, preset.ranking)
+    assert check.passed is True
+    assert check.best_target is not None
+    assert check.best_target.target_id == "burst_control"
+
+
+def test_bursts_rejects_analyzed_map_with_no_burst_chains() -> None:
+    preset = presets.builtin_by_name("Bursts")
+    assert preset is not None
+    traits = _sequence_traits(burst_chains=0)
+    skills = evaluate_skills(traits)
+    candidate = replace(
+        score_candidate(1, {}),
+        traits=traits,
+        skillsets=skills,
+    )
+    check = evaluate_relevance(candidate, preset.ranking)
+    assert check.passed is False
+    assert "порог" in check.reason.casefold()
+    assert "Burst control 0%" in check.reason
+
+
 def test_partial_stream_target_never_satisfies_streams_policy() -> None:
     preset = presets.builtin_by_name("Streams & Stamina")
     assert preset is not None
@@ -960,7 +1076,9 @@ def test_partial_required_features_never_satisfy_policy() -> None:
     )
     burst_check = evaluate_relevance(burst_candidate, bursts.ranking)
     assert burst_check.passed is False
-    assert "частичный анализ обязательных признаков" in burst_check.reason.casefold()
+    # Bursts has no separate raw-feature gate now, but the partial raw burst
+    # evidence still invalidates the contributing target itself.
+    assert "частичный анализ" in burst_check.reason.casefold()
 
 
 def test_non_partial_alternative_can_still_satisfy_policy() -> None:

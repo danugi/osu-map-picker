@@ -1099,12 +1099,16 @@ _RELEVANCE_POLICIES: dict[str, dict[str, Any]] = {
         "require_features_any": ["streams"],
     },
     "Bursts": {
+        # All three targets already require burst evidence and must exceed the
+        # relevance threshold. The raw burst-note share is a fraction of the
+        # whole map, not a 0..1 evidence score; requiring it above 0.55 would
+        # reject legitimately burst-heavy maps (e.g. bursts=0.15) whose target
+        # score is already strong.
         "primary_targets": [
             "burst_control",
             "speed_bursts",
             "speed_short_bursts",
         ],
-        "require_features_any": ["bursts"],
     },
     "Finger Control": {
         "primary_targets": ["finger_control", "alternating", "speed_control"],
@@ -1152,6 +1156,17 @@ _PRE_V12_TARGETS: dict[str, tuple[str, ...]] = {
     ),
     "Tech": ("tech", "slider_heavy", "rhythm_complexity"),
     "Flashlight": ("fl_friendly", "fl_reading", "fl_aim"),
+}
+
+# The v12 Bursts policy required the raw burst-note proportion to exceed 0.55.
+# Keep the exact old value for the v13 migration comparison.
+_PRE_V13_BURSTS_POLICY: dict[str, Any] = {
+    "primary_targets": [
+        "burst_control",
+        "speed_bursts",
+        "speed_short_bursts",
+    ],
+    "require_features_any": ["bursts"],
 }
 
 
@@ -1215,7 +1230,7 @@ _PRE_V11_FINGERPRINTS = {
     ),
 }
 
-BUILTIN_PRESETS_VERSION = 12
+BUILTIN_PRESETS_VERSION = 13
 _V2_NEW_NAMES = frozenset(
     {
         "Speed",
@@ -1495,6 +1510,23 @@ def _upgrade_v12_definitions(storage: Any) -> int:
     return changed
 
 
+def _upgrade_v13_definitions(storage: Any) -> int:
+    """Remove the redundant raw-burst feature requirement from untouched v12."""
+
+    preset = storage.get_preset_by_name("Bursts")
+    if preset is None or not preset.is_builtin:
+        return 0
+    modern = builtin_by_name("Bursts")
+    if modern is None:
+        return 0
+    before = copy.deepcopy(modern)
+    before.ranking.relevance_policy = copy.deepcopy(_PRE_V13_BURSTS_POLICY)
+    if not _matches_legacy(preset.config, before):
+        return 0
+    storage.update_preset(preset.id, modern)
+    return 1
+
+
 def ensure_builtin_presets(storage: Any) -> int:
     """Seed built-ins and add newer profiles without destroying user edits.
 
@@ -1589,6 +1621,8 @@ def ensure_builtin_presets(storage: Any) -> int:
         _upgrade_v11_definitions(storage)
     if version < 12:
         _upgrade_v12_definitions(storage)
+    if version < 13:
+        _upgrade_v13_definitions(storage)
 
     storage.set_preference("builtins_version", str(BUILTIN_PRESETS_VERSION))
     return created

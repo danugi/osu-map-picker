@@ -346,7 +346,7 @@ def test_v10_migration_upgrades_untouched_aim_farm(storage: Storage) -> None:
         "Sped Up",
     ]
     assert upgraded.config.ranking.relevance_targets == ["aim_classic"]
-    assert presets.BUILTIN_PRESETS_VERSION == 12
+    assert presets.BUILTIN_PRESETS_VERSION == 13
 
 
 def test_v10_migration_preserves_edited_builtin_and_user_data(
@@ -528,11 +528,11 @@ def test_v11_migration_updates_untouched_v10_aim_farm_limits(storage) -> None:
 
     updated = storage.get_preset(farm.id)
     assert updated is not None
-    assert presets.BUILTIN_PRESETS_VERSION == 12
+    assert presets.BUILTIN_PRESETS_VERSION == 13
     assert updated.config.discovery.max_requests == 56
     assert updated.config.discovery.max_pages_per_strategy == 3
     assert updated.config.discovery.fetch_attributes_limit == 40
-    assert storage.get_preference("builtins_version") == "12"
+    assert storage.get_preference("builtins_version") == "13"
 
 
 def test_v12_migration_adds_policy_to_untouched_builtins(storage) -> None:
@@ -582,7 +582,46 @@ def test_v12_migration_adds_policy_to_untouched_builtins(storage) -> None:
     assert kept is not None
     assert kept.config.filters.stars_min == 4.25
     assert kept.config.ranking.relevance_policy == {}
-    assert storage.get_preference("builtins_version") == "12"
+    assert storage.get_preference("builtins_version") == "13"
+
+
+def test_v13_migration_removes_raw_burst_feature_only_from_untouched(storage) -> None:
+    burst = storage.get_preset_by_name("Bursts")
+    assert burst is not None
+    old = copy.deepcopy(burst.config)
+    old.ranking.relevance_policy = copy.deepcopy(
+        presets._PRE_V13_BURSTS_POLICY
+    )
+    storage.update_preset(burst.id, old)
+    storage.set_preference("builtins_version", "12")
+
+    presets.ensure_builtin_presets(storage)
+
+    updated = storage.get_preset_by_name("Bursts")
+    assert updated is not None
+    modern = presets.builtin_by_name("Bursts")
+    assert modern is not None
+    assert updated.config.ranking.relevance_policy == (
+        modern.ranking.relevance_policy
+    )
+    assert "require_features_any" not in updated.config.ranking.relevance_policy
+    assert storage.get_preference("builtins_version") == "13"
+
+    edited = copy.deepcopy(updated.config)
+    edited.ranking.relevance_policy = copy.deepcopy(
+        presets._PRE_V13_BURSTS_POLICY
+    )
+    edited.filters.stars_min = 4.25
+    storage.update_preset(burst.id, edited)
+    storage.set_preference("builtins_version", "12")
+    presets.ensure_builtin_presets(storage)
+
+    kept = storage.get_preset_by_name("Bursts")
+    assert kept is not None
+    assert kept.config.filters.stars_min == 4.25
+    assert kept.config.ranking.relevance_policy == (
+        presets._PRE_V13_BURSTS_POLICY
+    )
 
 
 def test_v11_migration_preserves_edited_v10_aim_farm(storage) -> None:
