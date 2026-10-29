@@ -806,6 +806,7 @@ class DiscoveryEngine:
         cache_hits = 0
         failed = 0
         attempts = 0
+        new_analysis_work = 0
 
         def store(candidate: Candidate, item: AnalysisEvidence) -> None:
             nonlocal downloads, cache_hits
@@ -817,6 +818,15 @@ class DiscoveryEngine:
                 downloads += 1
             else:
                 cache_hits += 1
+
+        # Persisted evidence is read from SQLite once for the bounded candidate
+        # sample. Reuse does not consume the budget for downloading/parsing new
+        # .osu files; otherwise a catalog with >limit saved analyses would only
+        # expose the first limit entries to relevance gating.
+        for candidate in candidates:
+            cached_item = evidence_by_id.get(candidate.beatmap.id)
+            if cached_item is not None and cached_item.usable:
+                store(candidate, cached_item)
 
         def attempt(candidate: Candidate, allow: bool) -> None:
             nonlocal failed, attempts
@@ -850,24 +860,23 @@ class DiscoveryEngine:
             if not tried and len(notes) < MAX_NOTES:
                 notes.append(f".osu {candidate.beatmap.id}: файл недоступен.")
 
-        # Existing database/cache evidence goes first, then bounded downloads.
+        # New cached-file parsing is bounded independently of the persisted
+        # evidence above. Reusing SQLite analysis never consumes this budget.
         for candidate in fair:
-            if len(updated) >= analysis_limit:
+            if new_analysis_work >= analysis_limit:
                 break
             if deadline_at is not None and time.perf_counter() >= deadline_at:
                 break
             beatmap_id = candidate.beatmap.id
-            item = evidence_by_id.get(beatmap_id)
-            if item is not None and item.usable:
-                attempted.add(beatmap_id)
-                store(candidate, item)
+            if beatmap_id in updated:
                 continue
             if self._sequence_is_cached(beatmap_id):
                 attempted.add(beatmap_id)
+                new_analysis_work += 1
                 attempt(candidate, False)
         if not cached_only:
             for candidate in fair:
-                if len(updated) >= analysis_limit:
+                if new_analysis_work >= analysis_limit:
                     break
                 if deadline_at is not None and time.perf_counter() >= deadline_at:
                     break
@@ -875,6 +884,7 @@ class DiscoveryEngine:
                 if beatmap_id in attempted or beatmap_id in updated:
                     continue
                 attempted.add(beatmap_id)
+                new_analysis_work += 1
                 attempt(candidate, True)
 
         if deadline_at is not None and time.perf_counter() >= deadline_at:
@@ -953,46 +963,39 @@ class DiscoveryEngine:
         )
         return result, stats
 
-    def _supplement_from_catalog(
+    def _merge_local_candidates(
         self,
-        result: DiscoveryResult,
+        candidates: list[Candidate],
         filters: Filters,
         ranking_settings: RankingSettings,
         *,
-        catalog_after: int,
-        known_ids: set[int],
-        target: int,
-    ) -> DiscoveryResult:
-        """Fill a short API result from cached catalog candidates only.
+        max_candidates: int,
+    ) -> tuple[list[Candidate], DiscoveryResult, int, int, int]:
+        """Add bounded catalog candidates before the single ranking pass."""
 
-        The local pass uses ``rerank_stored`` so strict filters, evidence
-        checks, the mandatory relevance gate and the active ranking settings
-        are identical. It never downloads or calls the API.
-        """
-
-        local = self.rerank_stored(filters, ranking_settings)
-        considered_ids = set(local.local_catalog_considered_ids)
-        api_pairs = {
-            (item.beatmapset.id, item.beatmap.id) for item in result.scored
-        }
+        local = self.rerank_stored(
+            filters,
+            ranking_settings,
+            all_candidates=True,
+        )
         api_index = {
-            (item.beatmapset.id, item.beatmap.id): index
-            for index, item in enumerate(result.scored)
+            (candidate.beatmapset.id, candidate.beatmap.id): index
+            for index, candidate in enumerate(candidates)
         }
-        used_sets = {item.beatmapset.id for item in result.scored}
-        merged = list(result.scored)
+        used_sets = {candidate.beatmapset.id for candidate in candidates}
+        merged = list(candidates)
         added = 0
         duplicates = 0
         enriched_duplicates = 0
         for item in local.scored:
-            if len(merged) >= target:
+            if len(merged) >= max_candidates:
                 break
             key = (item.beatmapset.id, item.beatmap.id)
-            if key in api_pairs:
+            if key in api_index:
                 duplicates += 1
                 local_analysis = item.candidate.analysis
-                api_item = merged[api_index[key]]
-                api_analysis = api_item.candidate.analysis
+                api_candidate = merged[api_index[key]]
+                api_analysis = api_candidate.analysis
                 if (
                     local_analysis is not None
                     and local_analysis.usable
@@ -1005,8 +1008,7 @@ class DiscoveryEngine:
                         )
                     )
                 ):
-                    api_candidate = api_item.candidate
-                    enriched = self._with_analysis(
+                    merged[api_index[key]] = self._with_analysis(
                         replace(
                             api_candidate,
                             attributes=(
@@ -1016,65 +1018,16 @@ class DiscoveryEngine:
                         ),
                         local_analysis,
                     )
-                    merged[api_index[key]] = replace(
-                        api_item, candidate=enriched
-                    )
                     enriched_duplicates += 1
                 continue
             if item.beatmapset.id in used_sets:
                 duplicates += 1
                 continue
-            api_pairs.add(key)
             used_sets.add(item.beatmapset.id)
-            merged.append(item)
+            api_index[key] = len(merged)
+            merged.append(item.candidate)
             added += 1
-        merged.sort(
-            key=lambda item: (
-                -item.score,
-                item.beatmapset.id,
-                item.beatmap.id,
-            )
-        )
-        notes = list(result.notes)
-        if added:
-            notes.append(
-                f"Локальный каталог дополнил выдачу: +{added} карт из "
-                f"{local.local_catalog_considered} рассмотренных; "
-                f"{duplicates} дублей API/каталога пропущено."
-            )
-        else:
-            notes.append(
-                f"Локальный каталог проверен: {local.local_catalog_considered} "
-                "карт рассмотрено, новых подходящих карт нет."
-            )
-        if enriched_duplicates:
-            notes.append(
-                "Локальный кэш обогатил "
-                f"{enriched_duplicates} API-карт сохранённым sequence-"
-                "анализом; API-метаданные сохранены."
-            )
-        if local.sequence_required:
-            notes.append(
-                "Локальный топ-ап использует только сохранённые sequence-"
-                "результаты; .osu не скачивались."
-            )
-        considered_union = known_ids | considered_ids
-        unconsidered = max(0, catalog_after - len(considered_union))
-        return replace(
-            result,
-            scored=tuple(merged),
-            origin="mixed" if added else result.origin,
-            notes=tuple(dict.fromkeys(notes))[:MAX_NOTES],
-            local_topup=True,
-            local_catalog_considered=len(considered_ids),
-            local_catalog_added=added,
-            local_catalog_duplicates=duplicates,
-            local_catalog_unconsidered=unconsidered,
-            local_catalog_considered_ids=tuple(sorted(considered_ids)),
-            catalog_before=result.catalog_before,
-            catalog_after=catalog_after,
-            catalog_added=max(0, catalog_after - result.catalog_before),
-        )
+        return merged, local, added, duplicates, enriched_duplicates
 
     # -- main entry point --------------------------------------------------
     def run(
@@ -1458,11 +1411,59 @@ class DiscoveryEngine:
                 f"{ranking_settings.relevance_threshold:.0%}, нужно превышение "
                 "хотя бы по одному из трёх тегов)."
             )
+        candidate_limit = max(1, int(self.settings.max_candidates))
+        target_results = min(LOCAL_TOPUP_TARGET_RESULTS, candidate_limit)
+        local_result: DiscoveryResult | None = None
+        local_added = local_duplicates = enriched_duplicates = 0
+        if (
+            self.local_catalog_supplement
+            and not budget.get("fatal")
+            and len(candidates) < target_results
+            and catalog_after > len(known)
+        ):
+            candidates, local_result, local_added, local_duplicates, enriched_duplicates = (
+                self._merge_local_candidates(
+                    candidates,
+                    filters,
+                    ranking_settings,
+                    max_candidates=candidate_limit,
+                )
+            )
+            if local_added:
+                notes.append(
+                    f"Локальный каталог дополнил выдачу: +{local_added} карт "
+                    f"из {local_result.local_catalog_considered} рассмотренных; "
+                    f"{local_duplicates} дублей API/каталога пропущено."
+                )
+            else:
+                notes.append(
+                    f"Локальный каталог проверен: "
+                    f"{local_result.local_catalog_considered} карт рассмотрено, "
+                    "новых подходящих карт нет."
+                )
+            if enriched_duplicates:
+                notes.append(
+                    "Локальный кэш обогатил "
+                    f"{enriched_duplicates} API-карт сохранённым sequence-"
+                    "анализом; API-метаданные сохранены."
+                )
+            if local_result.sequence_required:
+                notes.append(
+                    "Локальный топ-ап использует только сохранённые sequence-"
+                    "результаты; .osu не скачивались."
+                )
+        considered_ids = (
+            set(local_result.local_catalog_considered_ids)
+            if local_result is not None
+            else set()
+        )
+        local_unconsidered = max(
+            0, catalog_after - len(set(known) | considered_ids)
+        )
         rank_started = time.perf_counter()
         # Rebuild the context in case attributes changed nothing about user
         # data; it is cheap and keeps the code path uniform.
         diversification_notes: list[str] = []
-        candidate_limit = max(1, int(self.settings.max_candidates))
         truncated = len(candidates) > candidate_limit
         scored = rank_candidates(
             candidates,
@@ -1631,23 +1632,18 @@ class DiscoveryEngine:
             catalog_before=catalog_before,
             catalog_after=catalog_after,
             catalog_added=max(0, catalog_after - catalog_before),
-            local_catalog_unconsidered=max(0, catalog_after - len(known)),
+            local_topup=local_result is not None,
+            local_catalog_considered=(
+                local_result.local_catalog_considered
+                if local_result is not None
+                else 0
+            ),
+            local_catalog_added=local_added,
+            local_catalog_duplicates=local_duplicates,
+            local_catalog_unconsidered=local_unconsidered,
+            local_catalog_considered_ids=tuple(sorted(considered_ids)),
+            origin="mixed" if local_added else "api",
         )
-        target_results = min(LOCAL_TOPUP_TARGET_RESULTS, candidate_limit)
-        if (
-            self.local_catalog_supplement
-            and not budget.get("fatal")
-            and len(scored) < target_results
-            and catalog_after > len(known)
-        ):
-            result = self._supplement_from_catalog(
-                result,
-                filters,
-                ranking_settings,
-                catalog_after=catalog_after,
-                known_ids=set(known),
-                target=target_results,
-            )
         if record:
             try:
                 self.storage.record_search_run(result)

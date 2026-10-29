@@ -666,6 +666,74 @@ def test_local_analyzed_candidate_fills_short_api_result(storage: Storage) -> No
     assert result.scored[0].candidate.analysis.status == evidence.MEASURED
 
 
+def test_local_topup_reuses_all_persisted_analyses_beyond_limit(
+    storage: Storage,
+) -> None:
+    bursts = presets.builtin_by_name("Bursts")
+    assert bursts is not None
+    candidates = []
+    for set_id in range(1, 26):
+        rating = 8.0
+        sequence = _sequence("burst", 9)
+        candidate = _candidate(set_id, rating=rating, sequence=sequence)
+        candidates.append(candidate)
+        _save_sequence(storage, candidate, sequence)
+    calls: list[tuple[int, bool]] = []
+
+    def loader(beatmap_id: int, allow_download: bool) -> SequenceAnalysis:
+        calls.append((beatmap_id, allow_download))
+        raise AssertionError("persisted analyses must not be re-parsed")
+
+    api = StubApi(lambda query: SearchPage(beatmapsets=()))
+    engine = DiscoveryEngine(
+        api,
+        storage,
+        settings(max_candidates=100, fetch_sequences_limit=20),
+        sequence_loader=loader,
+        local_catalog_supplement=True,
+    )
+    filters = copy.deepcopy(bursts.filters)
+    filters.statuses = ["ranked"]
+    result = engine.run(filters, bursts.ranking)
+    assert result.local_topup is True
+    assert result.local_catalog_considered == 25
+    assert result.local_catalog_added == 25
+    assert 3 in {item.beatmapset.id for item in result.scored}
+    assert calls == []
+    assert result.sequence_downloads == 0
+    assert result.sequence_attempted == 0
+    ctx = RankingContext.from_user_data(bursts.ranking, {}, {}, {})
+    ordered_ids = [
+        item.beatmapset.id for item in engine._fair_sequence_order(candidates, ctx)
+    ]
+    assert ordered_ids.index(3) >= 20
+
+
+def test_local_sequence_reuse_does_not_raise_new_analysis_limit(
+    storage: Storage,
+) -> None:
+    storage.save_beatmapsets(
+        [make_beatmapset(index) for index in range(1, 26)]
+    )
+    calls: list[int] = []
+
+    def loader(beatmap_id: int, allow_download: bool) -> SequenceAnalysis:
+        calls.append(beatmap_id)
+        return _sequence("stream", 12)
+
+    streams = presets.builtin_by_name("Streams & Stamina")
+    assert streams is not None
+    engine = DiscoveryEngine(
+        None,
+        storage,
+        settings(max_candidates=100, fetch_sequences_limit=20),
+        sequence_loader=loader,
+        sequence_cache_probe=lambda beatmap_id: True,
+    )
+    engine.rerank_stored(streams.filters, streams.ranking)
+    assert len(calls) == 20
+
+
 def test_local_topup_deduplicates_and_keeps_api_metadata(storage: Storage) -> None:
     local_one = make_beatmapset(1, title="Local old title")
     local_two = make_beatmapset(2, title="Local second")
@@ -686,6 +754,40 @@ def test_local_topup_deduplicates_and_keeps_api_metadata(storage: Storage) -> No
     assert result.local_catalog_duplicates == 1
     assert len(api.search_calls) == 1
     assert result.api_requests == 1
+
+
+def test_local_duplicate_keeps_api_metadata_and_cached_analysis(
+    storage: Storage,
+) -> None:
+    local_analysis = _sequence("burst", 9)
+    local_candidate = _candidate(1, sequence=local_analysis)
+    storage.save_beatmapsets(
+        [local_candidate.beatmapset, make_beatmapset(2, title="Local extra")]
+    )
+    storage.save_analysis(
+        local_candidate.beatmap.id,
+        status=evidence.MEASURED,
+        source="test",
+        analyzer_version=patterns.ANALYZER_VERSION,
+        file_mtime_ns=None,
+        file_size=None,
+        scope="",
+        sequence_json=analysis_store.sequence_to_json(local_analysis),
+    )
+    api_set = make_beatmapset(1, title="API title")
+    api = StubApi(lambda query: SearchPage(beatmapsets=(api_set,)))
+    engine = DiscoveryEngine(
+        api,
+        storage,
+        settings(max_candidates=50, fetch_sequences_limit=20),
+        local_catalog_supplement=True,
+    )
+    result = engine.run(Filters(statuses=["ranked"]), RankingSettings())
+    assert result.scored[0].beatmapset.title == "API title"
+    assert result.scored[0].candidate.analysis is not None
+    assert result.scored[0].candidate.analysis.status == evidence.MEASURED
+    assert result.local_catalog_duplicates == 1
+    assert len(api.search_calls) == 1
 
 
 def test_unanalyzed_local_candidate_does_not_bypass_gate(storage: Storage) -> None:
