@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 
 import pytest
 from conftest import make_beatmap, make_beatmapset
@@ -463,3 +464,98 @@ def test_get_beatmapsets_chunks_large_id_lists(tmp_path):
     assert list(loaded) == list(range(430, 0, -1))
     assert len(loaded) == 430
     assert all(item.id == key for key, item in loaded.items())
+
+
+def test_save_beatmapsets_empty_and_generator(tmp_path):
+    store = Storage(tmp_path / "writes.db")
+    assert store.save_beatmapsets([]) == 0
+    assert store.save_beatmapsets(
+        make_beatmapset(i) for i in range(1, 4)
+    ) == 3
+    assert store.beatmapset_count() == 3
+
+
+def test_save_beatmapsets_duplicate_ids_and_fetched_at(tmp_path):
+    store = Storage(tmp_path / "writes.db")
+    first = make_beatmapset(
+        1,
+        title="First",
+        fetched_at="2026-02-01T00:00:00+00:00",
+        beatmaps=(make_beatmap(11, 1, stars=5.0),),
+    )
+    older = make_beatmapset(
+        1,
+        title="Older",
+        fetched_at="2026-01-01T00:00:00+00:00",
+        beatmaps=(make_beatmap(11, 1, stars=4.0),),
+    )
+    newer = make_beatmapset(
+        1,
+        title="Newer",
+        fetched_at="2026-03-01T00:00:00+00:00",
+        beatmaps=(make_beatmap(11, 1, stars=6.0),),
+    )
+    assert store.save_beatmapsets([first, older, newer, older]) == 4
+    loaded = store.get_beatmapset(1)
+    assert loaded is not None
+    assert loaded.title == "Newer"
+    # Beatmap UPSERTs have no fetched_at guard; the last duplicate row wins,
+    # matching the previous per-row implementation.
+    assert loaded.beatmaps[0].difficulty_rating == 4.0
+
+
+def test_save_beatmapsets_duplicate_beatmap_id_last_wins(tmp_path):
+    store = Storage(tmp_path / "writes.db")
+    first = make_beatmapset(
+        1, beatmaps=(make_beatmap(99, 1, version="One"),)
+    )
+    second = make_beatmapset(
+        2, beatmaps=(make_beatmap(99, 2, version="Two"),)
+    )
+    assert store.save_beatmapsets([first, second]) == 2
+    loaded = store.get_beatmapset(2)
+    assert loaded is not None
+    assert [item.id for item in loaded.beatmaps] == [99]
+    assert loaded.beatmaps[0].beatmapset_id == 2
+    assert loaded.beatmaps[0].version == "Two"
+
+
+def test_save_beatmapsets_large_iterable_crosses_batches(tmp_path):
+    store = Storage(tmp_path / "writes.db")
+    sets = [
+        make_beatmapset(
+            i,
+            beatmaps=tuple(
+                make_beatmap(i * 10 + offset, i, version=f"D{offset}")
+                for offset in range(5)
+            ),
+        )
+        for i in range(1, 251)
+    ]
+    assert store.save_beatmapsets(sets) == 250
+    loaded = store.get_beatmapsets(range(1, 251))
+    assert len(loaded) == 250
+    assert all(len(item.beatmaps) == 5 for item in loaded.values())
+
+
+def test_save_beatmapsets_does_not_use_future_parent_for_fk(tmp_path):
+    store = Storage(tmp_path / "writes.db")
+    first = make_beatmapset(1, beatmaps=(make_beatmap(11, 2),))
+    second = make_beatmapset(2)
+    with pytest.raises(sqlite3.IntegrityError):
+        store.save_beatmapsets([first, second])
+    assert store.get_beatmapset(1) is None
+    assert store.get_beatmapset(2) is None
+
+
+def test_save_beatmapsets_rolls_back_failed_batch(tmp_path):
+    store = Storage(tmp_path / "writes.db")
+    good = make_beatmapset(1, beatmaps=(make_beatmap(11, 1),))
+    bad_beatmap = make_beatmap(22, 999)
+    bad = make_beatmapset(2, beatmaps=(bad_beatmap,))
+    # Foreign-key failures propagate as sqlite3.IntegrityError (the previous
+    # public behavior); the transaction still rolls back completely.
+    with pytest.raises(sqlite3.IntegrityError):
+        store.save_beatmapsets([good, bad])
+    assert store.get_beatmapset(1) is None
+    assert store.get_beatmapset(2) is None

@@ -243,6 +243,70 @@ class UserDataImportError(ValueError):
     """Invalid user-data import. Nothing has been written."""
 
 
+_BEATMAPSET_UPSERT_SQL = """
+                INSERT INTO beatmapsets (
+                    id, artist, artist_unicode, title, title_unicode, creator,
+                    status, bpm, favourite_count, play_count, rating, genre_id,
+                    language_id, tags, nsfw, video, storyboard, preview_url,
+                    cover_url, ranked_date, submitted_date, last_updated,
+                    source, fetched_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(id) DO UPDATE SET
+                    artist=excluded.artist,
+                    artist_unicode=excluded.artist_unicode,
+                    title=excluded.title,
+                    title_unicode=excluded.title_unicode,
+                    creator=excluded.creator,
+                    status=excluded.status,
+                    bpm=excluded.bpm,
+                    favourite_count=excluded.favourite_count,
+                    play_count=excluded.play_count,
+                    rating=excluded.rating,
+                    genre_id=excluded.genre_id,
+                    language_id=excluded.language_id,
+                    tags=excluded.tags,
+                    nsfw=excluded.nsfw,
+                    video=excluded.video,
+                    storyboard=excluded.storyboard,
+                    preview_url=excluded.preview_url,
+                    cover_url=excluded.cover_url,
+                    ranked_date=excluded.ranked_date,
+                    submitted_date=excluded.submitted_date,
+                    last_updated=excluded.last_updated,
+                    source=excluded.source,
+                    fetched_at=excluded.fetched_at
+                WHERE excluded.fetched_at >= beatmapsets.fetched_at
+                """
+
+_BEATMAP_UPSERT_SQL = """
+                    INSERT INTO beatmaps (
+                        id, beatmapset_id, mode, version, difficulty_rating,
+                        total_length, hit_length, bpm, ar, od, cs, hp,
+                        max_combo, count_circles, count_sliders, count_spinners,
+                        status, url, owners, updated_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        beatmapset_id=excluded.beatmapset_id,
+                        mode=excluded.mode,
+                        version=excluded.version,
+                        difficulty_rating=excluded.difficulty_rating,
+                        total_length=excluded.total_length,
+                        hit_length=excluded.hit_length,
+                        bpm=excluded.bpm,
+                        ar=excluded.ar,
+                        od=excluded.od,
+                        cs=excluded.cs,
+                        hp=excluded.hp,
+                        max_combo=excluded.max_combo,
+                        count_circles=excluded.count_circles,
+                        count_sliders=excluded.count_sliders,
+                        count_spinners=excluded.count_spinners,
+                        status=excluded.status,
+                        url=excluded.url,
+                        owners=excluded.owners,
+                        updated_at=excluded.updated_at
+                    """
+
 class Storage:
     def __init__(self, path: str | Path | None = None) -> None:
         self.path = Path(path) if path is not None else config.db_path()
@@ -317,101 +381,73 @@ class Storage:
     def _save_beatmapsets_conn(
         conn: sqlite3.Connection, beatmapsets: Iterable[Beatmapset]
     ) -> int:
+        """UPSERT sets and compositions in bounded executemany batches."""
+
         saved = 0
+        set_rows: list[tuple[object, ...]] = []
+        map_rows: list[tuple[object, ...]] = []
+        seen_set_ids: set[int] = set()
+        existing_set_ids: set[int] | None = None
+
+        def flush() -> None:
+            if set_rows:
+                conn.executemany(_BEATMAPSET_UPSERT_SQL, set_rows)
+                set_rows.clear()
+            if map_rows:
+                conn.executemany(_BEATMAP_UPSERT_SQL, map_rows)
+                map_rows.clear()
+
         for beatmapset in beatmapsets:
-            values = (
-                beatmapset.id,
-                beatmapset.artist,
-                beatmapset.artist_unicode,
-                beatmapset.title,
-                beatmapset.title_unicode,
-                beatmapset.creator,
-                beatmapset.status,
-                beatmapset.bpm,
-                beatmapset.favourite_count,
-                beatmapset.play_count,
-                beatmapset.rating,
-                beatmapset.genre_id,
-                beatmapset.language_id,
-                json.dumps(list(beatmapset.tags), ensure_ascii=False),
-                int(beatmapset.nsfw),
-                int(beatmapset.video),
-                int(beatmapset.storyboard),
-                beatmapset.preview_url,
-                beatmapset.cover_url,
-                beatmapset.ranked_date,
-                beatmapset.submitted_date,
-                beatmapset.last_updated,
-                beatmapset.source,
-                beatmapset.fetched_at,
+            set_rows.append(
+                (
+                    beatmapset.id,
+                    beatmapset.artist,
+                    beatmapset.artist_unicode,
+                    beatmapset.title,
+                    beatmapset.title_unicode,
+                    beatmapset.creator,
+                    beatmapset.status,
+                    beatmapset.bpm,
+                    beatmapset.favourite_count,
+                    beatmapset.play_count,
+                    beatmapset.rating,
+                    beatmapset.genre_id,
+                    beatmapset.language_id,
+                    json.dumps(list(beatmapset.tags), ensure_ascii=False),
+                    int(beatmapset.nsfw),
+                    int(beatmapset.video),
+                    int(beatmapset.storyboard),
+                    beatmapset.preview_url,
+                    beatmapset.cover_url,
+                    beatmapset.ranked_date,
+                    beatmapset.submitted_date,
+                    beatmapset.last_updated,
+                    beatmapset.source,
+                    beatmapset.fetched_at,
+                )
             )
-            conn.execute(
-                """
-                INSERT INTO beatmapsets (
-                    id, artist, artist_unicode, title, title_unicode, creator,
-                    status, bpm, favourite_count, play_count, rating, genre_id,
-                    language_id, tags, nsfw, video, storyboard, preview_url,
-                    cover_url, ranked_date, submitted_date, last_updated,
-                    source, fetched_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(id) DO UPDATE SET
-                    artist=excluded.artist,
-                    artist_unicode=excluded.artist_unicode,
-                    title=excluded.title,
-                    title_unicode=excluded.title_unicode,
-                    creator=excluded.creator,
-                    status=excluded.status,
-                    bpm=excluded.bpm,
-                    favourite_count=excluded.favourite_count,
-                    play_count=excluded.play_count,
-                    rating=excluded.rating,
-                    genre_id=excluded.genre_id,
-                    language_id=excluded.language_id,
-                    tags=excluded.tags,
-                    nsfw=excluded.nsfw,
-                    video=excluded.video,
-                    storyboard=excluded.storyboard,
-                    preview_url=excluded.preview_url,
-                    cover_url=excluded.cover_url,
-                    ranked_date=excluded.ranked_date,
-                    submitted_date=excluded.submitted_date,
-                    last_updated=excluded.last_updated,
-                    source=excluded.source,
-                    fetched_at=excluded.fetched_at
-                WHERE excluded.fetched_at >= beatmapsets.fetched_at
-                """,
-                values,
-            )
+            seen_set_ids.add(int(beatmapset.id))
             for beatmap in beatmapset.beatmaps:
-                conn.execute(
-                    """
-                    INSERT INTO beatmaps (
-                        id, beatmapset_id, mode, version, difficulty_rating,
-                        total_length, hit_length, bpm, ar, od, cs, hp,
-                        max_combo, count_circles, count_sliders, count_spinners,
-                        status, url, owners, updated_at
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                    ON CONFLICT(id) DO UPDATE SET
-                        beatmapset_id=excluded.beatmapset_id,
-                        mode=excluded.mode,
-                        version=excluded.version,
-                        difficulty_rating=excluded.difficulty_rating,
-                        total_length=excluded.total_length,
-                        hit_length=excluded.hit_length,
-                        bpm=excluded.bpm,
-                        ar=excluded.ar,
-                        od=excluded.od,
-                        cs=excluded.cs,
-                        hp=excluded.hp,
-                        max_combo=excluded.max_combo,
-                        count_circles=excluded.count_circles,
-                        count_sliders=excluded.count_sliders,
-                        count_spinners=excluded.count_spinners,
-                        status=excluded.status,
-                        url=excluded.url,
-                        owners=excluded.owners,
-                        updated_at=excluded.updated_at
-                    """,
+                target_set_id = int(beatmap.beatmapset_id)
+                if target_set_id != int(beatmapset.id):
+                    # The legacy row-by-row path could only satisfy a foreign
+                    # key from an already-seen/current set. Keep that failure
+                    # behavior even though parent rows are now flushed first.
+                    if existing_set_ids is None:
+                        existing_set_ids = {
+                            int(row["id"])
+                            for row in conn.execute(
+                                "SELECT id FROM beatmapsets"
+                            ).fetchall()
+                        }
+                    if (
+                        target_set_id not in seen_set_ids
+                        and target_set_id not in existing_set_ids
+                    ):
+                        raise sqlite3.IntegrityError(
+                            "FOREIGN KEY constraint failed"
+                        )
+                map_rows.append(
                     (
                         beatmap.id,
                         beatmap.beatmapset_id,
@@ -433,10 +469,14 @@ class Storage:
                         beatmap.url,
                         json.dumps(list(beatmap.owners), ensure_ascii=False),
                         now_iso(),
-                    ),
+                    )
                 )
+                if len(map_rows) >= 1000:
+                    flush()
             saved += 1
-
+            if len(set_rows) >= 200 or len(map_rows) >= 1000:
+                flush()
+        flush()
         return saved
     @staticmethod
     def _row_to_beatmap(row: sqlite3.Row) -> Beatmap:
