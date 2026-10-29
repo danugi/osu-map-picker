@@ -520,11 +520,43 @@ class Storage:
             return self._row_to_beatmapset(conn, row)
 
     def get_beatmapsets(self, ids: Iterable[int]) -> dict[int, Beatmapset]:
-        result: dict[int, Beatmapset] = {}
-        for set_id in dict.fromkeys(int(i) for i in ids):
-            beatmapset = self.get_beatmapset(set_id)
-            if beatmapset is not None:
-                result[set_id] = beatmapset
+        wanted = list(dict.fromkeys(int(i) for i in ids))
+        if not wanted:
+            return {}
+        rows_by_id: dict[int, sqlite3.Row] = {}
+        grouped: dict[int, list[sqlite3.Row]] = {}
+        with self.connection() as conn:
+            # Chunk both queries well below SQLite's historical variable limit.
+            for start in range(0, len(wanted), 400):
+                chunk = wanted[start : start + 400]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    "SELECT * FROM beatmapsets "
+                    f"WHERE id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    rows_by_id[int(row["id"])] = row
+            for start in range(0, len(wanted), 400):
+                chunk = wanted[start : start + 400]
+                placeholders = ",".join("?" for _ in chunk)
+                beatmap_rows = conn.execute(
+                    "SELECT * FROM beatmaps "
+                    f"WHERE beatmapset_id IN ({placeholders}) "
+                    "ORDER BY beatmapset_id, difficulty_rating IS NULL, "
+                    "difficulty_rating",
+                    chunk,
+                ).fetchall()
+                for row in beatmap_rows:
+                    grouped.setdefault(int(row["beatmapset_id"]), []).append(row)
+            result: dict[int, Beatmapset] = {}
+            for set_id in wanted:
+                row = rows_by_id.get(set_id)
+                if row is None:
+                    continue
+                result[set_id] = self._row_to_beatmapset(
+                    conn, row, grouped.get(set_id, [])
+                )
         return result
 
     def list_beatmapsets(

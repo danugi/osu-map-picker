@@ -524,11 +524,18 @@ class DiscoveryEngine:
         by_beatmap_id = {
             candidate.beatmap.id: candidate for candidate in candidates
         }
+        # One bounded query covers every selected candidate. A concurrent
+        # search may fill an individual cache entry after this snapshot; a miss
+        # is rechecked below before spending an API request, preserving request
+        # budget/order semantics without N cache connections.
+        cached_attributes = self.storage.all_attributes(top_ids)
         updated: dict[int, Candidate] = {}
         forbidden = False
         for beatmap_id in top_ids:
             candidate = by_beatmap_id[beatmap_id]
-            row = self.storage.get_attributes(beatmap_id)
+            row = cached_attributes.get(beatmap_id)
+            if row is None:
+                row = self.storage.get_attributes(beatmap_id)
             attributes: DifficultyAttributes | None = None
             if row is not None:
                 attributes = _attributes_from_row(row)

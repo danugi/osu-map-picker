@@ -543,6 +543,7 @@ def query_sets(
     *,
     preset_order: Sequence[int] | None = None,
     preset_beatmaps: Mapping[int, int] | None = None,
+    include_counts: bool = True,
 ) -> LibraryPage:
     where, params = _where_clause(filters)
     base = _BASE_SELECT
@@ -763,14 +764,18 @@ def query_sets(
         total_difficulties=total_difficulties,
         page=page,
         pages=pages,
-        counts=counts(store),
+        counts=counts(store) if include_counts else {},
     )
 
 
 def filter_counts(store: Storage, filters: LibraryFilters) -> dict[str, int]:
     """Counts for a filtered collection, used by the library summary."""
 
-    page = query_sets(store, replace(filters, page=1, per_page=1))
+    page = query_sets(
+        store,
+        replace(filters, page=1, per_page=1),
+        include_counts=False,
+    )
     return {
         "sets": page.total_sets,
         "difficulties": page.total_difficulties,

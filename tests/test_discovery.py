@@ -1110,3 +1110,74 @@ def test_strategy_offset_rotates_sources_for_random_selection(
     engine.run(filters, RankingSettings(), strategy_offset=2)
     assert api.search_calls[-1].sort == "rating_desc"
 
+
+def test_enrich_attributes_batches_cached_reads(storage, monkeypatch):
+    farm = presets.builtin_by_name("Aim Farm")
+    assert farm is not None
+    low = _candidate(1)
+    high = _candidate(2)
+    storage.save_beatmapsets([low.beatmapset, high.beatmapset])
+    for beatmap_id in (low.beatmap.id, high.beatmap.id):
+        storage.save_attributes(
+            beatmap_id,
+            {
+                "star_rating": 5.5,
+                "aim_difficulty": 3.0,
+                "speed_difficulty": 1.0,
+                "slider_factor": 1.0,
+                "max_combo": 500,
+                "source": "test",
+                "fetched_at": "2026-01-01T00:00:00+00:00",
+            },
+        )
+    calls = {"all": 0, "get": 0}
+    original_all = storage.all_attributes
+    original_get = storage.get_attributes
+
+    def counted_all(ids):
+        calls["all"] += 1
+        return original_all(ids)
+
+    def counted_get(beatmap_id):
+        calls["get"] += 1
+        return original_get(beatmap_id)
+
+    monkeypatch.setattr(storage, "all_attributes", counted_all)
+    monkeypatch.setattr(storage, "get_attributes", counted_get)
+    api = StubApi(lambda query: SearchPage(beatmapsets=()))
+    engine = DiscoveryEngine(api, storage, settings(fetch_attributes_limit=2))
+    ctx = RankingContext.from_user_data(farm.ranking, {}, {}, {})
+    budget = {"requests": 0}
+    updated = engine._enrich_attributes(
+        [low, high], ctx, budget=budget, notes=[], errors=[]
+    )
+    assert [item.beatmap.id for item in updated] == [
+        low.beatmap.id,
+        high.beatmap.id,
+    ]
+    assert all(item.attributes is not None for item in updated)
+    assert api.attribute_calls == []
+    assert calls == {"all": 1, "get": 0}
+    assert budget["attributes_cached"] == 2
+    assert budget.get("attributes_requested", 0) == 0
+
+
+def test_enrich_attributes_preserves_uncached_api_order(storage):
+    farm = presets.builtin_by_name("Aim Farm")
+    assert farm is not None
+    low = _candidate(1)
+    high = _candidate(2)
+    storage.save_beatmapsets([low.beatmapset, high.beatmapset])
+    api = StubApi(lambda query: SearchPage(beatmapsets=()))
+    engine = DiscoveryEngine(api, storage, settings(fetch_attributes_limit=2))
+    ctx = RankingContext.from_user_data(farm.ranking, {}, {}, {})
+    budget = {"requests": 0}
+    updated = engine._enrich_attributes(
+        [low, high], ctx, budget=budget, notes=[], errors=[]
+    )
+    assert [item.attributes is not None for item in updated] == [True, True]
+    assert api.attribute_calls == [low.beatmap.id, high.beatmap.id]
+    assert budget["attributes_requested"] == 2
+    assert budget["attributes_succeeded"] == 2
+    assert budget.get("attributes_cached", 0) == 0
+

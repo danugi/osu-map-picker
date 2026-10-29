@@ -257,3 +257,27 @@ def test_offline_browse_makes_no_network_calls(
     )
     assert page.sets[0].entries[0].display_title == "Two Difficulties"
     assert page.counts["total"] == 5
+
+
+def test_query_sets_can_skip_global_counts(
+    storage: Storage, monkeypatch
+) -> None:
+    _seed_library(storage)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("global counts must not be queried")
+
+    monkeypatch.setattr(library, "counts", forbidden)
+    page = library.query_sets(
+        storage,
+        library.LibraryFilters(scope="analyzed", per_page=2),
+        include_counts=False,
+    )
+    assert page.counts == {}
+    assert page.total_sets == 1
+    assert page.total_difficulties == 2
+    assert page.sets[0].display_title == "Two Difficulties"
+    filtered = library.filter_counts(
+        storage, library.LibraryFilters(scope="analyzed", per_page=2)
+    )
+    assert filtered == {"sets": 1, "difficulties": 2}

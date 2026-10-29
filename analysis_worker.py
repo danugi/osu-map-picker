@@ -126,11 +126,17 @@ def enqueue_catalog(
         ).fetchall()
         analyses = {
             int(row["beatmap_id"]): dict(row)
-            for row in conn.execute("SELECT * FROM beatmap_analysis")
+            for row in conn.execute(
+                "SELECT beatmap_id, analyzer_version, status, attempts, "
+                "file_mtime_ns, file_size FROM beatmap_analysis"
+            )
         }
         queue = {
             int(row["beatmap_id"]): dict(row)
-            for row in conn.execute("SELECT * FROM analysis_queue")
+            for row in conn.execute(
+                "SELECT beatmap_id, status, attempts, max_attempts "
+                "FROM analysis_queue"
+            )
         }
         favorite_ids = {
             int(row["beatmapset_id"])
@@ -250,12 +256,13 @@ def prioritize_beatmaps(
         analyses = {
             int(row["beatmap_id"]): dict(row)
             for row in conn.execute(
-                "SELECT * FROM beatmap_analysis"
+                "SELECT beatmap_id, analyzer_version, status, attempts "
+                "FROM beatmap_analysis"
             )
         }
         queued = {
             int(row["beatmap_id"]): dict(row)
-            for row in conn.execute("SELECT * FROM analysis_queue")
+            for row in conn.execute("SELECT beatmap_id FROM analysis_queue")
         }
     new_rows: list[tuple[int, int, str]] = []
     for beatmap_id in wanted:

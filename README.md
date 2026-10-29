@@ -656,7 +656,7 @@ stub-клиент, `gameplay.py` — на локальном образце `.os
   сохранённых карт в «Весь каталог» Библиотеки;
 - Streamlit AppTest для шести страниц и всех разделов настроек.
 
-Всего в текущем наборе **517 тестов**, все проходят без сети.
+Всего в текущем наборе **522 теста**, все проходят без сети.
 
 ### Что проверено, а что нет
 
@@ -716,6 +716,20 @@ bounded concurrency (4 worker) и serialized download starts throughput выро
 ```powershell
 .\.venv\Scripts\python.exe benchmarks\bench_analysis_worker.py --concurrency 1
 .\.venv\Scripts\python.exe benchmarks\bench_analysis_worker.py --concurrency 4
+```
+
+**Storage/read microbenchmark** (`benchmarks/bench_local_reads.py`, synthetic
+800 beatmapsets / 2400 difficulties, warm-up + median of 3, no network):
+
+| Операция | Старый путь | Новый путь | Ускорение |
+| --- | ---: | ---: | ---: |
+| 500 beatmapsets | 837.19 мс | 27.24 мс | 30.73× |
+| 300 cached attributes | 436.02 мс | 2.56 мс | 170.43× |
+| Library page | 15.34 мс | 11.03 мс | 1.39× |
+| Worker queue read | 5.91 мс | 3.41 мс | 1.74× |
+
+```powershell
+.\.venv\Scripts\python.exe benchmarks\bench_local_reads.py --count 800
 ```
 
 Это замеры Python-этапов на development-машине; цель ~2 с для локальной

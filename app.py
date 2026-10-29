@@ -4599,6 +4599,7 @@ def page_library(store: Storage, cfg: PresetConfig) -> None:
                 if preset_eval is not None
                 else None
             ),
+            include_counts=False,
         )
     except StorageError as exc:
         st.error(f"Библиотека не загрузилась: {exc}")
@@ -5755,6 +5756,7 @@ def _render_favorites(store: Storage) -> None:
             per_page=48,
             sort="stars_desc",
         ),
+        include_counts=False,
     )
     if page.sets:
         for start in range(0, len(page.sets), 2):

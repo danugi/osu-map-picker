@@ -433,3 +433,33 @@ def test_import_is_atomic_on_mid_transaction_failure(tmp_path, monkeypatch):
     assert not target.is_favorite(77)
     assert target.get_preference("imported") is None
     assert target.history_count() == 0
+
+
+def test_get_beatmapsets_deduplicates_preserves_order_and_missing(tmp_path):
+    store = Storage(tmp_path / "sets.db")
+    store.save_beatmapset(
+        make_beatmapset(
+            2,
+            beatmaps=(
+                make_beatmap(22, 2, stars=5.0, version="Hard"),
+                make_beatmap(21, 2, stars=6.0, version="Insane"),
+            ),
+        )
+    )
+    store.save_beatmapset(make_beatmapset(1))
+    store.save_beatmapset(make_beatmapset(3))
+    loaded = store.get_beatmapsets([3, 1, 3, 999, 2, 1])
+    assert list(loaded) == [3, 1, 2]
+    assert [item.id for item in loaded[2].beatmaps] == [22, 21]
+    assert store.get_beatmapsets([]) == {}
+    assert store.get_beatmapsets([999]) == {}
+
+
+def test_get_beatmapsets_chunks_large_id_lists(tmp_path):
+    store = Storage(tmp_path / "large.db")
+    store.save_beatmapsets(make_beatmapset(i) for i in range(1, 431))
+    ids = list(range(430, 0, -1)) + list(range(1, 431)) + [9999]
+    loaded = store.get_beatmapsets(ids)
+    assert list(loaded) == list(range(430, 0, -1))
+    assert len(loaded) == 430
+    assert all(item.id == key for key, item in loaded.items())
