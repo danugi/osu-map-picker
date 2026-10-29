@@ -81,15 +81,26 @@ def _target_match(
         )
 
     score = _clamp(float(item.score))
-    matched = score > threshold
-    if matched:
-        confirmed = item.support == "measured" and item.confidence in {
-            "medium",
-            "high",
-        }
-        status = MATCHED if confirmed else MATCHED_LIMITED
+    sequence_evidence = (
+        skill_uses_sequences(target_id)
+        or "osu_sequence_partial" in item.sources
+    )
+    incomplete = item.status == evidence.PARTIAL and sequence_evidence
+    if incomplete:
+        # Keep the numeric score and provenance for diagnostics, but a value
+        # from a truncated .osu pass cannot independently confirm a target.
+        matched = False
+        status = PARTIAL
     else:
-        status = BELOW
+        matched = score > threshold
+        if matched:
+            confirmed = item.support == "measured" and item.confidence in {
+                "medium",
+                "high",
+            }
+            status = MATCHED if confirmed else MATCHED_LIMITED
+        else:
+            status = BELOW
     return TargetMatch(
         target_id=target_id,
         label=label,
@@ -124,6 +135,16 @@ def _legacy_reason(
             f"Хотя бы один целевой тег выше порога {threshold:.0%}: "
             + ", ".join(parts)
             + "."
+        )
+    partial = [item for item in available if item.status == PARTIAL]
+    if partial:
+        return (
+            "частичный анализ: целевой тег имеет значение "
+            + ", ".join(
+                f"{item.label} {item.display_score}%" for item in partial
+            )
+            + ", но анализ покрыл только часть карты. Частичное значение не "
+            "подтверждает соответствие."
         )
     if not available:
         sequence_targets = [
@@ -191,17 +212,30 @@ def _feature_state(
         return True, ""
     present: list[str] = []
     matched: list[str] = []
+    partial: list[str] = []
     for feature in feature_ids:
         value = candidate.traits.scores.get(feature)
+        status = candidate.traits.status(feature)
+        source = candidate.traits.sources.get(feature, "")
+        label = FEATURE_LABELS.get(feature, feature)
+        incomplete = status == evidence.PARTIAL or source == "osu_sequence_partial"
+        if incomplete:
+            suffix = f" {round(value * 100)}%" if value is not None else ""
+            if source:
+                suffix += f" ({SOURCE_LABELS.get(source, source)})"
+            partial.append(label + suffix)
+            continue
         if value is None:
             continue
-        present.append(
-            f"{FEATURE_LABELS.get(feature, feature)} {round(value * 100)}%"
-        )
+        present.append(f"{label} {round(value * 100)}%")
         if value > threshold:
-            matched.append(FEATURE_LABELS.get(feature, feature))
+            matched.append(label)
     if matched:
         return True, "обязательные признаки: " + ", ".join(matched)
+    if partial:
+        return False, (
+            "частичный анализ обязательных признаков: " + ", ".join(partial)
+        )
     if present:
         return False, (
             "обязательные признаки ниже порога: " + ", ".join(present)
@@ -292,6 +326,30 @@ def evaluate_relevance(
             "Основной целевой тег пройден, но профиль не подтверждён: "
             f"{feature_reason}."
         )
+    elif any(item.status == PARTIAL for item in primary):
+        partial_primary = [
+            item for item in primary if item.status == PARTIAL
+        ]
+        reason = (
+            "частичный анализ: основные целевые теги имеют значения "
+            + ", ".join(
+                f"{item.label} {item.display_score}%"
+                for item in partial_primary
+            )
+            + ", но анализ покрыл только часть карты. Частичное значение не "
+            "подтверждает соответствие."
+        )
+        secondary_matches = [
+            item for item in matched if item.target_id not in primary_set
+        ]
+        if secondary_matches:
+            reason += (
+                " Вторичные совпадения не заменяют основной профиль: "
+                + ", ".join(item.label for item in secondary_matches)
+                + "."
+            )
+        if feature_reason:
+            reason += " " + feature_reason.capitalize() + "."
     elif not primary_available:
         sequence_targets = [
             item for item in primary if skill_uses_sequences(item.target_id)

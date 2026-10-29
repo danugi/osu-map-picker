@@ -6,6 +6,7 @@ import pytest
 from conftest import make_beatmap, make_beatmapset
 
 import config
+import evidence
 import presets
 from discovery import DiscoveryEngine
 from models import (
@@ -72,6 +73,8 @@ def score_candidate(
     play_count: int = 12_000,
     stars: float = 5.5,
     features: dict[str, float] | None = None,
+    feature_statuses: dict[str, str] | None = None,
+    feature_sources: dict[str, str] | None = None,
 ) -> Candidate:
     beatmapset = make_beatmapset(
         set_id,
@@ -101,7 +104,11 @@ def score_candidate(
     return Candidate(
         beatmapset=beatmapset,
         beatmap=beatmap,
-        traits=BeatmapFeatures(scores=dict(features or {})),
+        traits=BeatmapFeatures(
+            scores=dict(features or {}),
+            statuses=dict(feature_statuses or {}),
+            sources=dict(feature_sources or {}),
+        ),
         skillsets=skillsets,
     )
 
@@ -396,8 +403,8 @@ def test_high_recommendation_cannot_compensate_for_failed_targets(
         item for item in result.exclusions if item.stage == "relevance"
     )
     assert relevance_exclusion.beatmapset_id == 2
-    assert "порог" in relevance_exclusion.reason
-    assert "Tech" in relevance_exclusion.reason
+    assert "частичный анализ" in relevance_exclusion.reason.casefold()
+    assert "Slider-heavy" in relevance_exclusion.reason
     stored = result.scored[0].candidate.relevance
     assert stored is not None and stored.passed is True
     assert stored.targets
@@ -542,7 +549,12 @@ def test_analyzed_burst_target_without_bursts_is_below_threshold() -> None:
 
 def test_tag_only_target_is_not_reported_as_confirmed() -> None:
     candidate = score_candidate(
-        1, {"tech": 0.9}, tags=("tech",), features={"tag_tech": 1.0}
+        1,
+        {"tech": 0.9},
+        tags=("tech",),
+        features={"tag_tech": 1.0},
+        feature_statuses={"tag_tech": evidence.PROXY},
+        feature_sources={"tag_tech": "tags"},
     )
     preset = presets.builtin_by_name("Tech")
     assert preset is not None
@@ -763,6 +775,144 @@ def test_accuracy_missing_precision_features_is_not_a_match() -> None:
     )
     assert check.passed is False
     assert "precision/accuracy" in check.reason.casefold()
+
+
+def _mark_partial(
+    candidate: Candidate,
+    target_id: str,
+    score: float = 0.95,
+) -> None:
+    candidate.skillsets[target_id] = SkillScore(
+        skill_id=target_id,
+        name=target_id,
+        score=score,
+        confidence="medium",
+        support="measured",
+        sources=("osu_sequence_partial",),
+        status=evidence.PARTIAL,
+    )
+
+
+def test_partial_stream_target_never_satisfies_streams_policy() -> None:
+    preset = presets.builtin_by_name("Streams & Stamina")
+    assert preset is not None
+    candidate = score_candidate(
+        1,
+        {"stream_consistency": 0.10, "stream_long": 0.10},
+        features={"streams": 0.95},
+    )
+    _mark_partial(candidate, "stream_consistency")
+    check = evaluate_relevance(candidate, preset.ranking)
+    assert check.passed is False
+    target = next(
+        item for item in check.targets if item.target_id == "stream_consistency"
+    )
+    assert target.score == 0.95
+    assert target.matched is False
+    assert target.status == "частичный анализ"
+    assert "частичный анализ" in check.reason.casefold()
+
+
+def test_partial_burst_target_never_satisfies_bursts_policy() -> None:
+    preset = presets.builtin_by_name("Bursts")
+    assert preset is not None
+    candidate = score_candidate(
+        1,
+        {
+            "burst_control": 0.10,
+            "speed_bursts": 0.10,
+            "speed_short_bursts": 0.10,
+        },
+        features={"bursts": 0.95},
+    )
+    _mark_partial(candidate, "burst_control")
+    check = evaluate_relevance(candidate, preset.ranking)
+    assert check.passed is False
+    assert "частичный анализ" in check.reason.casefold()
+
+
+def test_partial_required_features_never_satisfy_policy() -> None:
+    streams = presets.builtin_by_name("Streams & Stamina")
+    bursts = presets.builtin_by_name("Bursts")
+    assert streams is not None and bursts is not None
+
+    stream_candidate = score_candidate(
+        1,
+        {"stream_consistency": 0.90, "stream_long": 0.10},
+        features={"streams": 0.99},
+        feature_statuses={"streams": evidence.PARTIAL},
+        feature_sources={"streams": "osu_sequence_partial"},
+    )
+    stream_check = evaluate_relevance(stream_candidate, streams.ranking)
+    assert stream_check.passed is False
+    assert "частичный анализ обязательных признаков" in stream_check.reason.casefold()
+
+    burst_candidate = score_candidate(
+        1,
+        {
+            "burst_control": 0.90,
+            "speed_bursts": 0.10,
+            "speed_short_bursts": 0.10,
+        },
+        features={"bursts": 0.99},
+        feature_statuses={"bursts": evidence.PARTIAL},
+        feature_sources={"bursts": "osu_sequence_partial"},
+    )
+    burst_check = evaluate_relevance(burst_candidate, bursts.ranking)
+    assert burst_check.passed is False
+    assert "частичный анализ обязательных признаков" in burst_check.reason.casefold()
+
+
+def test_non_partial_alternative_can_still_satisfy_policy() -> None:
+    preset = presets.builtin_by_name("Streams & Stamina")
+    assert preset is not None
+    candidate = score_candidate(
+        1,
+        {"stream_consistency": 0.95, "stream_long": 0.80},
+        features={"streams": 0.95},
+        feature_statuses={"streams": evidence.MEASURED},
+        feature_sources={"streams": "osu_sequence"},
+    )
+    _mark_partial(candidate, "stream_consistency")
+    check = evaluate_relevance(candidate, preset.ranking)
+    assert check.passed is True
+    assert check.best_target is not None
+    assert check.best_target.target_id == "stream_long"
+
+    tech = presets.builtin_by_name("Tech")
+    assert tech is not None
+    feature_candidate = score_candidate(
+        2,
+        {"tech": 0.85, "slider_heavy": 0.10, "rhythm_complexity": 0.10},
+        features={"tag_tech": 0.99, "slider_ratio": 0.80},
+        feature_statuses={
+            "tag_tech": evidence.PARTIAL,
+            "slider_ratio": evidence.MEASURED,
+        },
+        feature_sources={
+            "tag_tech": "osu_sequence_partial",
+            "slider_ratio": "beatmap_counts",
+        },
+    )
+    feature_check = evaluate_relevance(feature_candidate, tech.ranking)
+    assert feature_check.passed is True
+    assert "доля слайдеров" in feature_check.reason.casefold()
+
+
+def test_fully_analyzed_sequence_evidence_still_passes() -> None:
+    preset = presets.builtin_by_name("Streams & Stamina")
+    assert preset is not None
+    candidate = score_candidate(
+        1,
+        {"stream_consistency": 0.90, "stream_long": 0.10},
+        features={"streams": 0.99},
+        feature_statuses={"streams": evidence.MEASURED},
+        feature_sources={"streams": "osu_sequence"},
+    )
+    check = evaluate_relevance(candidate, preset.ranking)
+    assert check.passed is True
+    assert "обязательные признаки" in check.reason.casefold()
+    assert "streams" in check.reason.casefold()
 
 
 def test_invalid_relevance_policy_is_rejected() -> None:
