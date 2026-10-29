@@ -548,6 +548,48 @@ def test_save_beatmapsets_does_not_use_future_parent_for_fk(tmp_path):
     assert store.get_beatmapset(2) is None
 
 
+def test_save_beatmapsets_future_parent_after_batch_boundary(tmp_path):
+    store = Storage(tmp_path / "writes.db")
+    normal = [make_beatmapset(i) for i in range(1, 201)]
+    boundary = make_beatmapset(201, beatmaps=(make_beatmap(2011, 202),))
+    future = make_beatmapset(202)
+    with pytest.raises(sqlite3.IntegrityError):
+        store.save_beatmapsets([*normal, boundary, future])
+    assert store.beatmapset_count() == 0
+
+
+def test_save_beatmapsets_cross_set_reference_to_existing_parent(tmp_path):
+    store = Storage(tmp_path / "writes.db")
+    parent = make_beatmapset(2)
+    store.save_beatmapset(parent)
+    child = make_beatmapset(1, beatmaps=(make_beatmap(11, 2),))
+    assert store.save_beatmapsets([child]) == 1
+    assert store.get_beatmapset(1) is not None
+    parent_loaded = store.get_beatmapset(2)
+    assert parent_loaded is not None
+    assert 11 in {item.id for item in parent_loaded.beatmaps}
+
+
+def test_save_beatmapsets_generator_spans_multiple_batches(tmp_path):
+    store = Storage(tmp_path / "writes.db")
+    loaded = store.save_beatmapsets(
+        make_beatmapset(
+            i,
+            beatmaps=(
+                make_beatmap(i * 10 + 1, i),
+                make_beatmap(i * 10 + 2, i),
+            ),
+        )
+        for i in range(1, 206)
+    )
+    assert loaded == 205
+    assert store.beatmapset_count() == 205
+    assert all(
+        len(item.beatmaps) == 2
+        for item in store.get_beatmapsets(range(1, 206)).values()
+    )
+
+
 def test_save_beatmapsets_rolls_back_failed_batch(tmp_path):
     store = Storage(tmp_path / "writes.db")
     good = make_beatmapset(1, beatmaps=(make_beatmap(11, 1),))

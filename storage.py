@@ -386,16 +386,20 @@ class Storage:
         saved = 0
         set_rows: list[tuple[object, ...]] = []
         map_rows: list[tuple[object, ...]] = []
-        seen_set_ids: set[int] = set()
-        existing_set_ids: set[int] | None = None
 
-        def flush() -> None:
+        def flush_sets() -> None:
             if set_rows:
                 conn.executemany(_BEATMAPSET_UPSERT_SQL, set_rows)
                 set_rows.clear()
+
+        def flush_maps() -> None:
             if map_rows:
                 conn.executemany(_BEATMAP_UPSERT_SQL, map_rows)
                 map_rows.clear()
+
+        def flush() -> None:
+            flush_sets()
+            flush_maps()
 
         for beatmapset in beatmapsets:
             set_rows.append(
@@ -426,23 +430,21 @@ class Storage:
                     beatmapset.fetched_at,
                 )
             )
-            seen_set_ids.add(int(beatmapset.id))
             for beatmap in beatmapset.beatmaps:
                 target_set_id = int(beatmap.beatmapset_id)
                 if target_set_id != int(beatmapset.id):
                     # The legacy row-by-row path could only satisfy a foreign
-                    # key from an already-seen/current set. Keep that failure
-                    # behavior even though parent rows are now flushed first.
-                    if existing_set_ids is None:
-                        existing_set_ids = {
-                            int(row["id"])
-                            for row in conn.execute(
-                                "SELECT id FROM beatmapsets"
-                            ).fetchall()
-                        }
+                    # key from an already-seen/current set or an existing DB
+                    # row. Flush only seen parents, then use a targeted lookup;
+                    # this keeps memory bounded without allowing a future
+                    # parent to satisfy the FK.
+                    flush_sets()
                     if (
-                        target_set_id not in seen_set_ids
-                        and target_set_id not in existing_set_ids
+                        conn.execute(
+                            "SELECT 1 FROM beatmapsets WHERE id = ?",
+                            (target_set_id,),
+                        ).fetchone()
+                        is None
                     ):
                         raise sqlite3.IntegrityError(
                             "FOREIGN KEY constraint failed"
