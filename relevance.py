@@ -23,6 +23,7 @@ from __future__ import annotations
 import evidence
 from features import FEATURE_LABELS, SOURCE_LABELS
 from models import Candidate, RankingSettings, RelevanceResult, TargetMatch
+from patterns import SEQUENCE_FEATURE_KEYS
 from skillsets import SKILLS, evaluate_skills, skill_uses_sequences
 
 NO_DATA = "недостаточно данных"
@@ -44,6 +45,54 @@ def _source_text(sources: tuple[str, ...]) -> str:
     if not labels:
         return NO_DATA
     return "; ".join(dict.fromkeys(labels))
+
+
+def _target_feature_ids(
+    skill_id: str,
+    seen: set[str] | None = None,
+) -> tuple[str, ...]:
+    """Feature ids that can contribute to a skill, including components."""
+
+    visited = seen if seen is not None else set()
+    if skill_id in visited:
+        return ()
+    visited.add(skill_id)
+    definition = SKILLS.get(skill_id)
+    if definition is None:
+        return ()
+    features = list(definition.feature_names)
+    for component in definition.component_names:
+        features.extend(_target_feature_ids(component, visited))
+    return tuple(dict.fromkeys(features))
+
+
+def _uses_partial_sequence_evidence(
+    target_id: str,
+    candidate: Candidate,
+    item: object,
+) -> bool:
+    """Whether a target's score actually drew on a partial .osu sequence.
+
+    A skill may use sequence features without the current score using them at
+    all (for example ``aim_control`` can score from attributes/CS while
+    ``angle_change_share`` is absent).  Only an actually contributing partial
+    sequence feature, or partial sequence provenance retained on the score,
+    counts as incomplete.
+    """
+
+    sources = tuple(getattr(item, "sources", ()))
+    if "osu_sequence_partial" in sources:
+        return True
+    for feature in _target_feature_ids(target_id):
+        if feature not in SEQUENCE_FEATURE_KEYS:
+            continue
+        if candidate.traits.scores.get(feature) is None:
+            continue
+        status = candidate.traits.status(feature)
+        source = candidate.traits.sources.get(feature, "")
+        if status == evidence.PARTIAL or source == "osu_sequence_partial":
+            return True
+    return False
 
 
 def _target_match(
@@ -81,11 +130,7 @@ def _target_match(
         )
 
     score = _clamp(float(item.score))
-    sequence_evidence = (
-        skill_uses_sequences(target_id)
-        or "osu_sequence_partial" in item.sources
-    )
-    incomplete = item.status == evidence.PARTIAL and sequence_evidence
+    incomplete = _uses_partial_sequence_evidence(target_id, candidate, item)
     if incomplete:
         # Keep the numeric score and provenance for diagnostics, but a value
         # from a truncated .osu pass cannot independently confirm a target.

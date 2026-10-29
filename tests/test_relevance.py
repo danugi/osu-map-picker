@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Callable
 
 import pytest
@@ -403,8 +404,8 @@ def test_high_recommendation_cannot_compensate_for_failed_targets(
         item for item in result.exclusions if item.stage == "relevance"
     )
     assert relevance_exclusion.beatmapset_id == 2
-    assert "частичный анализ" in relevance_exclusion.reason.casefold()
-    assert "Slider-heavy" in relevance_exclusion.reason
+    assert "порог" in relevance_exclusion.reason
+    assert "Tech" in relevance_exclusion.reason
     stored = result.scored[0].candidate.relevance
     assert stored is not None and stored.passed is True
     assert stored.targets
@@ -791,6 +792,105 @@ def _mark_partial(
         sources=("osu_sequence_partial",),
         status=evidence.PARTIAL,
     )
+
+
+def _mark_skill(
+    candidate: Candidate,
+    target_id: str,
+    score: float,
+    *,
+    status: str,
+    sources: tuple[str, ...],
+    support: str = "measured",
+    confidence: str = "medium",
+) -> None:
+    candidate.skillsets[target_id] = SkillScore(
+        skill_id=target_id,
+        name=target_id,
+        score=score,
+        confidence=confidence,
+        support=support,
+        sources=sources,
+        status=status,
+    )
+
+
+def test_aim_control_partial_coverage_without_sequence_is_allowed() -> None:
+    preset = presets.builtin_by_name("Mixed Aim")
+    assert preset is not None
+    candidate = score_candidate(
+        1,
+        {"aim_classic": 0.10, "aim_control": 0.10, "aim_bursts": 0.10},
+        features={
+            "control": 0.85,
+            "aim_pressure": 0.75,
+            "slider_factor": 0.65,
+            "cs": 0.80,
+        },
+        feature_statuses={
+            "control": evidence.MEASURED,
+            "aim_pressure": evidence.MEASURED,
+            "slider_factor": evidence.MEASURED,
+            "cs": evidence.MEASURED,
+        },
+        feature_sources={
+            "control": "osu_api_attributes",
+            "aim_pressure": "osu_api_attributes",
+            "slider_factor": "osu_api_attributes",
+            "cs": "beatmap_cs",
+        },
+    )
+    # aim_control can use angle_change_share, but that feature was not
+    # available. Its PARTIAL status here is coverage loss, not partial .osu.
+    candidate = replace(candidate, skillsets=evaluate_skills(candidate.traits))
+    aim_control = candidate.skillsets["aim_control"]
+    assert aim_control.score is not None and aim_control.score > 0.55
+    assert aim_control.status == evidence.PARTIAL
+    assert "osu_sequence_partial" not in aim_control.sources
+    check = evaluate_relevance(candidate, preset.ranking)
+    assert check.passed is True
+    assert check.best_target is not None
+    assert check.best_target.target_id == "aim_control"
+
+
+def test_aim_control_rejects_actual_partial_sequence_contribution() -> None:
+    preset = presets.builtin_by_name("Mixed Aim")
+    assert preset is not None
+    candidate = score_candidate(
+        1,
+        {"aim_classic": 0.10, "aim_control": 0.10, "aim_bursts": 0.10},
+        features={
+            "angle_change_share": 0.90,
+            "control": 0.85,
+            "aim_pressure": 0.75,
+            "slider_factor": 0.65,
+            "cs": 0.80,
+        },
+        feature_statuses={
+            "angle_change_share": evidence.PARTIAL,
+            "control": evidence.MEASURED,
+            "aim_pressure": evidence.MEASURED,
+            "slider_factor": evidence.MEASURED,
+            "cs": evidence.MEASURED,
+        },
+        feature_sources={
+            "angle_change_share": "osu_sequence_partial",
+            "control": "osu_api_attributes",
+            "aim_pressure": "osu_api_attributes",
+            "slider_factor": "osu_api_attributes",
+            "cs": "beatmap_cs",
+        },
+    )
+    _mark_skill(
+        candidate,
+        "aim_control",
+        0.90,
+        status=evidence.PARTIAL,
+        sources=("osu_sequence_partial", "osu_api_attributes", "beatmap_cs"),
+    )
+    check = evaluate_relevance(candidate, preset.ranking)
+    assert check.passed is False
+    assert "частичный анализ" in check.reason.casefold()
 
 
 def test_partial_stream_target_never_satisfies_streams_policy() -> None:
