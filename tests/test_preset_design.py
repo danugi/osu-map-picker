@@ -263,10 +263,14 @@ def test_every_mandatory_gate_target_is_a_weighted_skill() -> None:
 
 
 def test_broad_presets_do_not_inherit_specialized_gates() -> None:
-    for name in ("Mixed Aim", "All-rounder", "Discovery", "Any Taste"):
+    for name in ("All-rounder", "Discovery", "Any Taste"):
         preset = presets.known_builtin_by_name(name)
         assert preset is not None
         assert preset.ranking.relevance_targets == []
+    mixed = presets.known_builtin_by_name("Mixed Aim")
+    assert mixed is not None
+    assert mixed.ranking.relevance_targets
+    assert mixed.ranking.relevance_policy["primary_targets"]
     candidate = Candidate(
         beatmapset=make_beatmapset(99),
         beatmap=make_beatmap(999, 99),
@@ -342,7 +346,7 @@ def test_v10_migration_upgrades_untouched_aim_farm(storage: Storage) -> None:
         "Sped Up",
     ]
     assert upgraded.config.ranking.relevance_targets == ["aim_classic"]
-    assert presets.BUILTIN_PRESETS_VERSION == 11
+    assert presets.BUILTIN_PRESETS_VERSION == 12
 
 
 def test_v10_migration_preserves_edited_builtin_and_user_data(
@@ -524,11 +528,61 @@ def test_v11_migration_updates_untouched_v10_aim_farm_limits(storage) -> None:
 
     updated = storage.get_preset(farm.id)
     assert updated is not None
-    assert presets.BUILTIN_PRESETS_VERSION == 11
+    assert presets.BUILTIN_PRESETS_VERSION == 12
     assert updated.config.discovery.max_requests == 56
     assert updated.config.discovery.max_pages_per_strategy == 3
     assert updated.config.discovery.fetch_attributes_limit == 40
-    assert storage.get_preference("builtins_version") == "11"
+    assert storage.get_preference("builtins_version") == "12"
+
+
+def test_v12_migration_adds_policy_to_untouched_builtins(storage) -> None:
+    names = (
+        "Mixed Aim",
+        "Speed",
+        "Streams & Stamina",
+        "Bursts",
+        "Finger Control",
+        "Reading",
+        "Accuracy",
+        "Tech",
+        "Flashlight",
+    )
+    for name in names:
+        preset = storage.get_preset_by_name(name)
+        assert preset is not None
+        old = copy.deepcopy(preset.config)
+        old.ranking.relevance_targets = list(presets._PRE_V12_TARGETS[name])
+        old.ranking.relevance_policy = {}
+        storage.update_preset(preset.id, old)
+
+    speed = storage.get_preset_by_name("Speed")
+    assert speed is not None
+    edited = copy.deepcopy(speed.config)
+    edited.filters.stars_min = 4.25
+    storage.update_preset(speed.id, edited)
+
+    storage.set_preference("builtins_version", "11")
+    presets.ensure_builtin_presets(storage)
+
+    for name in names:
+        if name == "Speed":
+            continue
+        preset = storage.get_preset_by_name(name)
+        assert preset is not None
+        modern = presets.builtin_by_name(name)
+        assert modern is not None
+        assert preset.config.ranking.relevance_targets == (
+            modern.ranking.relevance_targets
+        )
+        assert preset.config.ranking.relevance_policy == (
+            modern.ranking.relevance_policy
+        )
+
+    kept = storage.get_preset_by_name("Speed")
+    assert kept is not None
+    assert kept.config.filters.stars_min == 4.25
+    assert kept.config.ranking.relevance_policy == {}
+    assert storage.get_preference("builtins_version") == "12"
 
 
 def test_v11_migration_preserves_edited_v10_aim_farm(storage) -> None:

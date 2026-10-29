@@ -8,6 +8,7 @@ modules (``filters``, ``ranking``, ``presets``).
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 from typing import Any, Iterable
@@ -471,9 +472,15 @@ class RankingSettings:
     # Universal skillset weights, e.g. {"aim_classic": 1.0, "stream_consistency": 0.5}.
     skill_weights: dict[str, float] = field(default_factory=dict)
     # Optional mandatory pre-ranking gate for specialized presets. Each id is
-    # a skillset whose measured/proxy score must exceed relevance_threshold
-    # for at least one target. Empty means "no gate" (Mixed Aim, All-rounder).
+    # a skillset whose measured/proxy score must exceed relevance_threshold.
+    # Empty means "no gate" (Discovery, All-rounder).
     relevance_targets: list[str] = field(default_factory=list)
+    # Optional preset-specific policy:
+    #   primary_targets: subset of relevance_targets that can satisfy the gate
+    #   min_primary: how many primary matches are required
+    #   require_features_any: feature ids where at least one must be present
+    # Empty preserves the legacy any-target behavior (Aim Farm).
+    relevance_policy: dict[str, Any] = field(default_factory=dict)
     relevance_threshold: float = config.DEFAULT_RELEVANCE_THRESHOLD
     farm_target_seconds: int = config.DEFAULT_FARM_TARGET_SECONDS
     farm_tolerance_seconds: int = config.DEFAULT_FARM_TOLERANCE_SECONDS
@@ -492,6 +499,7 @@ class RankingSettings:
             "trait_targets": dict(self.trait_targets),
             "skill_weights": dict(self.skill_weights),
             "relevance_targets": list(self.relevance_targets),
+            "relevance_policy": copy.deepcopy(self.relevance_policy),
             "relevance_threshold": self.relevance_threshold,
             "farm_target_seconds": self.farm_target_seconds,
             "farm_tolerance_seconds": self.farm_tolerance_seconds,
@@ -537,6 +545,12 @@ class RankingSettings:
             data.get("relevance_targets", []),
             f"{path}.relevance_targets",
         )
+        policy_raw = data.get("relevance_policy", {})
+        if policy_raw is None:
+            policy_raw = {}
+        if not isinstance(policy_raw, dict):
+            raise ModelError(f"{path}.relevance_policy: ожидался объект")
+        relevance_policy = copy.deepcopy(policy_raw)
         threshold = _opt_float(
             data.get("relevance_threshold", config.DEFAULT_RELEVANCE_THRESHOLD),
             f"{path}.relevance_threshold",
@@ -558,6 +572,7 @@ class RankingSettings:
             trait_targets=targets,
             skill_weights=skills,
             relevance_targets=relevance_targets,
+            relevance_policy=relevance_policy,
             relevance_threshold=threshold,
             farm_target_seconds=int(
                 data.get("farm_target_seconds", config.DEFAULT_FARM_TARGET_SECONDS)

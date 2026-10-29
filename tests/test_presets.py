@@ -332,12 +332,22 @@ def test_old_json_without_skillset_fields_still_loads() -> None:
     data["ranking"].pop("skill_weights", None)
     data["ranking"].pop("farm_target_seconds", None)
     data["ranking"].pop("relevance_targets", None)
+    data["ranking"].pop("relevance_policy", None)
     data["ranking"].pop("relevance_threshold", None)
     loaded = PresetConfig.from_dict(data)
     assert loaded.ranking.skill_weights == {}
     assert loaded.ranking.farm_target_seconds == config.DEFAULT_FARM_TARGET_SECONDS
     assert loaded.ranking.relevance_targets == []
+    assert loaded.ranking.relevance_policy == {}
     assert loaded.ranking.relevance_threshold == config.DEFAULT_RELEVANCE_THRESHOLD
+
+
+def test_policy_roundtrips_through_preset_json() -> None:
+    preset = presets.builtin_by_name("Tech")
+    assert preset is not None
+    loaded = PresetConfig.from_dict(preset.to_dict())
+    assert loaded.ranking.relevance_policy == preset.ranking.relevance_policy
+    assert loaded.ranking.relevance_policy["require_features_any"]
 
 
 def test_v8_migration_adds_targets_only_to_untouched_builtins(
@@ -349,10 +359,12 @@ def test_v8_migration_adds_targets_only_to_untouched_builtins(
 
     untouched = copy.deepcopy(tech.config)
     untouched.ranking.relevance_targets = []
+    untouched.ranking.relevance_policy = {}
     storage.update_preset(tech.id, untouched)
 
     edited = copy.deepcopy(speed.config)
     edited.ranking.relevance_targets = []
+    edited.ranking.relevance_policy = {}
     edited.filters.stars_min = 4.25
     storage.update_preset(speed.id, edited)
 

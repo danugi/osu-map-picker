@@ -348,6 +348,7 @@ def test_successful_search_reveals_saved_maps_in_library(app_env) -> None:
     store = Storage(app_env)
     _seed_app_library(store, 2)
     at = AppTest.from_file(APP, default_timeout=90)
+    _activate_preset(at, store)
     at.session_state["nav"] = "search"
     at.session_state["search_local_only"] = True
     at.run()
@@ -1312,7 +1313,7 @@ def test_collect_random_pool_reads_only_filtered_local_catalog(
             ),
         )
     )
-    cfg = presets.builtin_by_name("Mixed Aim")
+    cfg = presets.builtin_by_name("Discovery")
     assert cfg is not None
 
     def fail(*args, **kwargs):
@@ -1356,7 +1357,7 @@ def test_random_scope_reacts_to_ranking_and_filter_changes() -> None:
 def test_random_pool_is_not_truncated_to_the_display_cap(app_env) -> None:
     store = Storage(app_env)
     _seed_many_cached_maps(store, 450)
-    cfg = presets.builtin_by_name("Mixed Aim")
+    cfg = presets.builtin_by_name("Discovery")
     assert cfg is not None
     cfg.filters.duration_min = None
     cfg.filters.duration_max = None
@@ -1453,6 +1454,7 @@ def test_random_selection_ignores_plain_search_history_window(app_env) -> None:
     store = Storage(app_env)
     _seed_many_cached_maps(store, 30)
     at = AppTest.from_file(APP, default_timeout=90)
+    _activate_preset(at, store)
     at.run()
     _button(at, "run_search").click().run()
     assert store.history_count() == 30
@@ -1482,6 +1484,7 @@ def test_random_selection_uses_new_candidates_and_reports_shortfall(app_env) -> 
     store.set_feedback(1, ["like"])
 
     at = AppTest.from_file(APP, default_timeout=90)
+    _activate_preset(at, store)
     at.run()
     before_config = at.session_state["active_config"].to_dict()
     random_size = _number(at, "random_size")
@@ -1642,6 +1645,7 @@ def test_explicit_search_populates_catalog_for_later_local_random(
     monkeypatch.setattr(osu_api, "OsuApiClient", FakeClient)
 
     at = AppTest.from_file(APP, default_timeout=90)
+    _activate_preset(at, Storage(app_env))
     at.run()
     _button(at, "run_search").click().run()
     assert not at.exception, _texts(at)
@@ -1687,6 +1691,7 @@ def test_random_avoid_seen_off_allows_repeating_the_last_selection(app_env) -> N
     store = Storage(app_env)
     _seed_many_cached_maps(store, 3)
     at = AppTest.from_file(APP, default_timeout=90)
+    _activate_preset(at, store)
     at.run()
     _number(at, "random_size").set_value(3).run()
 
@@ -1717,6 +1722,7 @@ def test_random_session_resets_when_filters_change(app_env) -> None:
     store = Storage(app_env)
     _seed_many_cached_maps(store, 12)
     at = AppTest.from_file(APP, default_timeout=90)
+    _activate_preset(at, store)
     at.run()
     _number(at, "random_size").set_value(3).run()
 
@@ -1740,6 +1746,7 @@ def test_random_session_does_not_repeat_across_large_selections(app_env) -> None
     store = Storage(app_env)
     _seed_many_cached_maps(store, 82)
     at = AppTest.from_file(APP, default_timeout=120)
+    _activate_preset(at, store)
     at.run()
     _number(at, "random_size").set_value(40).run()
 
@@ -1786,6 +1793,7 @@ def test_random_selection_keeps_strict_filters(app_env) -> None:
         )
     )
     at = AppTest.from_file(APP, default_timeout=90)
+    _activate_preset(at, store)
     at.run()
     _number(at, "random_size").set_value(3).run()
     _button(at, "random_selection").click().run()
@@ -1804,6 +1812,7 @@ def test_random_pick_is_strict_and_repeatable_from_current_result(app_env) -> No
     store = Storage(app_env)
     _seed_many_cached_maps(store, 30)
     at = AppTest.from_file(APP, default_timeout=90)
+    _activate_preset(at, store)
     at.run()
     _button(at, "random_selection").click().run()
     result = _search_result(at)
@@ -1851,6 +1860,7 @@ def test_gameplay_preview_uses_the_selected_difficulty_without_searching(
 
     monkeypatch.setattr(gameplay, "load_preview", fake_load_preview)
     at = AppTest.from_file(APP, default_timeout=90)
+    _activate_preset(at, store)
     at.run()
     _button(at, "run_search").click().run()
     assert not at.exception
@@ -1886,6 +1896,7 @@ def test_gameplay_preview_renders_inside_the_selected_card(
 
     monkeypatch.setattr(gameplay, "load_preview", fake_load_preview)
     at = AppTest.from_file(APP, default_timeout=90)
+    _activate_preset(at, store)
     at.run()
     _button(at, "run_search").click().run()
     _button(at, "preview_779").click().run()
@@ -1981,6 +1992,15 @@ def _seed_library_sets(
     return ids
 
 
+def _activate_preset(at, store: Storage, name: str = "Discovery") -> None:
+    """Use an ungated broad preset in tests that are not about preset gates."""
+
+    presets.ensure_builtin_presets(store)
+    preset = store.get_preset_by_name(name)
+    assert preset is not None
+    at.session_state["active_preset_id"] = preset.id
+
+
 def _seed_app_library(store: Storage, count: int = 2) -> list[int]:
     ids: list[int] = []
     for index in range(1, count + 1):
@@ -2026,6 +2046,7 @@ def test_library_page_shows_database_cards_and_analysis_state(
     _seed_app_library(store, 2)
     at = AppTest.from_file(APP, default_timeout=90)
     at.session_state["nav"] = "library"
+    at.session_state["library_preset_mode"] = False
     at.run()
     assert not at.exception, _texts(at)
     assert "Библиотека карт" in [header.value for header in at.header]
@@ -2339,6 +2360,7 @@ def test_library_preview_error_does_not_destroy_browsing(
     )
     at = AppTest.from_file(APP, default_timeout=90)
     at.session_state["nav"] = "library"
+    at.session_state["library_preset_mode"] = False
     at.session_state["library_query"] = "Library Song 1"
     at.session_state["library_preview_entry"] = entry
     at.run()
@@ -2360,6 +2382,7 @@ def test_library_scope_filter_is_database_backed(app_env) -> None:
     store.enqueue_analysis([(202, 100, "test")])
     at = AppTest.from_file(APP, default_timeout=90)
     at.session_state["nav"] = "library"
+    at.session_state["library_preset_mode"] = False
     at.run()
     assert "Library Song 1" in _texts(at)
     assert "Queued Library" not in _texts(at)
@@ -2374,6 +2397,7 @@ def test_library_pagination_moves_between_local_sets(app_env) -> None:
     _seed_app_library(store, 14)
     at = AppTest.from_file(APP, default_timeout=120)
     at.session_state["nav"] = "library"
+    at.session_state["library_preset_mode"] = False
     at.run()
     assert not at.exception, _texts(at)
     assert int(at.session_state["library_page"]) == 1
@@ -2402,6 +2426,7 @@ def test_library_works_without_network(app_env, monkeypatch) -> None:
     )
     at = AppTest.from_file(APP, default_timeout=90)
     at.session_state["nav"] = "library"
+    at.session_state["library_preset_mode"] = False
     at.run()
     assert not at.exception
     assert "Library Song 1" in _texts(at)
@@ -2421,6 +2446,7 @@ def test_gameplay_preview_error_offers_the_original_mapset(
 
     monkeypatch.setattr(gameplay, "load_preview", fake_load_preview)
     at = AppTest.from_file(APP, default_timeout=90)
+    _activate_preset(at, store)
     at.run()
     _button(at, "run_search").click().run()
     _button(at, "preview_778").click().run()

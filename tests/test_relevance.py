@@ -71,6 +71,7 @@ def score_candidate(
     rating: float = 8.4,
     play_count: int = 12_000,
     stars: float = 5.5,
+    features: dict[str, float] | None = None,
 ) -> Candidate:
     beatmapset = make_beatmapset(
         set_id,
@@ -100,7 +101,7 @@ def score_candidate(
     return Candidate(
         beatmapset=beatmapset,
         beatmap=beatmap,
-        traits=BeatmapFeatures(),
+        traits=BeatmapFeatures(scores=dict(features or {})),
         skillsets=skillsets,
     )
 
@@ -198,11 +199,16 @@ def test_target_source_keeps_tag_and_proxy_provenance() -> None:
     assert "тег" in check.targets[0].source.casefold()
 
 
-def test_mixed_aim_and_allrounder_have_no_target_gate() -> None:
-    for name in ("Mixed Aim", "All-rounder"):
+def test_discovery_and_allrounder_have_no_target_gate() -> None:
+    for name in ("Discovery", "All-rounder"):
         preset = presets.builtin_by_name(name)
         assert preset is not None
         assert preset.ranking.relevance_targets == []
+        assert preset.ranking.relevance_policy == {}
+    mixed = presets.builtin_by_name("Mixed Aim")
+    assert mixed is not None
+    assert mixed.ranking.relevance_targets
+    assert mixed.ranking.relevance_policy["primary_targets"]
     candidate = score_candidate(1, {})
     check = evaluate_relevance(candidate, RankingSettings())
     assert check.passed is True
@@ -212,6 +218,7 @@ def test_mixed_aim_and_allrounder_have_no_target_gate() -> None:
 
 def test_specialized_presets_use_their_own_weighted_targets() -> None:
     expected = {
+        "Mixed Aim",
         "Aim Farm",
         "Speed",
         "Streams & Stamina",
@@ -220,6 +227,7 @@ def test_specialized_presets_use_their_own_weighted_targets() -> None:
         "Reading",
         "Accuracy",
         "Tech",
+        "Flashlight",
     }
     target_sets: dict[str, tuple[str, ...]] = {}
     for name in expected:
@@ -277,8 +285,12 @@ def test_each_specialized_preset_passes_on_its_own_target(name: str) -> None:
         target: (0.80 if index == 0 else 0.10)
         for index, target in enumerate(targets)
     }
+    required = tuple(
+        preset.ranking.relevance_policy.get("require_features_any", ())
+    )
+    features = {required[0]: 1.0} if required else {}
     check = evaluate_relevance(
-        score_candidate(1, scores),
+        score_candidate(1, scores, features=features),
         preset.ranking,
     )
     assert check.passed is True
@@ -292,6 +304,7 @@ def test_switching_preset_changes_the_target_criteria() -> None:
         {"tech": 0.8, "slider_heavy": 0.7, "rhythm_complexity": 0.6,
          "ar_challenge": 0.1, "pattern_recognition": 0.1,
          "visual_complexity": 0.1},
+        features={"tag_tech": 1.0},
     )
     tech = presets.builtin_by_name("Tech")
     reading = presets.builtin_by_name("Reading")
@@ -390,7 +403,7 @@ def test_high_recommendation_cannot_compensate_for_failed_targets(
     assert stored.targets
 
 
-@pytest.mark.parametrize("name", ["Mixed Aim", "All-rounder"])
+@pytest.mark.parametrize("name", ["Discovery", "All-rounder"])
 def test_generic_presets_do_not_filter_untagged_maps(name, storage) -> None:
     sets = tuple(
         make_beatmapset(
@@ -528,7 +541,9 @@ def test_analyzed_burst_target_without_bursts_is_below_threshold() -> None:
 
 
 def test_tag_only_target_is_not_reported_as_confirmed() -> None:
-    candidate = score_candidate(1, {"tech": 0.9}, tags=("tech",))
+    candidate = score_candidate(
+        1, {"tech": 0.9}, tags=("tech",), features={"tag_tech": 1.0}
+    )
     preset = presets.builtin_by_name("Tech")
     assert preset is not None
     check = evaluate_relevance(candidate, preset.ranking)
@@ -564,6 +579,210 @@ def test_strict_filters_run_before_relevance(storage) -> None:
     assert result.scored == ()
     assert result.excluded["длительность вне диапазона"] == 1
     assert result.excluded.get("соответствие целевым тегам ниже порога", 0) == 0
+
+
+def test_mixed_aim_requires_an_aim_target() -> None:
+    preset = presets.builtin_by_name("Mixed Aim")
+    assert preset is not None
+    scores = {
+        "aim_classic": 0.20,
+        "aim_control": 0.20,
+        "aim_bursts": 0.10,
+    }
+    check = evaluate_relevance(score_candidate(1, scores), preset.ranking)
+    assert check.passed is False
+    assert "основной" in check.reason.casefold()
+
+    alternative = evaluate_relevance(
+        score_candidate(
+            2,
+            {"aim_classic": 0.10, "aim_control": 0.80, "aim_bursts": 0.10},
+        ),
+        preset.ranking,
+    )
+    assert alternative.passed is True
+    assert alternative.best_target is not None
+    assert alternative.best_target.target_id == "aim_control"
+
+
+def test_reading_secondary_ar_targets_do_not_replace_ar_challenge() -> None:
+    preset = presets.builtin_by_name("Reading")
+    assert preset is not None
+    check = evaluate_relevance(
+        score_candidate(
+            1,
+            {"ar_challenge": 0.50, "high_ar": 1.0, "low_ar": 0.0},
+        ),
+        preset.ranking,
+    )
+    assert check.passed is False
+    assert "Вторичные совпадения" in check.reason
+    assert evaluate_relevance(
+        score_candidate(
+            2,
+            {"ar_challenge": 0.80, "high_ar": 0.0, "low_ar": 0.0},
+        ),
+        preset.ranking,
+    ).passed is True
+
+
+def test_accuracy_high_od_without_precision_evidence_fails() -> None:
+    preset = presets.builtin_by_name("Accuracy")
+    assert preset is not None
+    scores = {
+        "accuracy_focused": 0.80,
+        "od_precision": 0.90,
+        "low_density_precision": 0.10,
+    }
+    check = evaluate_relevance(score_candidate(1, scores), preset.ranking)
+    assert check.passed is False
+    assert "precision/accuracy" in check.reason.casefold()
+
+    with_tag = evaluate_relevance(
+        score_candidate(2, scores, features={"tag_precision": 1.0}),
+        preset.ranking,
+    )
+    assert with_tag.passed is True
+
+    sparse = evaluate_relevance(
+        score_candidate(3, scores, features={"low_density": 0.90}),
+        preset.ranking,
+    )
+    assert sparse.passed is True
+
+
+def test_tech_generic_high_difficulty_needs_pattern_evidence() -> None:
+    preset = presets.builtin_by_name("Tech")
+    assert preset is not None
+    scores = {"tech": 0.80, "slider_heavy": 0.20, "rhythm_complexity": 0.20}
+    check = evaluate_relevance(score_candidate(1, scores), preset.ranking)
+    assert check.passed is False
+    assert "tech" in check.reason.casefold()
+
+    tagged = evaluate_relevance(
+        score_candidate(2, scores, features={"tag_tech": 1.0}),
+        preset.ranking,
+    )
+    assert tagged.passed is True
+
+    slider = evaluate_relevance(
+        score_candidate(3, scores, features={"slider_ratio": 0.80}),
+        preset.ranking,
+    )
+    assert slider.passed is True
+
+
+def test_finger_control_requires_finger_or_alt_metadata() -> None:
+    preset = presets.builtin_by_name("Finger Control")
+    assert preset is not None
+    scores = {
+        "finger_control": 0.80,
+        "alternating": 0.10,
+        "speed_control": 0.10,
+    }
+    check = evaluate_relevance(score_candidate(1, scores), preset.ranking)
+    assert check.passed is False
+    assert "finger control" in check.reason.casefold()
+    assert evaluate_relevance(
+        score_candidate(2, scores, tags=("fingercontrol",), features={"tag_finger": 1.0}),
+        preset.ranking,
+    ).passed is True
+
+
+def test_flashlight_requires_its_tag_and_primary_target() -> None:
+    preset = presets.builtin_by_name("Flashlight")
+    assert preset is not None
+    scores = {"fl_friendly": 0.80, "fl_reading": 0.10, "fl_aim": 0.10}
+    assert evaluate_relevance(score_candidate(1, scores), preset.ranking).passed is False
+    assert evaluate_relevance(
+        score_candidate(2, scores, tags=("flashlight",), features={"tag_fl": 1.0}),
+        preset.ranking,
+    ).passed is True
+
+
+def test_speed_and_sequence_policies_require_measured_support() -> None:
+    for name, target, feature in (
+        ("Speed", "speed_high_bpm", "speed_pressure"),
+        ("Streams & Stamina", "stream_consistency", "streams"),
+        ("Bursts", "burst_control", "bursts"),
+    ):
+        preset = presets.builtin_by_name(name)
+        assert preset is not None
+        scores = {
+            target: 0.80,
+            **{
+                item: 0.10
+                for item in preset.ranking.relevance_targets
+                if item != target
+            },
+        }
+        assert evaluate_relevance(score_candidate(1, scores), preset.ranking).passed is False
+        assert evaluate_relevance(
+            score_candidate(1, scores, features={feature: 1.0}),
+            preset.ranking,
+        ).passed is True
+
+
+def test_aim_farm_legacy_policy_is_empty_and_fingerprint_stable() -> None:
+    preset = presets.builtin_by_name("Aim Farm")
+    assert preset is not None
+    assert preset.ranking.relevance_targets == ["aim_classic"]
+    assert preset.ranking.relevance_policy == {}
+    assert presets._preset_fingerprint(preset) == (
+        "1c6d419138c4f5c7590c7d12bd061c31a74c6b52064e7b446f932c75fc855294"
+    )
+
+
+def test_sequence_policy_reports_missing_partial_and_failed_analysis() -> None:
+    preset = presets.builtin_by_name("Streams & Stamina")
+    assert preset is not None
+    expected = {
+        "not_analyzed": "не анализировалось",
+        "partial": "частичный анализ",
+        "failed": "анализ не удался",
+    }
+    for status, text in expected.items():
+        candidate = score_candidate(1, {})
+        candidate.skillsets["stream_consistency"] = SkillScore(
+            skill_id="stream_consistency",
+            name="Stream consistency",
+            score=None,
+            status=status,
+        )
+        check = evaluate_relevance(candidate, preset.ranking)
+        assert check.passed is False
+        assert text in check.reason.casefold()
+
+
+def test_accuracy_missing_precision_features_is_not_a_match() -> None:
+    preset = presets.builtin_by_name("Accuracy")
+    assert preset is not None
+    check = evaluate_relevance(
+        score_candidate(1, {"accuracy_focused": 0.80}),
+        preset.ranking,
+    )
+    assert check.passed is False
+    assert "precision/accuracy" in check.reason.casefold()
+
+
+def test_invalid_relevance_policy_is_rejected() -> None:
+    settings = RankingSettings()
+    settings.relevance_targets = ["tech"]
+    settings.relevance_policy = {"primary_targets": ["reading"]}
+    with pytest.raises(RankingConfigError):
+        validate_ranking(settings)
+
+    settings.relevance_policy = {"min_primary": 0}
+    with pytest.raises(RankingConfigError):
+        validate_ranking(settings)
+
+    settings.relevance_policy = {"require_features_any": ["no_such_feature"]}
+    with pytest.raises(RankingConfigError):
+        validate_ranking(settings)
+
+    settings.relevance_policy = {"unknown": True}
+    with pytest.raises(RankingConfigError):
+        validate_ranking(settings)
 
 
 def test_invalid_relevance_configuration_is_rejected() -> None:

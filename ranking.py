@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 
 import config
 import evidence
-from features import TRAITS, trait_similarity
+from features import FEATURE_LABELS, TRAITS, trait_similarity
 from feedback import (
     VERDICT_LABELS,
     VERDICT_PREFERENCE,
@@ -189,6 +189,64 @@ def validate_ranking(settings: RankingSettings) -> None:
         raise RankingConfigError(
             "неизвестные целевые теги: "
             + ", ".join(sorted(unknown_targets))
+        )
+    policy = settings.relevance_policy
+    if policy is None:
+        policy = {}
+    if not isinstance(policy, dict):
+        raise RankingConfigError("relevance_policy должен быть объектом")
+    unknown_policy = set(policy) - {
+        "primary_targets",
+        "min_primary",
+        "require_features_any",
+    }
+    if unknown_policy:
+        raise RankingConfigError(
+            "relevance_policy: неизвестные ключи: "
+            + ", ".join(sorted(unknown_policy))
+        )
+    primary = policy.get("primary_targets", targets)
+    if not isinstance(primary, list) or not all(
+        isinstance(item, str) for item in primary
+    ):
+        raise RankingConfigError(
+            "relevance_policy.primary_targets: ожидался массив строк"
+        )
+    if not primary and policy:
+        raise RankingConfigError(
+            "relevance_policy.primary_targets не может быть пустым"
+        )
+    unknown_primary = set(primary) - set(targets)
+    if unknown_primary:
+        raise RankingConfigError(
+            "relevance_policy.primary_targets: нет в relevance_targets: "
+            + ", ".join(sorted(unknown_primary))
+        )
+    min_primary = policy.get("min_primary", 1)
+    if policy and (
+        isinstance(min_primary, bool)
+        or not isinstance(min_primary, int)
+        or not 1 <= min_primary <= len(primary)
+    ):
+        raise RankingConfigError(
+            "relevance_policy.min_primary должен быть 1..число primary_targets"
+        )
+    features_any = policy.get("require_features_any", [])
+    if not isinstance(features_any, list) or not all(
+        isinstance(item, str) for item in features_any
+    ):
+        raise RankingConfigError(
+            "relevance_policy.require_features_any: ожидался массив строк"
+        )
+    unknown_features = set(features_any) - set(FEATURE_LABELS)
+    if unknown_features:
+        raise RankingConfigError(
+            "relevance_policy.require_features_any: неизвестные признаки: "
+            + ", ".join(sorted(unknown_features))
+        )
+    if features_any and not targets:
+        raise RankingConfigError(
+            "relevance_policy.require_features_any требует relevance_targets"
         )
     threshold = settings.relevance_threshold
     if (

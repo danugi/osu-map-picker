@@ -424,6 +424,8 @@ def preset_drift(stored: PresetConfig, builtin: PresetConfig) -> list[str]:
             + " → "
             + ", ".join(builtin.ranking.relevance_targets)
         )
+    if stored.ranking.relevance_policy != builtin.ranking.relevance_policy:
+        changes.append("политика целевого гейта отличается")
     stored_factors = {
         key: (value.weight, value.enabled)
         for key, value in stored.ranking.factors.items()
@@ -1016,10 +1018,12 @@ def _custom() -> PresetConfig:
 
 # Mandatory target tags/features per specialized preset. Each value names
 # exactly three skillsets. A map must be strictly above the relevance
-# threshold for at least one of them before it can be ranked. Mixed Aim,
 # All-rounder, Any Taste and the generic discovery presets deliberately have
 # no entry: they must not inherit the restrictions of specialized profiles.
+# Mixed Aim has a specialized aim gate now, but keeps its classic/control/burst
+# alternatives instead of collapsing to one pattern.
 _RELEVANCE_TARGETS: dict[str, tuple[str, ...]] = {
+    "Mixed Aim": ("aim_classic", "aim_control", "aim_bursts"),
     "Aim Farm": ("aim_classic",),
     "Speed": ("speed_high_bpm", "speed_bursts", "speed_density"),
     "Streams & Stamina": ("stream_consistency", "stream_long"),
@@ -1075,16 +1079,89 @@ _RELEVANCE_TARGETS: dict[str, tuple[str, ...]] = {
     "Weird Aim": ("tech", "aim_control", "unusual_spacing"),
 }
 
+# Preset-specific gate policies. The score threshold is still the existing
+# strict > relevance_threshold; these rules only decide which targets are
+# primary and which feature evidence must corroborate them.
+_RELEVANCE_POLICIES: dict[str, dict[str, Any]] = {
+    "Mixed Aim": {
+        "primary_targets": ["aim_classic", "aim_control", "aim_bursts"],
+    },
+    "Speed": {
+        "primary_targets": [
+            "speed_high_bpm",
+            "speed_bursts",
+            "speed_density",
+        ],
+        "require_features_any": ["speed_pressure", "bursts"],
+    },
+    "Streams & Stamina": {
+        "primary_targets": ["stream_consistency", "stream_long"],
+        "require_features_any": ["streams"],
+    },
+    "Bursts": {
+        "primary_targets": [
+            "burst_control",
+            "speed_bursts",
+            "speed_short_bursts",
+        ],
+        "require_features_any": ["bursts"],
+    },
+    "Finger Control": {
+        "primary_targets": ["finger_control", "alternating", "speed_control"],
+        "require_features_any": ["tag_finger", "tag_alt"],
+    },
+    "Reading": {
+        "primary_targets": ["ar_challenge"],
+    },
+    "Accuracy": {
+        "primary_targets": ["accuracy_focused"],
+        "require_features_any": ["tag_precision", "low_density"],
+    },
+    "Tech": {
+        "primary_targets": ["tech", "slider_heavy", "rhythm_complexity"],
+        "require_features_any": [
+            "tag_tech",
+            "tag_rhythm",
+            "tag_slider",
+            "slider_ratio",
+        ],
+    },
+    "Flashlight": {
+        "primary_targets": ["fl_friendly"],
+        "require_features_any": ["tag_fl"],
+    },
+}
+
+# Target sets shipped by v11. v12 migration uses these exact old values so an
+# untouched built-in can be updated without touching edited/user copies.
+_PRE_V12_TARGETS: dict[str, tuple[str, ...]] = {
+    "Mixed Aim": (),
+    "Speed": ("speed_high_bpm", "speed_bursts", "speed_density"),
+    "Streams & Stamina": ("stream_consistency", "stream_long"),
+    "Bursts": (
+        "burst_control",
+        "speed_bursts",
+        "speed_short_bursts",
+    ),
+    "Finger Control": ("finger_control", "alternating", "speed_control"),
+    "Reading": ("ar_challenge", "high_ar", "low_ar"),
+    "Accuracy": (
+        "accuracy_focused",
+        "od_precision",
+        "low_density_precision",
+    ),
+    "Tech": ("tech", "slider_heavy", "rhythm_complexity"),
+    "Flashlight": ("fl_friendly", "fl_reading", "fl_aim"),
+}
+
 
 def _apply_relevance_defaults(cfg: PresetConfig) -> PresetConfig:
-    """Attach a preset's own target tags after its builder has run.
-
-    Keeping this outside the individual builders makes the exceptions
-    explicit: Mixed Aim and All-rounder have no key in the mapping and
-    therefore no gate.
-    """
+    """Attach a preset's own targets and gate policy after its builder."""
 
     cfg.ranking.relevance_targets = list(_RELEVANCE_TARGETS.get(cfg.name, ()))
+    cfg.ranking.relevance_policy = copy.deepcopy(
+        _RELEVANCE_POLICIES.get(cfg.name, {})
+    )
     return cfg
 
 
@@ -1138,7 +1215,7 @@ _PRE_V11_FINGERPRINTS = {
     ),
 }
 
-BUILTIN_PRESETS_VERSION = 11
+BUILTIN_PRESETS_VERSION = 12
 _V2_NEW_NAMES = frozenset(
     {
         "Speed",
@@ -1213,6 +1290,7 @@ def _preset_fingerprint(cfg: PresetConfig) -> str:
     # Fields introduced by v10 are absent from every old row. Strip them so
     # an old untouched definition keeps a stable fingerprint after parsing.
     data.get("ranking", {}).pop("farm_tolerance_seconds", None)
+    data.get("ranking", {}).pop("relevance_policy", None)
     data.get("discovery", {}).pop("title_queries", None)
     raw = json.dumps(
         data, sort_keys=True, ensure_ascii=False, separators=(",", ":")
@@ -1345,6 +1423,7 @@ def _upgrade_relevance_targets(storage: Any) -> int:
             continue
         before_gate = copy.deepcopy(modern)
         before_gate.ranking.relevance_targets = []
+        before_gate.ranking.relevance_policy = {}
         if _matches_legacy(preset.config, before_gate):
             storage.update_preset(preset.id, modern)
             changed += 1
@@ -1370,6 +1449,7 @@ def _upgrade_sequence_targets(storage: Any) -> int:
         candidate.ranking.relevance_targets = list(
             preset.config.ranking.relevance_targets
         )
+        candidate.ranking.relevance_policy = {}
         if _matches_legacy(preset.config, candidate):
             storage.update_preset(preset.id, modern)
             changed += 1
@@ -1390,6 +1470,29 @@ def _upgrade_v11_definitions(storage: Any) -> None:
     current = builtin_by_name("Aim Farm")
     if current is not None:
         storage.update_preset(existing.id, current)
+
+
+def _upgrade_v12_definitions(storage: Any) -> int:
+    """Add preset-specific relevance policies to untouched v11 built-ins."""
+
+    changed = 0
+    for preset in storage.list_presets():
+        if not preset.is_builtin:
+            continue
+        old_targets = _PRE_V12_TARGETS.get(preset.name)
+        if old_targets is None:
+            continue
+        modern = builtin_by_name(preset.name)
+        if modern is None:
+            continue
+        before = copy.deepcopy(modern)
+        before.ranking.relevance_targets = list(old_targets)
+        before.ranking.relevance_policy = {}
+        if not _matches_legacy(preset.config, before):
+            continue
+        storage.update_preset(preset.id, modern)
+        changed += 1
+    return changed
 
 
 def ensure_builtin_presets(storage: Any) -> int:
@@ -1484,6 +1587,8 @@ def ensure_builtin_presets(storage: Any) -> int:
         _upgrade_v10_definitions(storage)
     if version < 11:
         _upgrade_v11_definitions(storage)
+    if version < 12:
+        _upgrade_v12_definitions(storage)
 
     storage.set_preference("builtins_version", str(BUILTIN_PRESETS_VERSION))
     return created
