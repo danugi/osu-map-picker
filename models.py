@@ -1063,6 +1063,20 @@ class DiscoveryResult:
     sequence_source_unavailable: int = 0
     sequence_not_analyzed: int = 0
     sequence_failed: int = 0
+    sequence_attempted: int = 0
+    sequence_completed: int = 0
+    # Catalog reach diagnostics. These do not affect ranking or result order.
+    catalog_before: int = 0
+    catalog_after: int = 0
+    catalog_added: int = 0
+    local_catalog_considered: int = 0
+    local_catalog_added: int = 0
+    local_catalog_duplicates: int = 0
+    local_catalog_unconsidered: int = 0
+    local_topup: bool = False
+    local_catalog_considered_ids: tuple[int, ...] = field(
+        default=(), repr=False, compare=False
+    )
 
     @property
     def count(self) -> int:

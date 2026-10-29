@@ -73,6 +73,7 @@ MAX_EXCLUSION_SAMPLES = 80
 # .osu download limit to zero.
 MAX_CACHED_SEQUENCE_ANALYSIS = 50
 SEQUENCE_STRATA = 5
+LOCAL_TOPUP_TARGET_RESULTS = 15
 _ATTRIBUTE_FEATURE_KEYS = {
     "aim",
     "speed",
@@ -89,6 +90,7 @@ _ATTRIBUTE_FEATURE_KEYS = {
 class SequenceStats:
     required: bool = False
     analyzed: int = 0
+    attempted: int = 0
     unanalyzed: int = 0
     downloads: int = 0
     cache_hits: int = 0
@@ -353,12 +355,14 @@ class DiscoveryEngine:
         sequence_loader: Callable[[int, bool], SequenceAnalysis] | None = None,
         sequence_cache_probe: Callable[[int], bool] | None = None,
         deadline_seconds: float | None = None,
+        local_catalog_supplement: bool = False,
     ) -> None:
         self.api = api
         self.storage = storage
         self.settings = settings or DiscoverySettings()
         self.sequence_loader = sequence_loader
         self.sequence_cache_probe = sequence_cache_probe
+        self.local_catalog_supplement = bool(local_catalog_supplement)
         # Checked between network operations, never inside an in-flight HTTP
         # request. Zero means an immediate deadline; the default is fixed in
         # config so this is an additional hard bound, not a preset limit that
@@ -801,6 +805,7 @@ class DiscoveryEngine:
         downloads = 0
         cache_hits = 0
         failed = 0
+        attempts = 0
 
         def store(candidate: Candidate, item: AnalysisEvidence) -> None:
             nonlocal downloads, cache_hits
@@ -814,7 +819,8 @@ class DiscoveryEngine:
                 cache_hits += 1
 
         def attempt(candidate: Candidate, allow: bool) -> None:
-            nonlocal failed
+            nonlocal failed, attempts
+            attempts += 1
             tried = False
             try:
                 item = self._load_analysis(candidate.beatmap.id, allow)
@@ -934,6 +940,7 @@ class DiscoveryEngine:
         stats = SequenceStats(
             required=True,
             analyzed=analyzed + partial,
+            attempted=attempts,
             unanalyzed=unanalyzed,
             downloads=downloads,
             cache_hits=cache_hits,
@@ -945,6 +952,129 @@ class DiscoveryEngine:
             cached_only=cached_only,
         )
         return result, stats
+
+    def _supplement_from_catalog(
+        self,
+        result: DiscoveryResult,
+        filters: Filters,
+        ranking_settings: RankingSettings,
+        *,
+        catalog_after: int,
+        known_ids: set[int],
+        target: int,
+    ) -> DiscoveryResult:
+        """Fill a short API result from cached catalog candidates only.
+
+        The local pass uses ``rerank_stored`` so strict filters, evidence
+        checks, the mandatory relevance gate and the active ranking settings
+        are identical. It never downloads or calls the API.
+        """
+
+        local = self.rerank_stored(filters, ranking_settings)
+        considered_ids = set(local.local_catalog_considered_ids)
+        api_pairs = {
+            (item.beatmapset.id, item.beatmap.id) for item in result.scored
+        }
+        api_index = {
+            (item.beatmapset.id, item.beatmap.id): index
+            for index, item in enumerate(result.scored)
+        }
+        used_sets = {item.beatmapset.id for item in result.scored}
+        merged = list(result.scored)
+        added = 0
+        duplicates = 0
+        enriched_duplicates = 0
+        for item in local.scored:
+            if len(merged) >= target:
+                break
+            key = (item.beatmapset.id, item.beatmap.id)
+            if key in api_pairs:
+                duplicates += 1
+                local_analysis = item.candidate.analysis
+                api_item = merged[api_index[key]]
+                api_analysis = api_item.candidate.analysis
+                if (
+                    local_analysis is not None
+                    and local_analysis.usable
+                    and (
+                        api_analysis is None
+                        or not api_analysis.usable
+                        or (
+                            local_analysis.status == evidence.MEASURED
+                            and api_analysis.status == evidence.PARTIAL
+                        )
+                    )
+                ):
+                    api_candidate = api_item.candidate
+                    enriched = self._with_analysis(
+                        replace(
+                            api_candidate,
+                            attributes=(
+                                api_candidate.attributes
+                                or item.candidate.attributes
+                            ),
+                        ),
+                        local_analysis,
+                    )
+                    merged[api_index[key]] = replace(
+                        api_item, candidate=enriched
+                    )
+                    enriched_duplicates += 1
+                continue
+            if item.beatmapset.id in used_sets:
+                duplicates += 1
+                continue
+            api_pairs.add(key)
+            used_sets.add(item.beatmapset.id)
+            merged.append(item)
+            added += 1
+        merged.sort(
+            key=lambda item: (
+                -item.score,
+                item.beatmapset.id,
+                item.beatmap.id,
+            )
+        )
+        notes = list(result.notes)
+        if added:
+            notes.append(
+                f"Локальный каталог дополнил выдачу: +{added} карт из "
+                f"{local.local_catalog_considered} рассмотренных; "
+                f"{duplicates} дублей API/каталога пропущено."
+            )
+        else:
+            notes.append(
+                f"Локальный каталог проверен: {local.local_catalog_considered} "
+                "карт рассмотрено, новых подходящих карт нет."
+            )
+        if enriched_duplicates:
+            notes.append(
+                "Локальный кэш обогатил "
+                f"{enriched_duplicates} API-карт сохранённым sequence-"
+                "анализом; API-метаданные сохранены."
+            )
+        if local.sequence_required:
+            notes.append(
+                "Локальный топ-ап использует только сохранённые sequence-"
+                "результаты; .osu не скачивались."
+            )
+        considered_union = known_ids | considered_ids
+        unconsidered = max(0, catalog_after - len(considered_union))
+        return replace(
+            result,
+            scored=tuple(merged),
+            origin="mixed" if added else result.origin,
+            notes=tuple(dict.fromkeys(notes))[:MAX_NOTES],
+            local_topup=True,
+            local_catalog_considered=len(considered_ids),
+            local_catalog_added=added,
+            local_catalog_duplicates=duplicates,
+            local_catalog_unconsidered=unconsidered,
+            local_catalog_considered_ids=tuple(sorted(considered_ids)),
+            catalog_before=result.catalog_before,
+            catalog_after=catalog_after,
+            catalog_added=max(0, catalog_after - result.catalog_before),
+        )
 
     # -- main entry point --------------------------------------------------
     def run(
@@ -962,6 +1092,10 @@ class DiscoveryEngine:
             raise ValueError("Для нового API-поиска нужен osu! API client.")
         started_perf = time.perf_counter()
         started = now_iso()
+        try:
+            catalog_before = self.storage.beatmapset_count()
+        except StorageError:
+            catalog_before = 0
         http_before = int(getattr(self.api, "http_attempts", 0))
         oauth_before = int(getattr(self.api, "token_requests", 0))
         deadline_at = started_perf + self.deadline_seconds
@@ -1205,6 +1339,10 @@ class DiscoveryEngine:
                 self.storage.save_beatmapsets(known.values())
             except StorageError as exc:
                 errors.append(f"Не удалось сохранить карты в SQLite: {exc}")
+        try:
+            catalog_after = self.storage.beatmapset_count()
+        except StorageError:
+            catalog_after = catalog_before
         fetch_elapsed = time.perf_counter() - started_perf
         filter_started = time.perf_counter()
 
@@ -1488,7 +1626,28 @@ class DiscoveryEngine:
             sequence_source_unavailable=sequence_stats.source_unavailable,
             sequence_not_analyzed=sequence_stats.not_analyzed,
             sequence_failed=sequence_stats.failed,
+            sequence_attempted=sequence_stats.attempted,
+            sequence_completed=sequence_stats.analyzed,
+            catalog_before=catalog_before,
+            catalog_after=catalog_after,
+            catalog_added=max(0, catalog_after - catalog_before),
+            local_catalog_unconsidered=max(0, catalog_after - len(known)),
         )
+        target_results = min(LOCAL_TOPUP_TARGET_RESULTS, candidate_limit)
+        if (
+            self.local_catalog_supplement
+            and not budget.get("fatal")
+            and len(scored) < target_results
+            and catalog_after > len(known)
+        ):
+            result = self._supplement_from_catalog(
+                result,
+                filters,
+                ranking_settings,
+                catalog_after=catalog_after,
+                known_ids=set(known),
+                target=target_results,
+            )
         if record:
             try:
                 self.storage.record_search_run(result)
@@ -1764,6 +1923,13 @@ class DiscoveryEngine:
             sequence_source_unavailable=sequence_stats.source_unavailable,
             sequence_not_analyzed=sequence_stats.not_analyzed,
             sequence_failed=sequence_stats.failed,
+            sequence_attempted=sequence_stats.attempted,
+            sequence_completed=sequence_stats.analyzed,
+            catalog_before=total_stored,
+            catalog_after=total_stored,
+            local_catalog_considered=len(stored),
+            local_catalog_unconsidered=max(0, total_stored - len(stored)),
+            local_catalog_considered_ids=tuple(item.id for item in stored),
         )
 
 

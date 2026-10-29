@@ -2403,7 +2403,15 @@ def _execute_search(
             discovery_settings.fetch_attributes_limit = min(
                 50, int(discovery_settings.fetch_attributes_limit) + 8
             )
-        engine = DiscoveryEngine(client, store, discovery_settings)
+        # A successful API search still uses the local catalog as a bounded
+        # shortfall filler. This makes no API requests and keeps the same
+        # filters, evidence gate and ranking settings.
+        engine = DiscoveryEngine(
+            client,
+            store,
+            discovery_settings,
+            local_catalog_supplement=True,
+        )
         with st.spinner(
             "Ищу карты в osu! API: несколько стратегий и страниц…"
             if not expand_limits
@@ -2932,9 +2940,24 @@ def _render_result(
                 f"{result.sequence_not_analyzed} не анализировалось, "
                 f"{result.sequence_source_unavailable} без .osu, "
                 f"{result.sequence_failed} с ошибкой · "
+                f"попыток: {result.sequence_attempted}, "
+                f"завершено: {result.sequence_completed} · "
                 f".osu скачано: {result.sequence_downloads} · "
                 f"из локального кэша/БД: {result.sequence_cache_hits} · "
                 f"полнота sequence-данных: {sequence_state}."
+            )
+        if result.catalog_before or result.catalog_after:
+            st.caption(
+                f"Каталог SQLite: {result.catalog_before} → "
+                f"{result.catalog_after} карт (+{result.catalog_added}); "
+                f"локально не рассмотрено: {result.local_catalog_unconsidered}."
+            )
+        if result.local_topup:
+            st.caption(
+                "Локальный топ-ап: рассмотрено "
+                f"{result.local_catalog_considered}, добавлено "
+                f"{result.local_catalog_added}, дублей "
+                f"{result.local_catalog_duplicates}; API-запросов не добавлено."
             )
 
     random_meta = st.session_state.get("random_meta")

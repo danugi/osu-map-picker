@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import copy
 from typing import Callable
 
 import pytest
 from conftest import make_beatmap, make_beatmapset
 
+import analysis as analysis_store
+import evidence
+import patterns
 import presets
 from discovery import (
     DiscoveryEngine,
@@ -611,6 +615,96 @@ def _sequence(kind: str, length: int = 12) -> SequenceAnalysis:
         burst_chains=(chain,),
         analyzed_notes=length,
         total_notes=length,
+    )
+
+
+def _save_sequence(
+    storage: Storage,
+    candidate: Candidate,
+    sequence: SequenceAnalysis,
+    *,
+    status: str = evidence.MEASURED,
+) -> None:
+    storage.save_beatmapsets([candidate.beatmapset])
+    storage.save_analysis(
+        candidate.beatmap.id,
+        status=status,
+        source="test",
+        analyzer_version=patterns.ANALYZER_VERSION,
+        file_mtime_ns=None,
+        file_size=None,
+        scope="",
+        sequence_json=analysis_store.sequence_to_json(sequence),
+    )
+
+
+def test_local_analyzed_candidate_fills_short_api_result(storage: Storage) -> None:
+    bursts = presets.builtin_by_name("Bursts")
+    assert bursts is not None
+    candidate = _candidate(1, sequence=_sequence("burst", 9))
+    _save_sequence(storage, candidate, candidate.sequence or _sequence("burst", 9))
+    api = StubApi(lambda query: SearchPage(beatmapsets=()))
+    engine = DiscoveryEngine(
+        api,
+        storage,
+        settings(max_candidates=50, fetch_sequences_limit=0),
+        local_catalog_supplement=True,
+    )
+    filters = copy.deepcopy(bursts.filters)
+    filters.statuses = ["ranked"]
+    result = engine.run(filters, bursts.ranking)
+    assert result.local_topup is True
+    assert result.local_catalog_added == 1
+    assert result.local_catalog_duplicates == 0
+    assert result.origin == "mixed"
+    assert len(api.search_calls) == 1
+    assert result.api_requests == 1
+    assert result.catalog_before == 1
+    assert result.catalog_after == 1
+    assert result.scored[0].beatmapset.id == 1
+    assert result.scored[0].candidate.analysis is not None
+    assert result.scored[0].candidate.analysis.status == evidence.MEASURED
+
+
+def test_local_topup_deduplicates_and_keeps_api_metadata(storage: Storage) -> None:
+    local_one = make_beatmapset(1, title="Local old title")
+    local_two = make_beatmapset(2, title="Local second")
+    storage.save_beatmapsets([local_one, local_two])
+    api_set = make_beatmapset(1, title="API fresh title")
+    api = StubApi(lambda query: SearchPage(beatmapsets=(api_set,)))
+    engine = DiscoveryEngine(
+        api,
+        storage,
+        settings(max_candidates=50, fetch_sequences_limit=0),
+        local_catalog_supplement=True,
+    )
+    result = engine.run(Filters(statuses=["ranked"]), RankingSettings())
+    assert result.count == 2
+    assert [item.beatmapset.id for item in result.scored] == [1, 2]
+    assert result.scored[0].beatmapset.title == "API fresh title"
+    assert result.local_catalog_added == 1
+    assert result.local_catalog_duplicates == 1
+    assert len(api.search_calls) == 1
+    assert result.api_requests == 1
+
+
+def test_unanalyzed_local_candidate_does_not_bypass_gate(storage: Storage) -> None:
+    storage.save_beatmapsets([make_beatmapset(1)])
+    api = StubApi(lambda query: SearchPage(beatmapsets=()))
+    bursts = presets.builtin_by_name("Bursts")
+    assert bursts is not None
+    engine = DiscoveryEngine(
+        api,
+        storage,
+        settings(max_candidates=50, fetch_sequences_limit=0),
+        local_catalog_supplement=True,
+    )
+    result = engine.run(bursts.filters, bursts.ranking)
+    assert result.local_topup is True
+    assert result.local_catalog_added == 0
+    assert result.count == 0
+    assert any(
+        "Локальный каталог проверен" in note for note in result.notes
     )
 
 
