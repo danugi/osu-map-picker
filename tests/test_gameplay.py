@@ -156,3 +156,35 @@ def test_streamlit_requirement_supports_unsafe_html_javascript() -> None:
     # unsafe_allow_javascript was added in Streamlit 1.52. Older versions make
     # st.html reject the argument, so the preview cannot execute in them.
     assert (int(match.group(1)), int(match.group(2))) >= (1, 52)
+
+
+def test_preview_html_escapes_hostile_osu_metadata():
+    preview = gameplay.BeatmapPreview(
+        beatmap_id=991,
+        artist="</script><img src=x onerror=alert(1)>",
+        title="<script>alert('title')</script>",
+        creator="</script>& creator",
+        version="<b>Hard</b>",
+        mode=0,
+        approach_rate=9.0,
+        circle_size=4.0,
+        overall_difficulty=8.0,
+        slider_multiplier=1.4,
+        audio_lead_in=0,
+        objects=(
+            gameplay.PreviewObject(
+                start=0,
+                end=100,
+                x=100,
+                y=100,
+                kind="circle",
+                new_combo=False,
+                points=(),
+            ),
+        ),
+    )
+    markup = gameplay.preview_html(preview)
+    assert markup.count("</script>") == 2
+    assert "&lt;script&gt;" in markup
+    assert "&lt;/script&gt;" in markup
+    assert "<img src=x onerror" not in markup

@@ -73,17 +73,11 @@ if not exist "%VENV_PY%" (
     )
 )
 
-"%VENV_PY%" -c "import streamlit, httpx, dotenv, keyring" >nul 2>&1
+"%VENV_PY%" tools\ensure_deps.py
 if errorlevel 1 (
-    echo Installing dependencies from requirements.txt ...
-    "%VENV_PY%" -m pip install --disable-pip-version-check -r requirements.txt
-    if errorlevel 1 (
-        echo [ERROR] Dependency installation failed. See the messages above.
-        pause
-        exit /b 1
-    )
-) else (
-    echo Dependencies already installed; skipping pip install.
+    echo [ERROR] Dependency setup failed. See the messages above.
+    pause
+    exit /b 1
 )
 
 set "DATA="

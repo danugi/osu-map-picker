@@ -291,7 +291,7 @@ API или из локального кеша, а ссылка ведёт на
 # из корня проекта
 py -3.14 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+python -m pip install -r requirements.txt -r requirements-dev.txt
 ```
 
 Linux/macOS:
@@ -299,11 +299,12 @@ Linux/macOS:
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements.txt
+python -m pip install -r requirements.txt -r requirements-dev.txt
 ```
 
 Проверенные версии на момент разработки: Python 3.14.0, Streamlit 1.66.0,
-httpx 0.28.1, Pillow 12.3.0, pytest 9.1.1. Минимум Streamlit поднят до
+httpx 0.28.1, Pillow 12.3.0, pytest 9.1.1. `requirements.txt` содержит только
+runtime-зависимости; `requirements-dev.txt` добавляет pytest, pytest-cov и Ruff. Минимум Streamlit поднят до
 **1.52**: в более старых версиях `st.html` не принимает
 `unsafe_allow_javascript`, и превью не может выполнить JavaScript. `rosu-pp-py`
 и любой локальный калькулятор PP в зависимостях отсутствуют.
@@ -416,8 +417,9 @@ Double-click [run.bat](run.bat). It:
 
 1. checks for Python 3.12+;
 2. creates a project-local `.venv` when needed;
-3. installs `requirements.txt` in that environment on first use;
-4. skips dependency installation on later launches when imports are available;
+3. installs runtime `requirements.txt` on first use;
+4. compares a requirements hash stamp and skips reinstall when both the
+   dependencies and the runtime requirements are unchanged;
 5. binds Streamlit to `127.0.0.1` only;
 6. opens the app in the default browser after the local server is ready;
 7. keeps the console open while the app runs and after it stops, so failures
@@ -654,7 +656,7 @@ stub-клиент, `gameplay.py` — на локальном образце `.os
   сохранённых карт в «Весь каталог» Библиотеки;
 - Streamlit AppTest для шести страниц и всех разделов настроек.
 
-Всего в текущем наборе **513 тестов**, все проходят без сети.
+Всего в текущем наборе **517 тестов**, все проходят без сети.
 
 ### Что проверено, а что нет
 

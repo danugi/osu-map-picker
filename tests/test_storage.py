@@ -7,7 +7,7 @@ from conftest import make_beatmap, make_beatmapset
 
 import config
 import presets
-from models import PresetConfig
+from models import PresetConfig, beatmapset_to_dict
 from storage import Storage, StorageError, UserDataImportError
 
 
@@ -407,3 +407,29 @@ def test_database_info(storage: Storage) -> None:
     assert info["beatmapsets"] == 1
     assert info["presets"] == 12
     assert info["path"].endswith(".db")
+
+
+def test_import_is_atomic_on_mid_transaction_failure(tmp_path, monkeypatch):
+    target = Storage(tmp_path / "target.db")
+    payload = {
+        "schema_version": config.SETTINGS_SCHEMA_VERSION,
+        "presets": [presets.default_config("Imported").to_dict()],
+        "beatmapsets": [beatmapset_to_dict(make_beatmapset(77))],
+        "feedback": [{"beatmapset_id": 77, "verdict": "like"}],
+        "favorites": [77],
+        "history": [{"beatmapset_id": 77, "surface": "import"}],
+        "preferences": {"imported": "yes"},
+    }
+
+    def fail_insert(*args, **kwargs):
+        raise RuntimeError("injected failure after beatmapset write")
+
+    monkeypatch.setattr(Storage, "_insert_preset_conn", staticmethod(fail_insert))
+    with pytest.raises(RuntimeError, match="injected failure"):
+        target.import_user_data(payload)
+    assert target.get_beatmapset(77) is None
+    assert target.get_preset_by_name("Imported") is None
+    assert target.get_feedback(77) == ()
+    assert not target.is_favorite(77)
+    assert target.get_preference("imported") is None
+    assert target.history_count() == 0

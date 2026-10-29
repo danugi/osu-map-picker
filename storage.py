@@ -310,128 +310,134 @@ class Storage:
         self.save_beatmapsets([beatmapset])
 
     def save_beatmapsets(self, beatmapsets: Iterable[Beatmapset]) -> int:
-        saved = 0
         with self.connection() as conn:
-            for beatmapset in beatmapsets:
-                values = (
-                    beatmapset.id,
-                    beatmapset.artist,
-                    beatmapset.artist_unicode,
-                    beatmapset.title,
-                    beatmapset.title_unicode,
-                    beatmapset.creator,
-                    beatmapset.status,
-                    beatmapset.bpm,
-                    beatmapset.favourite_count,
-                    beatmapset.play_count,
-                    beatmapset.rating,
-                    beatmapset.genre_id,
-                    beatmapset.language_id,
-                    json.dumps(list(beatmapset.tags), ensure_ascii=False),
-                    int(beatmapset.nsfw),
-                    int(beatmapset.video),
-                    int(beatmapset.storyboard),
-                    beatmapset.preview_url,
-                    beatmapset.cover_url,
-                    beatmapset.ranked_date,
-                    beatmapset.submitted_date,
-                    beatmapset.last_updated,
-                    beatmapset.source,
-                    beatmapset.fetched_at,
-                )
+            return self._save_beatmapsets_conn(conn, beatmapsets)
+
+    @staticmethod
+    def _save_beatmapsets_conn(
+        conn: sqlite3.Connection, beatmapsets: Iterable[Beatmapset]
+    ) -> int:
+        saved = 0
+        for beatmapset in beatmapsets:
+            values = (
+                beatmapset.id,
+                beatmapset.artist,
+                beatmapset.artist_unicode,
+                beatmapset.title,
+                beatmapset.title_unicode,
+                beatmapset.creator,
+                beatmapset.status,
+                beatmapset.bpm,
+                beatmapset.favourite_count,
+                beatmapset.play_count,
+                beatmapset.rating,
+                beatmapset.genre_id,
+                beatmapset.language_id,
+                json.dumps(list(beatmapset.tags), ensure_ascii=False),
+                int(beatmapset.nsfw),
+                int(beatmapset.video),
+                int(beatmapset.storyboard),
+                beatmapset.preview_url,
+                beatmapset.cover_url,
+                beatmapset.ranked_date,
+                beatmapset.submitted_date,
+                beatmapset.last_updated,
+                beatmapset.source,
+                beatmapset.fetched_at,
+            )
+            conn.execute(
+                """
+                INSERT INTO beatmapsets (
+                    id, artist, artist_unicode, title, title_unicode, creator,
+                    status, bpm, favourite_count, play_count, rating, genre_id,
+                    language_id, tags, nsfw, video, storyboard, preview_url,
+                    cover_url, ranked_date, submitted_date, last_updated,
+                    source, fetched_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(id) DO UPDATE SET
+                    artist=excluded.artist,
+                    artist_unicode=excluded.artist_unicode,
+                    title=excluded.title,
+                    title_unicode=excluded.title_unicode,
+                    creator=excluded.creator,
+                    status=excluded.status,
+                    bpm=excluded.bpm,
+                    favourite_count=excluded.favourite_count,
+                    play_count=excluded.play_count,
+                    rating=excluded.rating,
+                    genre_id=excluded.genre_id,
+                    language_id=excluded.language_id,
+                    tags=excluded.tags,
+                    nsfw=excluded.nsfw,
+                    video=excluded.video,
+                    storyboard=excluded.storyboard,
+                    preview_url=excluded.preview_url,
+                    cover_url=excluded.cover_url,
+                    ranked_date=excluded.ranked_date,
+                    submitted_date=excluded.submitted_date,
+                    last_updated=excluded.last_updated,
+                    source=excluded.source,
+                    fetched_at=excluded.fetched_at
+                WHERE excluded.fetched_at >= beatmapsets.fetched_at
+                """,
+                values,
+            )
+            for beatmap in beatmapset.beatmaps:
                 conn.execute(
                     """
-                    INSERT INTO beatmapsets (
-                        id, artist, artist_unicode, title, title_unicode, creator,
-                        status, bpm, favourite_count, play_count, rating, genre_id,
-                        language_id, tags, nsfw, video, storyboard, preview_url,
-                        cover_url, ranked_date, submitted_date, last_updated,
-                        source, fetched_at
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    INSERT INTO beatmaps (
+                        id, beatmapset_id, mode, version, difficulty_rating,
+                        total_length, hit_length, bpm, ar, od, cs, hp,
+                        max_combo, count_circles, count_sliders, count_spinners,
+                        status, url, owners, updated_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(id) DO UPDATE SET
-                        artist=excluded.artist,
-                        artist_unicode=excluded.artist_unicode,
-                        title=excluded.title,
-                        title_unicode=excluded.title_unicode,
-                        creator=excluded.creator,
-                        status=excluded.status,
+                        beatmapset_id=excluded.beatmapset_id,
+                        mode=excluded.mode,
+                        version=excluded.version,
+                        difficulty_rating=excluded.difficulty_rating,
+                        total_length=excluded.total_length,
+                        hit_length=excluded.hit_length,
                         bpm=excluded.bpm,
-                        favourite_count=excluded.favourite_count,
-                        play_count=excluded.play_count,
-                        rating=excluded.rating,
-                        genre_id=excluded.genre_id,
-                        language_id=excluded.language_id,
-                        tags=excluded.tags,
-                        nsfw=excluded.nsfw,
-                        video=excluded.video,
-                        storyboard=excluded.storyboard,
-                        preview_url=excluded.preview_url,
-                        cover_url=excluded.cover_url,
-                        ranked_date=excluded.ranked_date,
-                        submitted_date=excluded.submitted_date,
-                        last_updated=excluded.last_updated,
-                        source=excluded.source,
-                        fetched_at=excluded.fetched_at
-                    WHERE excluded.fetched_at >= beatmapsets.fetched_at
+                        ar=excluded.ar,
+                        od=excluded.od,
+                        cs=excluded.cs,
+                        hp=excluded.hp,
+                        max_combo=excluded.max_combo,
+                        count_circles=excluded.count_circles,
+                        count_sliders=excluded.count_sliders,
+                        count_spinners=excluded.count_spinners,
+                        status=excluded.status,
+                        url=excluded.url,
+                        owners=excluded.owners,
+                        updated_at=excluded.updated_at
                     """,
-                    values,
+                    (
+                        beatmap.id,
+                        beatmap.beatmapset_id,
+                        beatmap.mode,
+                        beatmap.version,
+                        beatmap.difficulty_rating,
+                        beatmap.total_length,
+                        beatmap.hit_length,
+                        beatmap.bpm,
+                        beatmap.ar,
+                        beatmap.od,
+                        beatmap.cs,
+                        beatmap.hp,
+                        beatmap.max_combo,
+                        beatmap.count_circles,
+                        beatmap.count_sliders,
+                        beatmap.count_spinners,
+                        beatmap.status,
+                        beatmap.url,
+                        json.dumps(list(beatmap.owners), ensure_ascii=False),
+                        now_iso(),
+                    ),
                 )
-                for beatmap in beatmapset.beatmaps:
-                    conn.execute(
-                        """
-                        INSERT INTO beatmaps (
-                            id, beatmapset_id, mode, version, difficulty_rating,
-                            total_length, hit_length, bpm, ar, od, cs, hp,
-                            max_combo, count_circles, count_sliders, count_spinners,
-                            status, url, owners, updated_at
-                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                        ON CONFLICT(id) DO UPDATE SET
-                            beatmapset_id=excluded.beatmapset_id,
-                            mode=excluded.mode,
-                            version=excluded.version,
-                            difficulty_rating=excluded.difficulty_rating,
-                            total_length=excluded.total_length,
-                            hit_length=excluded.hit_length,
-                            bpm=excluded.bpm,
-                            ar=excluded.ar,
-                            od=excluded.od,
-                            cs=excluded.cs,
-                            hp=excluded.hp,
-                            max_combo=excluded.max_combo,
-                            count_circles=excluded.count_circles,
-                            count_sliders=excluded.count_sliders,
-                            count_spinners=excluded.count_spinners,
-                            status=excluded.status,
-                            url=excluded.url,
-                            owners=excluded.owners,
-                            updated_at=excluded.updated_at
-                        """,
-                        (
-                            beatmap.id,
-                            beatmap.beatmapset_id,
-                            beatmap.mode,
-                            beatmap.version,
-                            beatmap.difficulty_rating,
-                            beatmap.total_length,
-                            beatmap.hit_length,
-                            beatmap.bpm,
-                            beatmap.ar,
-                            beatmap.od,
-                            beatmap.cs,
-                            beatmap.hp,
-                            beatmap.max_combo,
-                            beatmap.count_circles,
-                            beatmap.count_sliders,
-                            beatmap.count_spinners,
-                            beatmap.status,
-                            beatmap.url,
-                            json.dumps(list(beatmap.owners), ensure_ascii=False),
-                            now_iso(),
-                        ),
-                    )
-                saved += 1
-        return saved
+            saved += 1
 
+        return saved
     @staticmethod
     def _row_to_beatmap(row: sqlite3.Row) -> Beatmap:
         try:
@@ -1185,6 +1191,48 @@ class Storage:
             ).fetchone()
         return self._row_to_preset(row) if row else None
 
+    @staticmethod
+    def _insert_preset_conn(
+        conn: sqlite3.Connection, preset_config: PresetConfig
+    ) -> int:
+        stamp = now_iso()
+        cursor = conn.execute(
+            """
+            INSERT INTO presets
+                (name, is_builtin, config_json, created_at, updated_at)
+            VALUES (?,?,?,?,?)
+            """,
+            (
+                preset_config.name,
+                0,
+                json.dumps(preset_config.to_dict(), ensure_ascii=False),
+                stamp,
+                stamp,
+            ),
+        )
+        return int(cursor.lastrowid)
+
+    @staticmethod
+    def _update_preset_conn(
+        conn: sqlite3.Connection,
+        preset_id: int,
+        preset_config: PresetConfig,
+    ) -> None:
+        result = conn.execute(
+            """
+            UPDATE presets SET name = ?, config_json = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                preset_config.name,
+                json.dumps(preset_config.to_dict(), ensure_ascii=False),
+                now_iso(),
+                int(preset_id),
+            ),
+        )
+        if result.rowcount == 0:
+            raise StorageError(f"Пресет id={preset_id} не найден")
+
     def create_preset(
         self, preset_config: PresetConfig, is_builtin: bool = False
     ) -> Preset:
@@ -1710,8 +1758,9 @@ class Storage:
         except Exception as exc:
             raise UserDataImportError(f"Импорт отклонён: {exc}") from exc
 
-        # Referential validation before the first write, so a failed import
-        # cannot leave a half-applied state.
+        # Validation and application share one SQLite transaction. A failure
+        # while writing any set, preset, feedback row or history row rolls back
+        # the complete import instead of leaving half-applied state.
         parsed_set_ids = {beatmapset.id for beatmapset in parsed_sets}
         referenced: set[int] = (
             {row[0] for row in parsed_feedback}
@@ -1723,40 +1772,47 @@ class Storage:
                 int(row["id"])
                 for row in conn.execute("SELECT id FROM beatmapsets").fetchall()
             }
-        missing = referenced - parsed_set_ids - existing_ids
-        if missing:
-            preview = ", ".join(str(i) for i in sorted(missing)[:5])
-            raise UserDataImportError(
-                "Импорт отклонён: в файле нет метаданных beatmapset для "
-                f"оценок/избранного ({preview}). Импортируйте полный экспорт."
-            )
+            missing = referenced - parsed_set_ids - existing_ids
+            if missing:
+                preview = ", ".join(str(i) for i in sorted(missing)[:5])
+                raise UserDataImportError(
+                    "Импорт отклонён: в файле нет метаданных beatmapset для "
+                    f"оценок/избранного ({preview}). Импортируйте полный экспорт."
+                )
 
-        saved_sets = self.save_beatmapsets(parsed_sets)
-        created_presets = 0
-        updated_presets = 0
-        renamed = 0
-        for cfg in parsed_presets:
-            existing = self.get_preset_by_name(cfg.name)
-            if existing is None:
-                self.create_preset(cfg, is_builtin=False)
+            saved_sets = self._save_beatmapsets_conn(conn, parsed_sets)
+            preset_names = {
+                str(row["name"]).casefold(): int(row["id"])
+                for row in conn.execute("SELECT id, name FROM presets").fetchall()
+            }
+            created_presets = 0
+            updated_presets = 0
+            renamed = 0
+            for cfg in parsed_presets:
+                existing_id = preset_names.get(cfg.name.casefold())
+                if existing_id is None:
+                    self._insert_preset_conn(conn, cfg)
+                    preset_names[cfg.name.casefold()] = -1
+                    created_presets += 1
+                    continue
+                if overwrite_presets:
+                    self._update_preset_conn(conn, existing_id, cfg)
+                    updated_presets += 1
+                    continue
+                base = f"{cfg.name} (imported)"
+                name = base
+                suffix = 2
+                while name.casefold() in preset_names:
+                    name = f"{base} {suffix}"
+                    suffix += 1
+                renamed_cfg = PresetConfig.from_dict(
+                    {**cfg.to_dict(), "name": name}
+                )
+                self._insert_preset_conn(conn, renamed_cfg)
+                preset_names[name.casefold()] = -1
                 created_presets += 1
-                continue
-            if overwrite_presets:
-                self.update_preset(existing.id, cfg)
-                updated_presets += 1
-                continue
-            base = f"{cfg.name} (imported)"
-            name = base
-            suffix = 2
-            while self.get_preset_by_name(name) is not None:
-                name = f"{base} {suffix}"
-                suffix += 1
-            renamed_cfg = PresetConfig.from_dict({**cfg.to_dict(), "name": name})
-            self.create_preset(renamed_cfg, is_builtin=False)
-            created_presets += 1
-            renamed += 1
+                renamed += 1
 
-        with self.connection() as conn:
             for set_id, verdict in parsed_feedback:
                 conn.execute(
                     """

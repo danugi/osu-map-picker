@@ -10,6 +10,7 @@ import pytest
 import config
 import launcher
 from storage import Storage, StorageError
+from tools import ensure_deps
 
 
 def test_portable_data_dir_is_per_user(tmp_path, monkeypatch):
@@ -171,8 +172,28 @@ def test_run_bat_has_source_launcher_contract():
     assert "python.org/downloads/windows" in text
     assert ".venv" in text
     assert "requirements.txt" in text
+    assert "tools\\ensure_deps.py" in text
     assert "launcher.py" in text
     assert "OSU_PICKER_DATA_DIR" in text
     assert "0.0.0.0" not in text
     assert "pause" in text.lower()
     assert "127.0.0.1" in text
+
+
+def test_dependency_stamp_tracks_requirements_hash(tmp_path):
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text("streamlit>=1.52\n", encoding="utf-8")
+    digest = ensure_deps.requirements_hash(requirements)
+    stamp = tmp_path / ".requirements.sha256"
+    assert not ensure_deps.stamp_matches(digest, stamp)
+    ensure_deps.write_stamp(digest, stamp)
+    assert ensure_deps.stamp_matches(digest, stamp)
+    requirements.write_text("streamlit>=1.53\n", encoding="utf-8")
+    assert not ensure_deps.stamp_matches(
+        ensure_deps.requirements_hash(requirements), stamp
+    )
+
+
+def test_runtime_modules_include_pillow_and_keyring():
+    assert "PIL" in ensure_deps.MODULES
+    assert "keyring" in ensure_deps.MODULES
