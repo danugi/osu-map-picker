@@ -970,7 +970,9 @@ class DiscoveryEngine:
         ranking_settings: RankingSettings,
         *,
         max_candidates: int,
-    ) -> tuple[list[Candidate], DiscoveryResult, int, int, int]:
+        excluded: dict[str, int],
+        exclusions: list[Exclusion],
+    ) -> tuple[list[Candidate], DiscoveryResult, int, int, int, int]:
         """Add bounded catalog candidates before the single ranking pass."""
 
         local = self.rerank_stored(
@@ -984,9 +986,11 @@ class DiscoveryEngine:
         }
         used_sets = {candidate.beatmapset.id for candidate in candidates}
         merged = list(candidates)
+        valid = [True] * len(merged)
         added = 0
         duplicates = 0
         enriched_duplicates = 0
+        refresh_failed = 0
         for item in local.scored:
             if len(merged) >= max_candidates:
                 break
@@ -1008,7 +1012,7 @@ class DiscoveryEngine:
                         )
                     )
                 ):
-                    merged[api_index[key]] = self._with_analysis(
+                    enriched = self._with_analysis(
                         replace(
                             api_candidate,
                             attributes=(
@@ -1018,7 +1022,20 @@ class DiscoveryEngine:
                         ),
                         local_analysis,
                     )
+                    refreshed = evaluate_relevance(enriched, ranking_settings)
+                    enriched = replace(enriched, relevance=refreshed)
                     enriched_duplicates += 1
+                    if refreshed.passed:
+                        merged[api_index[key]] = enriched
+                    else:
+                        valid[api_index[key]] = False
+                        refresh_failed += 1
+                        _apply_relevance_gate(
+                            [enriched],
+                            ranking_settings,
+                            excluded=excluded,
+                            exclusions=exclusions,
+                        )
                 continue
             if item.beatmapset.id in used_sets:
                 duplicates += 1
@@ -1026,8 +1043,21 @@ class DiscoveryEngine:
             used_sets.add(item.beatmapset.id)
             api_index[key] = len(merged)
             merged.append(item.candidate)
+            valid.append(True)
             added += 1
-        return merged, local, added, duplicates, enriched_duplicates
+        merged = [
+            candidate
+            for candidate, is_valid in zip(merged, valid)
+            if is_valid
+        ]
+        return (
+            merged,
+            local,
+            added,
+            duplicates,
+            enriched_duplicates,
+            refresh_failed,
+        )
 
     # -- main entry point --------------------------------------------------
     def run(
@@ -1398,11 +1428,6 @@ class DiscoveryEngine:
             exclusions=exclusions,
         )
         relevance_passed = len(candidates)
-        relevance_excluded = {
-            reason: count - excluded_before_relevance.get(reason, 0)
-            for reason, count in excluded.items()
-            if count > excluded_before_relevance.get(reason, 0)
-        }
         if ranking_settings.relevance_targets and strict_passed != relevance_passed:
             notes.append(
                 "Целевые теги: исключено "
@@ -1414,21 +1439,34 @@ class DiscoveryEngine:
         candidate_limit = max(1, int(self.settings.max_candidates))
         target_results = min(LOCAL_TOPUP_TARGET_RESULTS, candidate_limit)
         local_result: DiscoveryResult | None = None
-        local_added = local_duplicates = enriched_duplicates = 0
+        local_added = local_duplicates = enriched_duplicates = refresh_failed = 0
         if (
             self.local_catalog_supplement
             and not budget.get("fatal")
             and len(candidates) < target_results
             and catalog_after > len(known)
         ):
-            candidates, local_result, local_added, local_duplicates, enriched_duplicates = (
-                self._merge_local_candidates(
-                    candidates,
-                    filters,
-                    ranking_settings,
-                    max_candidates=candidate_limit,
-                )
+            (
+                candidates,
+                local_result,
+                local_added,
+                local_duplicates,
+                enriched_duplicates,
+                refresh_failed,
+            ) = self._merge_local_candidates(
+                candidates,
+                filters,
+                ranking_settings,
+                max_candidates=candidate_limit,
+                excluded=excluded,
+                exclusions=exclusions,
             )
+            if refresh_failed:
+                relevance_passed = max(0, relevance_passed - refresh_failed)
+                notes.append(
+                    f"После локального обогащения {refresh_failed} API-карт "
+                    "не прошли повторную проверку целевого гейта и исключены."
+                )
             if local_added:
                 notes.append(
                     f"Локальный каталог дополнил выдачу: +{local_added} карт "
@@ -1452,6 +1490,12 @@ class DiscoveryEngine:
                     "Локальный топ-ап использует только сохранённые sequence-"
                     "результаты; .osu не скачивались."
                 )
+        # Refreshed relevance may add exclusions after the initial gate.
+        relevance_excluded = {
+            reason: count - excluded_before_relevance.get(reason, 0)
+            for reason, count in excluded.items()
+            if count > excluded_before_relevance.get(reason, 0)
+        }
         considered_ids = (
             set(local_result.local_catalog_considered_ids)
             if local_result is not None

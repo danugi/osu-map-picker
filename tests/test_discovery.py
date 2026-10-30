@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 from typing import Callable
 
 import pytest
@@ -20,13 +21,17 @@ from features import derive_features
 from gameplay import GameplayError
 from skillsets import evaluate_skills
 from models import (
+    AnalysisEvidence,
     Candidate,
     DifficultyAttributes,
+    DiscoveryResult,
     DiscoverySettings,
     Exclusion,
     Filters,
     PatternChain,
     RankingSettings,
+    RelevanceResult,
+    ScoredCandidate,
     SearchPage,
     SearchQuery,
     SequenceAnalysis,
@@ -732,6 +737,103 @@ def test_local_sequence_reuse_does_not_raise_new_analysis_limit(
     )
     engine.rerank_stored(streams.filters, streams.ranking)
     assert len(calls) == 20
+
+
+def _local_supplement_result(candidate: Candidate) -> DiscoveryResult:
+    return DiscoveryResult(
+        scored=(ScoredCandidate(candidate=candidate, score=0.8, factors=()),),
+        local_catalog_considered=1,
+        local_catalog_considered_ids=(candidate.beatmapset.id,),
+    )
+
+
+def test_local_enrichment_refreshes_stale_relevance(
+    storage: Storage, monkeypatch
+) -> None:
+    bursts = presets.builtin_by_name("Bursts")
+    assert bursts is not None
+    sequence = _sequence("burst", 9)
+    local_candidate = replace(
+        _candidate(1, sequence=sequence),
+        analysis=AnalysisEvidence(
+            beatmap_id=11,
+            status=evidence.MEASURED,
+            sequence=sequence,
+            analyzer_version=patterns.ANALYZER_VERSION,
+        ),
+    )
+    stale = replace(
+        _candidate(1),
+        relevance=RelevanceResult(passed=True, threshold=0.55),
+    )
+    engine = DiscoveryEngine(None, storage, settings(max_candidates=10))
+    monkeypatch.setattr(
+        engine,
+        "rerank_stored",
+        lambda *args, **kwargs: _local_supplement_result(local_candidate),
+    )
+    excluded: dict[str, int] = {}
+    exclusions: list[Exclusion] = []
+    merged, _, _, _, _, refresh_failed = engine._merge_local_candidates(
+        [stale],
+        bursts.filters,
+        bursts.ranking,
+        max_candidates=10,
+        excluded=excluded,
+        exclusions=exclusions,
+    )
+    assert refresh_failed == 0
+    assert len(merged) == 1
+    assert merged[0].relevance is not None
+    assert merged[0].relevance.passed is True
+    assert merged[0].relevance.targets
+    assert merged[0].relevance.targets[0].target_id in {
+        "burst_control",
+        "speed_bursts",
+        "speed_short_bursts",
+    }
+
+
+def test_local_enrichment_drops_candidate_if_refreshed_gate_fails(
+    storage: Storage, monkeypatch
+) -> None:
+    bursts = presets.builtin_by_name("Bursts")
+    assert bursts is not None
+    sequence = SequenceAnalysis(analyzed_notes=10, total_notes=10)
+    local_candidate = replace(
+        _candidate(1, sequence=sequence),
+        analysis=AnalysisEvidence(
+            beatmap_id=11,
+            status=evidence.MEASURED,
+            sequence=sequence,
+            analyzer_version=patterns.ANALYZER_VERSION,
+        ),
+    )
+    stale = replace(
+        _candidate(1),
+        relevance=RelevanceResult(passed=True, threshold=0.55),
+    )
+    engine = DiscoveryEngine(None, storage, settings(max_candidates=10))
+    monkeypatch.setattr(
+        engine,
+        "rerank_stored",
+        lambda *args, **kwargs: _local_supplement_result(local_candidate),
+    )
+    excluded: dict[str, int] = {}
+    exclusions: list[Exclusion] = []
+    merged, _, _, _, _, refresh_failed = engine._merge_local_candidates(
+        [stale],
+        bursts.filters,
+        bursts.ranking,
+        max_candidates=10,
+        excluded=excluded,
+        exclusions=exclusions,
+    )
+    assert refresh_failed == 1
+    assert merged == []
+    assert excluded
+    assert exclusions
+    assert all(item.stage == "relevance" for item in exclusions)
 
 
 def test_local_topup_deduplicates_and_keeps_api_metadata(storage: Storage) -> None:
