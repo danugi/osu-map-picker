@@ -63,7 +63,7 @@ class StubApi:
         self.search_calls.append(query)
         return self.responder(query)
 
-    def get_beatmap_attributes(self, beatmap_id: int) -> DifficultyAttributes:
+    def get_beatmap_attributes(self, beatmap_id: int, *, ruleset: str = "osu") -> DifficultyAttributes:
         self.attribute_calls.append(beatmap_id)
         value = self.attributes.get(beatmap_id)
         if isinstance(value, Exception):

@@ -456,3 +456,50 @@ def test_title_query_and_cursor_are_sent_without_mutating_the_query_text():
     assert second.beatmapsets[0].id == 8
     assert seen[1]["cursor_string"] == "next&token"
     assert seen[1]["q"] == "Nightcore & Cut Ver"
+
+
+def test_genre_and_language_params_are_sent() -> None:
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth/token":
+            return token_response()
+        seen.append(dict(request.url.params))
+        return httpx.Response(200, json=search_payload([1]))
+
+    api, _ = client_with(handler)
+    api.search_beatmapsets(SearchQuery(genre=3, language=2))
+    assert seen[0]["g"] == "3"
+    assert seen[0]["l"] == "2"
+    api.search_beatmapsets(SearchQuery())
+    assert "g" not in seen[1]
+    assert "l" not in seen[1]
+
+
+def test_attributes_body_uses_the_requested_ruleset() -> None:
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth/token":
+            return token_response()
+        import json as _json
+
+        bodies.append(_json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "attributes": {
+                    "star_rating": 6.1,
+                    "aim_difficulty": 3.0,
+                    "speed_difficulty": 1.0,
+                    "slider_factor": 1.2,
+                    "max_combo": 1000,
+                }
+            },
+        )
+
+    api, _ = client_with(handler)
+    api.get_beatmap_attributes(123, ruleset="taiko")
+    api.get_beatmap_attributes(124)
+    assert bodies[0]["ruleset"] == "taiko"
+    assert bodies[1]["ruleset"] == "osu"

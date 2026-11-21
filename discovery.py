@@ -117,6 +117,7 @@ class SearchStrategy:
     status: str
     sort: str
     query: str | None = None
+    mode: str = "osu"
 
 
 def _status_priority(statuses: list[str]) -> str:
@@ -133,40 +134,50 @@ def build_strategies(
 ) -> list[SearchStrategy]:
     """Build a bounded, de-duplicated strategy list."""
     statuses = list(dict.fromkeys(filters.statuses))
+    modes = list(dict.fromkeys(filters.modes)) or ["osu"]
     primary = _status_priority(statuses)
     base_query = filters.query.strip() or None
     strategies: list[SearchStrategy] = []
-    seen_keys: set[tuple[str, str, str | None]] = set()
+    seen_keys: set[tuple[str, str, str, str | None]] = set()
 
-    def add(name: str, status: str, sort: str, query: str | None) -> None:
+    def add(name: str, status: str, sort: str, query: str | None, mode: str = "osu") -> None:
         # Two differently named strategies with the same request would spend
         # the budget twice and return the same candidates.
-        key = (status, sort, query)
+        key = (mode, status, sort, query)
         if key in seen_keys:
             return
         seen_keys.add(key)
-        strategies.append(SearchStrategy(name, status, sort, query))
+        strategies.append(SearchStrategy(name, status, sort, query, mode))
+
+    def add_for_mode(mode: str, name: str, status: str, sort: str, query: str | None) -> None:
+        # A multi-mode filter must not silently search only the first mode:
+        # local filtering accepts every mode in filters.modes. Single-mode
+        # runs keep the historical strategy names.
+        prefix = f"{mode}:" if len(modes) > 1 else ""
+        add(f"{prefix}{name}", status, sort, query, mode)
 
     for index, status in enumerate(statuses):
-        add(f"{status}:recent", status, "ranked_desc", base_query)
-        # High-value preset-owned title searches run immediately after the
-        # primary status, before secondary statuses and optional oldest/rating/
-        # favourites directions. A tight page budget must not silently skip
-        # them because of strategy ordering.
-        if index == 0 and settings.title_queries and not base_query:
-            for query in list(dict.fromkeys(
-                text.strip() for text in settings.title_queries if text.strip()
-            ))[:6]:
-                add(f"title:{query}", primary, "ranked_desc", query)
-    if settings.use_oldest:
-        add(f"{primary}:oldest", primary, "ranked_asc", base_query)
-    if settings.use_rating:
-        add(f"{primary}:rating", primary, "rating_desc", base_query)
-    if settings.use_popular:
-        add(f"{primary}:favourites", primary, "favourites_desc", base_query)
+        for mode in modes:
+            add_for_mode(mode, f"{status}:recent", status, "ranked_desc", base_query)
+            # High-value preset-owned title searches run immediately after the
+            # primary status, before secondary statuses and optional oldest/rating/
+            # favourites directions. A tight page budget must not silently skip
+            # them because of strategy ordering.
+            if index == 0 and settings.title_queries and not base_query:
+                for query in list(dict.fromkeys(
+                    text.strip() for text in settings.title_queries if text.strip()
+                ))[:6]:
+                    add_for_mode(mode, f"title:{query}", primary, "ranked_desc", query)
+    for mode in modes:
+        if settings.use_oldest:
+            add_for_mode(mode, f"{primary}:oldest", primary, "ranked_asc", base_query)
+        if settings.use_rating:
+            add_for_mode(mode, f"{primary}:rating", primary, "rating_desc", base_query)
+        if settings.use_popular:
+            add_for_mode(mode, f"{primary}:favourites", primary, "favourites_desc", base_query)
     if settings.expand_seeds and not base_query:
         for seed in list(dict.fromkeys(s.strip() for s in seeds if s.strip()))[:3]:
-            add(f"seed:{seed}", primary, "ranked_desc", seed)
+            add_for_mode(primary, f"seed:{seed}", primary, "ranked_desc", seed)
     return strategies
 
 
@@ -565,7 +576,9 @@ class DiscoveryEngine:
                     budget.get("attributes_requested", 0)
                 ) + 1
                 try:
-                    attributes = self.api.get_beatmap_attributes(beatmap_id)
+                    attributes = self.api.get_beatmap_attributes(
+                        beatmap_id, ruleset=candidate.beatmap.mode
+                    )
                 except OsuForbiddenError:
                     budget["failed"] = int(budget.get("failed", 0)) + 1
                     budget["attribute_limit"] = True
@@ -1167,12 +1180,27 @@ class DiscoveryEngine:
                 strategies = strategies[offset:] + strategies[:offset]
 
         def base_query(strategy: SearchStrategy) -> SearchQuery:
+            # A single selected genre/language is pushed server-side (g=/l=);
+            # multiple selections stay client-side because the endpoint takes
+            # one value per request. Exclusions are always client-side.
+            genre = (
+                filters.include_genres[0]
+                if len(filters.include_genres) == 1
+                else None
+            )
+            language = (
+                filters.include_languages[0]
+                if len(filters.include_languages) == 1
+                else None
+            )
             return SearchQuery(
-                mode=filters.modes[0],
+                mode=strategy.mode or filters.modes[0],
                 status=strategy.status,
                 sort=strategy.sort,
                 query=strategy.query,
                 nsfw=not filters.exclude_nsfw,
+                genre=genre,
+                language=language,
             )
 
         strategy_stats: dict[str, dict[str, Any]] = {
@@ -1180,6 +1208,7 @@ class DiscoveryEngine:
                 "name": strategy.name,
                 "status": strategy.status,
                 "sort": strategy.sort,
+                "mode": strategy.mode,
                 "query": strategy.query,
                 "params": base_query(strategy).to_params(),
                 "executed": False,
@@ -1193,6 +1222,7 @@ class DiscoveryEngine:
                 "exhausted": False,
                 "stop_reason": "",
                 "error": "",
+                "total": 0,
             }
             for strategy in strategies
         }
@@ -1213,6 +1243,7 @@ class DiscoveryEngine:
             strategies_used.append(strategy.name)
             stats = strategy_stats[strategy.name]
             stats["executed"] = True
+            stats["mode"] = strategy.mode
             stats["params"] = base_query(strategy).to_params()
             query = base_query(strategy)
             seen_cursors: set[str] = set()
@@ -1257,6 +1288,9 @@ class DiscoveryEngine:
                     notes.append(
                         f"{strategy.name}: API сообщил «{page.error}»"
                     )
+                    # A page-level error means the response is unreliable;
+                    # fetching deeper pages of it would only waste budget.
+                    break
                 for warning in page.warnings:
                     if len(notes) < MAX_NOTES:
                         notes.append(f"{strategy.name}: {warning}")
@@ -1265,6 +1299,8 @@ class DiscoveryEngine:
                 stats["raw_rows"] += len(page.beatmapsets)
                 stats["raw_response_rows"] += int(page.raw_count) or len(page.beatmapsets)
                 stats["last_has_more"] = bool(page.has_more)
+                if page.total and not stats["total"]:
+                    stats["total"] = int(page.total)
                 for beatmapset in page.beatmapsets:
                     if beatmapset.id not in known:
                         known[beatmapset.id] = beatmapset
@@ -1280,6 +1316,12 @@ class DiscoveryEngine:
                             f"{strategy.name}: остановлено на "
                             f"{self.settings.max_pages_per_strategy} страницах."
                         )
+                        if stats["total"]:
+                            notes.append(
+                                f"{strategy.name}: всего доступно около "
+                                f"{stats['total']} наборов, получено "
+                                f"{stats['raw_rows']}."
+                            )
                     else:
                         stats["exhausted"] = True
                     break

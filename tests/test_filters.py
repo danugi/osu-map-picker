@@ -275,3 +275,117 @@ def test_invalid_filter_configuration(overrides: dict) -> None:
 def test_filter_from_dict_rejects_unknown_fields() -> None:
     with pytest.raises(ValueError):
         Filters.from_dict({"stars_min": 4.0, "unknown_field": 1})
+
+
+# --------------------------------------------------------------------------
+# Query grammar: the same text goes to the API as q and is re-checked
+# locally. Operator queries must not be required as literal substrings.
+# --------------------------------------------------------------------------
+
+
+def test_operator_query_passes_maps_matching_the_field() -> None:
+    # "artist=xi" used to require the literal string "artist=xi" inside the
+    # haystack, silently discarding every API hit.
+    beatmapset = make_beatmapset(1, artist="xi", title="Feral Creation")
+    filters = make_filters(query="artist=xi")
+    assert apply_filters(beatmapset, filters).passed
+
+
+def test_operator_query_excludes_maps_of_other_artists() -> None:
+    beatmapset = make_beatmapset(1, artist="AKHT", title="Feral Creation")
+    filters = make_filters(query="artist=xi")
+    decision = apply_filters(beatmapset, filters)
+    assert not decision.passed
+    assert decision.reason == "не совпадает с текстовым запросом"
+
+
+def test_creator_operator_matches_mapper_only() -> None:
+    beatmapset = make_beatmapset(1, artist="xi", creator="Sotark")
+    assert apply_filters(beatmapset, make_filters(query="creator=Sotark")).passed
+    assert apply_filters(beatmapset, make_filters(query="mapper=Sotark")).passed
+    decision = apply_filters(beatmapset, make_filters(query="creator=cabbie"))
+    assert not decision.passed
+
+
+def test_negative_term_excludes_matching_maps() -> None:
+    beatmapset = make_beatmapset(1, artist="xi", title="Feral Creation")
+    decision = apply_filters(beatmapset, make_filters(query="xi -feral"))
+    assert not decision.passed
+    assert decision.reason == "совпадает с исключаемым «feral»"
+
+
+def test_negative_term_keeps_other_maps() -> None:
+    beatmapset = make_beatmapset(1, artist="xi", title="Feral Creation")
+    assert apply_filters(beatmapset, make_filters(query="xi -missing")).passed
+
+
+def test_quoted_phrase_requires_the_exact_substring() -> None:
+    beatmapset = make_beatmapset(1, artist="xi", title="Feral Creation")
+    assert apply_filters(beatmapset, make_filters(query='"feral creation"')).passed
+    assert not apply_filters(
+        beatmapset, make_filters(query='"creation feral"')
+    ).passed
+
+
+def test_plain_terms_are_matched_per_word_not_as_raw_text() -> None:
+    beatmapset = make_beatmapset(1, artist="xi", title="Feral Creation")
+    # Two words in any order: the old raw-substring check failed on this.
+    assert apply_filters(beatmapset, make_filters(query="creation xi")).passed
+
+
+def test_unknown_operators_are_left_to_the_api() -> None:
+    beatmapset = make_beatmapset(1, artist="xi")
+    # played= is API-side; the local check must not exclude anything.
+    assert apply_filters(beatmapset, make_filters(query="xi played>10")).passed
+
+
+def test_numeric_query_stars_passes_and_fails() -> None:
+    beatmapset = make_beatmapset(1, beatmaps=(make_beatmap(11, 1, stars=5.0),))
+    assert apply_filters(beatmapset, make_filters(query="stars>=5")).passed
+    decision = apply_filters(beatmapset, make_filters(query="stars<5"))
+    assert not decision.passed
+    assert decision.reason == "запрос не выполнен (stars<5)"
+
+
+def test_numeric_query_bpm_and_ar() -> None:
+    beatmapset = make_beatmapset(1, beatmaps=(make_beatmap(11, 1, bpm=180, ar=9.0),))
+    assert apply_filters(beatmapset, make_filters(query="bpm>=170 ar<10")).passed
+    decision = apply_filters(beatmapset, make_filters(query="bpm<=170"))
+    assert not decision.passed
+
+
+def test_numeric_query_unknown_ar_is_reported_not_excluded() -> None:
+    beatmapset = make_beatmapset(1, beatmaps=(make_beatmap(11, 1, ar=None),))
+    decision = apply_filters(beatmapset, make_filters(query="ar<8"))
+    assert decision.passed
+    assert "AR" in decision.unknown_fields
+
+
+def test_query_from_to_dates() -> None:
+    beatmapset = make_beatmapset(1, ranked_date="2021-05-05T00:00:00+00:00")
+    assert apply_filters(beatmapset, make_filters(query="from=2020-01-01")).passed
+    decision = apply_filters(beatmapset, make_filters(query="to=2020-01-01"))
+    assert not decision.passed
+    assert decision.reason == "опубликована позже даты запроса"
+
+
+def test_language_filters() -> None:
+    beatmapset = make_beatmapset(1, language_id=3)
+    assert apply_filters(beatmapset, make_filters(include_languages=[3])).passed
+    decision = apply_filters(beatmapset, make_filters(include_languages=[2]))
+    assert not decision.passed
+    assert decision.reason == "язык не входит в избранные"
+    assert apply_filters(beatmapset, make_filters(exclude_languages=[2])).passed
+    assert not apply_filters(beatmapset, make_filters(exclude_languages=[3])).passed
+
+
+def test_unknown_language_is_rejected_in_validation() -> None:
+    with pytest.raises(FilterConfigError):
+        validate_filters(make_filters(include_languages=[99]))
+
+
+def test_validate_filters_rejects_bad_query_date_operator_value() -> None:
+    # Non-date from=/to= values are simply ignored locally (API-side); the
+    # local filter must not crash on them.
+    beatmapset = make_beatmapset(1, artist="xi")
+    assert apply_filters(beatmapset, make_filters(query="from=not-a-date xi")).passed

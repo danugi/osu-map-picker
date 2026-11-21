@@ -54,6 +54,26 @@ GENRES = {
     14: "Jazz",
 }
 
+# Beatmap language ids as used by osu! web (1 = Unspecified, per osu-web's
+# Language model). Sent to /beatmapsets/search as ``l=`` when a single
+# language is selected.
+LANGUAGES = {
+    1: "Unspecified",
+    2: "English",
+    3: "Japanese",
+    4: "Chinese",
+    5: "Instrumental",
+    6: "Korean",
+    7: "French",
+    8: "German",
+    9: "Swedish",
+    10: "Spanish",
+    11: "Italian",
+    12: "Russian",
+    13: "Polish",
+    14: "Other",
+}
+
 VERDICTS = (
     "like",
     "fine",
@@ -259,6 +279,10 @@ class Beatmapset:
     def genre_name(self) -> str | None:
         return GENRES.get(self.genre_id) if self.genre_id else None
 
+    @property
+    def language_name(self) -> str | None:
+        return LANGUAGES.get(self.language_id) if self.language_id else None
+
     def difficulties(self, mode: str | None = None) -> tuple[Beatmap, ...]:
         if mode is None:
             return self.beatmaps
@@ -303,6 +327,8 @@ class SearchQuery:
     sort: str = "ranked_desc"
     query: str | None = None
     nsfw: bool = False
+    genre: int | None = None
+    language: int | None = None
     cursor: dict[str, Any] | None = None
     cursor_string: str | None = None
 
@@ -314,6 +340,12 @@ class SearchQuery:
         }
         if self.query:
             params["q"] = self.query
+        # Genre/language are pushed server-side when a single value is
+        # selected: wrong-genre pages otherwise burn the request budget.
+        if self.genre:
+            params["g"] = int(self.genre)
+        if self.language:
+            params["l"] = int(self.language)
         if not self.nsfw:
             params["nsfw"] = "hide"
         if self.cursor_string:
@@ -379,6 +411,8 @@ class Filters:
     exclude_mappers: list[str] = field(default_factory=list)
     include_genres: list[int] = field(default_factory=list)
     exclude_genres: list[int] = field(default_factory=list)
+    include_languages: list[int] = field(default_factory=list)
+    exclude_languages: list[int] = field(default_factory=list)
     exclude_nsfw: bool = config.DEFAULT_EXCLUDE_NSFW
     hide_seen: bool = config.DEFAULT_HIDE_SEEN
     hide_played: bool = config.DEFAULT_HIDE_PLAYED
@@ -404,7 +438,8 @@ class Filters:
             if f.name in {"modes", "statuses", "include_artists", "exclude_artists",
                           "include_mappers", "exclude_mappers"}:
                 kwargs[f.name] = _as_str_list(value, p)
-            elif f.name in {"include_genres", "exclude_genres", "exclude_beatmapset_ids"}:
+            elif f.name in {"include_genres", "exclude_genres", "include_languages",
+                            "exclude_languages", "exclude_beatmapset_ids"}:
                 kwargs[f.name] = _as_int_list(value, p)
             elif f.name in {"stars_min", "stars_max", "star_tolerance", "duration_min",
                             "duration_max", "bpm_min", "bpm_max", "ar_min", "ar_max",
@@ -980,7 +1015,8 @@ class StrategyRunStats:
     name: str
     status: str
     sort: str
-    query: str | None
+    mode: str = "osu"
+    query: str | None = None
     params: dict[str, Any] = field(default_factory=dict)
     executed: bool = False
     pages: int = 0
@@ -993,6 +1029,9 @@ class StrategyRunStats:
     exhausted: bool = False
     stop_reason: str = ""
     error: str = ""
+    # Total number of matching sets reported by the API for this strategy,
+    # when the response includes it. 0 means the API did not report a total.
+    total: int = 0
 
 
 @dataclass(frozen=True, slots=True)

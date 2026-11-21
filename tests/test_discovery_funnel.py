@@ -41,7 +41,7 @@ class CursorApi:
         self.token_requests = 0
         self.requests_made = 0
 
-    def get_beatmap_attributes(self, beatmap_id):
+    def get_beatmap_attributes(self, beatmap_id: int, *, ruleset: str = "osu"):
         from models import DifficultyAttributes
 
         return DifficultyAttributes(
@@ -79,7 +79,7 @@ class EmptyApi:
         self.token_requests = 0
         self.requests_made = 0
 
-    def get_beatmap_attributes(self, beatmap_id):
+    def get_beatmap_attributes(self, beatmap_id: int, *, ruleset: str = "osu"):
         from models import DifficultyAttributes
 
         return DifficultyAttributes(
@@ -419,3 +419,99 @@ def test_title_queries_precede_secondary_status_strategies():
     names = [item.name for item in strategies]
     assert names.index("title:Cut Ver") < names.index("loved:recent")
     assert names.index("title:Cut Ver") < names.index("ranked:oldest")
+
+
+def test_page_error_stops_deep_pagination(storage):
+    """A page-level error must not burn budget on further pages of the same
+    unreliable response; other strategies still run."""
+    calls: list[SearchQuery] = []
+
+    class Api(EmptyApi):
+        def search_beatmapsets(self, query: SearchQuery) -> SearchPage:
+            self.search_calls.append(query)
+            calls.append(query)
+            if not query.cursor_string:
+                return SearchPage(
+                    beatmapsets=(make_beatmapset(1),),
+                    cursor_string="next",
+                    error="partial response",
+                )
+            return SearchPage(beatmapsets=(make_beatmapset(2),))
+
+    result = DiscoveryEngine(Api(), storage, _settings(max_requests=4)).run(
+        Filters(statuses=["ranked"]), RankingSettings(), record=False
+    )
+    assert result.complete is False
+    assert result.stop_reason == "api_error"
+    assert result.strategy_runs[0].error == "partial response"
+    # Only one request for the failing strategy; no second page was fetched.
+    assert len(calls) == 1
+
+
+def test_strategy_total_is_surfaced_in_the_funnel(storage):
+    class Api(EmptyApi):
+        def search_beatmapsets(self, query: SearchQuery) -> SearchPage:
+            self.search_calls.append(query)
+            self.requests_made += 1
+            return SearchPage(
+                beatmapsets=(make_beatmapset(1), make_beatmapset(2)),
+                cursor_string="page-2",
+                total=137,
+            )
+
+    result = DiscoveryEngine(Api(), storage, _settings()).run(
+        Filters(statuses=["ranked"]), RankingSettings(), record=False
+    )
+    assert result.strategy_runs[0].total == 137
+
+
+def test_multi_mode_filters_search_every_mode(storage):
+    api = CursorApi(per_page=5, pages=1)
+    engine = DiscoveryEngine(api, storage, _settings())
+    result = engine.run(
+        Filters(modes=["osu", "taiko"], statuses=["ranked"]),
+        RankingSettings(),
+        record=False,
+    )
+    names = [run.name for run in result.strategy_runs]
+    assert "osu:ranked:recent" in names
+    assert "taiko:ranked:recent" in names
+    modes_used = {call.mode for call in api.search_calls}
+    assert modes_used == {"osu", "taiko"}
+    assert result.strategy_runs[0].mode == "osu"
+
+
+def test_single_mode_keeps_historical_strategy_names(storage):
+    strategies = build_strategies(
+        Filters(modes=["osu"], statuses=["ranked"]),
+        _settings(use_oldest=True, use_popular=True),
+    )
+    names = [item.name for item in strategies]
+    assert names[0] == "ranked:recent"
+    assert "ranked:oldest" in names
+    assert "ranked:favourites" in names
+
+
+def test_single_genre_is_pushed_server_side(storage):
+    class Api(EmptyApi):
+        pass
+
+    api = Api()
+    engine = DiscoveryEngine(api, storage, _settings())
+    engine.run(
+        Filters(statuses=["ranked"], include_genres=[3]),
+        RankingSettings(),
+        record=False,
+    )
+    assert api.search_calls[0].genre == 3
+    assert api.search_calls[0].to_params().get("g") == 3
+
+    api_two = EmptyApi()
+    engine_two = DiscoveryEngine(api_two, storage, _settings())
+    engine_two.run(
+        Filters(statuses=["ranked"], include_genres=[3, 10]),
+        RankingSettings(),
+        record=False,
+    )
+    # Multiple genres stay client-side: the endpoint takes one value.
+    assert api_two.search_calls[0].genre is None

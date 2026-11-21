@@ -10,13 +10,16 @@ reported as ``unknown_fields`` / in Diagnostics.
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import date
+from functools import lru_cache
 
 from models import (
     DURATION_FIELDS,
     GENRES,
+    LANGUAGES,
     MODES,
     STAR_MODES,
     STATUSES,
@@ -51,6 +54,233 @@ class FilterDecision:
 
 def _norm(value: str) -> str:
     return unicodedata.normalize("NFKC", value or "").strip().casefold()
+
+
+# --------------------------------------------------------------------------
+# Text query grammar.
+#
+# The raw query is forwarded to the API unchanged, and the API understands
+# its own operator syntax: quoted phrases, ``-negatives``, ``artist=...``
+# and numeric comparisons like ``stars<5``. The old local check required
+# the raw string to appear as one contiguous substring, so every operator
+# query returned API hits that were then all discarded locally (silent zero
+# results). The local check now parses the same grammar; anything it cannot
+# evaluate is left to the API instead of being required as literal text.
+# --------------------------------------------------------------------------
+
+_TEXT_FIELDS = ("artist", "creator", "mapper", "title")
+_DATE_FIELDS = ("from", "to")
+_NUMERIC_FIELDS = ("stars", "ar", "od", "cs", "hp", "bpm", "length")
+_NUMERIC_OP = re.compile(
+    r"^(stars|ar|od|cs|hp|bpm|length)(<=|>=|<|>|=)(\d+(?:\.\d+)?)$"
+)
+_DATE_VALUE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+@dataclass(frozen=True)
+class ParsedQuery:
+    """Structured pieces of a search query, mirroring osu! web semantics."""
+
+    phrases: tuple[str, ...] = ()
+    terms: tuple[str, ...] = ()
+    negations: tuple[str, ...] = ()
+    fields: tuple[tuple[str, str], ...] = ()
+    negated_fields: tuple[tuple[str, str], ...] = ()
+    numbers: tuple[tuple[str, str, float], ...] = ()
+    dates: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True)
+class _Token:
+    text: str
+    negated: bool = False
+
+
+def _tokenize(query: str) -> list[_Token]:
+    tokens: list[_Token] = []
+    buf: list[str] = []
+    in_quotes = False
+    for ch in query:
+        if ch == '"':
+            in_quotes = not in_quotes
+            buf.append(ch)
+            continue
+        if ch.isspace() and not in_quotes:
+            if buf:
+                tokens.append(_Token("".join(buf)))
+                buf = []
+            continue
+        buf.append(ch)
+    if buf:
+        tokens.append(_Token("".join(buf)))
+    result: list[_Token] = []
+    for token in tokens:
+        if token.text.startswith("-") and len(token.text) > 1:
+            result.append(_Token(token.text[1:], negated=True))
+        else:
+            result.append(token)
+    return result
+
+
+def _strip_quotes(value: str) -> str:
+    if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
+        return value[1:-1]
+    return value
+
+
+@lru_cache(maxsize=256)
+def parse_query(query: str) -> ParsedQuery:
+    """Parse ``q`` grammar: phrases, negatives, fields, numeric comparisons."""
+    phrases: list[str] = []
+    terms: list[str] = []
+    negations: list[str] = []
+    fields: list[tuple[str, str]] = []
+    negated_fields: list[tuple[str, str]] = []
+    numbers: list[tuple[str, str, float]] = []
+    dates: list[tuple[str, str]] = []
+
+    for token in _tokenize(query):
+        raw = token.text
+        if raw.startswith('"'):
+            # Covers both "phrases" and -"negated phrases" (the dash was
+            # stripped during tokenization).
+            phrase = _strip_quotes(raw)
+            if not phrase:
+                continue
+            (negations if token.negated else phrases).append(phrase.casefold())
+            continue
+        op_match = _NUMERIC_OP.match(raw)
+        if op_match and not token.negated:
+            numbers.append((op_match.group(1), op_match.group(2), float(op_match.group(3))))
+            continue
+        if '=' in raw:
+            left, _, right = raw.partition('=')
+            key = left.lower().strip()
+            value = _strip_quotes(right).strip()
+            if not value:
+                terms.append(_norm(raw))
+                continue
+            if key in _TEXT_FIELDS:
+                canonical = "creator" if key == "mapper" else key
+                if token.negated:
+                    negated_fields.append((canonical, _norm(value)))
+                else:
+                    fields.append((canonical, _norm(value)))
+            elif key in _DATE_FIELDS and _DATE_VALUE.match(value):
+                dates.append((key, value))
+            elif key in _NUMERIC_FIELDS and _NUMERIC_OP.match(f"{key}={value}"):
+                numbers.append((key, "=", float(value)))
+            # Unknown operators (played=, ranked=, ...) are evaluated by the
+            # API; the local check must not require them as literal text.
+            continue
+        word = _strip_quotes(raw)
+        if not word:
+            continue
+        if any(ch in word for ch in "<>="):
+            # Unrecognized operator syntax (played>10, ranked<2020, ...) is
+            # evaluated by the API; the local check must not require it as
+            # literal text and must not fail every local match.
+            continue
+        (negations if token.negated else terms).append(_norm(word))
+    return ParsedQuery(
+        phrases=tuple(phrases),
+        terms=tuple(terms),
+        negations=tuple(negations),
+        fields=tuple(fields),
+        negated_fields=tuple(negated_fields),
+        numbers=tuple(numbers),
+        dates=tuple(dates),
+    )
+
+
+def _query_text_reason(parsed: ParsedQuery, beatmapset: Beatmapset) -> str | None:
+    """Set-level query conditions (text and dates). None means it passes."""
+    # Fields are joined with a character that cannot occur in the data, so a
+    # phrase can never match across two different fields (e.g. the end of the
+    # title plus the beginning of the artist).
+    title_hay = _norm(f"{beatmapset.display_title}\n{beatmapset.title}")
+    artist_hay = _norm(f"{beatmapset.display_artist}\n{beatmapset.artist}")
+    creator_hay = _norm(beatmapset.creator)
+    tags_hay = _norm("\n".join(beatmapset.tags))
+    haystack = "\n".join((title_hay, artist_hay, creator_hay, tags_hay))
+
+    field_hays = {
+        "artist": artist_hay,
+        "title": title_hay,
+        "creator": creator_hay,
+    }
+    for phrase in parsed.phrases:
+        if phrase not in haystack:
+            return "не совпадает с текстовым запросом"
+    for term in parsed.terms:
+        if term not in haystack:
+            return "не совпадает с текстовым запросом"
+    for negation in parsed.negations:
+        if negation in haystack:
+            return f"совпадает с исключаемым «{negation}»"
+    for key, value in parsed.fields:
+        if value not in field_hays.get(key, ""):
+            return "не совпадает с текстовым запросом"
+    for key, value in parsed.negated_fields:
+        if value in field_hays.get(key, ""):
+            return f"совпадает с исключаемым «{key}={value}»"
+    for key, value in parsed.dates:
+        published = _published_date(beatmapset)
+        if published is None:
+            return "дата публикации неизвестна"
+        if key == "from" and published < value:
+            return "опубликована раньше даты запроса"
+        if key == "to" and published > value:
+            return "опубликована позже даты запроса"
+    return None
+
+
+def _check_query_numeric(
+    beatmap: Beatmap,
+    parsed: ParsedQuery,
+    filters: Filters,
+) -> tuple[list[str], list[str]]:
+    """Per-difficulty numeric query conditions (stars/ar/bpm/...).
+
+    Mirrors the strict-filter rules: stars/BPM/length are always present in
+    search results, a missing value fails; AR/OD/CS/HP are optional, so a
+    missing value is reported as unknown instead of excluding the card.
+    """
+    failures: list[str] = []
+    unknown: list[str] = []
+    for field, op, value in parsed.numbers:
+        expr = f"{field}{op}{value:g}"
+        reason = f"запрос не выполнен ({expr})"
+        if field == "stars":
+            actual = beatmap.difficulty_rating
+            missing = actual is None
+        elif field == "length":
+            actual = beatmap.duration(filters.duration_field)
+            missing = actual is None
+        elif field in ("ar", "od", "cs", "hp"):
+            actual = getattr(beatmap, field)
+            if actual is None:
+                unknown.append(field.upper())
+                continue
+            missing = False
+        else:
+            actual = beatmap.bpm
+            missing = actual is None
+        if missing:
+            failures.append(reason)
+            continue
+        assert actual is not None
+        if op == "<" and not actual < value:
+            failures.append(reason)
+        elif op == "<=" and not actual <= value:
+            failures.append(reason)
+        elif op == ">" and not actual > value:
+            failures.append(reason)
+        elif op == ">=" and not actual >= value:
+            failures.append(reason)
+        elif op == "=" and not actual == value:
+            failures.append(reason)
+    return failures, unknown
 
 
 def _check_range(
@@ -134,6 +364,13 @@ def validate_filters(filters: Filters) -> None:
     if unknown_genres:
         raise FilterConfigError(
             f"неизвестные жанры: {', '.join(str(g) for g in sorted(unknown_genres))}"
+        )
+    unknown_languages = (
+        set(filters.include_languages) | set(filters.exclude_languages)
+    ) - set(LANGUAGES)
+    if unknown_languages:
+        raise FilterConfigError(
+            f"неизвестные языки: {', '.join(str(g) for g in sorted(unknown_languages))}"
         )
     for set_id in filters.exclude_beatmapset_ids:
         if set_id <= 0:
@@ -294,6 +531,20 @@ def apply_filters(
     if filters.exclude_genres and beatmapset.genre_id in filters.exclude_genres:
         return FilterDecision(False, "жанр исключён")
 
+    if filters.include_languages:
+        if beatmapset.language_id is None:
+            return FilterDecision(False, "язык неизвестен")
+        if beatmapset.language_id not in filters.include_languages:
+            return FilterDecision(False, "язык не входит в избранные")
+    if filters.exclude_languages and beatmapset.language_id in filters.exclude_languages:
+        return FilterDecision(False, "язык исключён")
+
+    parsed_query = parse_query(filters.query) if filters.query else None
+    if parsed_query is not None:
+        text_reason = _query_text_reason(parsed_query, beatmapset)
+        if text_reason:
+            return FilterDecision(False, text_reason)
+
     if filters.published_after or filters.published_before:
         published = _published_date(beatmapset)
         if published is None:
@@ -302,20 +553,6 @@ def apply_filters(
             return FilterDecision(False, "опубликована раньше выбранной даты")
         if filters.published_before and published > filters.published_before:
             return FilterDecision(False, "опубликована позже выбранной даты")
-
-    if filters.query:
-        haystack = " ".join(
-            [
-                beatmapset.display_title,
-                beatmapset.title,
-                beatmapset.display_artist,
-                beatmapset.artist,
-                beatmapset.creator,
-                " ".join(beatmapset.tags),
-            ]
-        )
-        if _norm(filters.query) not in _norm(haystack):
-            return FilterDecision(False, "не совпадает с текстовым запросом")
 
     difficulties = [b for b in beatmapset.beatmaps if b.mode in filters.modes]
     if not difficulties:
@@ -326,6 +563,18 @@ def apply_filters(
     checks = [
         (beatmap, *_check_beatmap(beatmap, filters)) for beatmap in difficulties
     ]
+    if parsed_query is not None and parsed_query.numbers:
+        merged: list[tuple[Beatmap, list[str], list[str]]] = []
+        for beatmap, failures, unknown in checks:
+            query_failures, query_unknown = _check_query_numeric(
+                beatmap, parsed_query, filters
+            )
+            # Query failures come first so diagnostics name the query
+            # condition that disqualified the difficulty.
+            merged.append(
+                (beatmap, query_failures + failures, unknown + query_unknown)
+            )
+        checks = merged
     evaluated = [item for item in checks if not item[1]]
     if evaluated:
         def _key(item: tuple[Beatmap, list[str], list[str]]) -> tuple[float, float]:
@@ -390,6 +639,11 @@ def active_filter_summary(filters: Filters) -> list[str]:
         lines.append(
             "Жанры: "
             + ", ".join(GENRES.get(g, str(g)) for g in filters.include_genres)
+        )
+    if filters.include_languages:
+        lines.append(
+            "Языки: "
+            + ", ".join(LANGUAGES.get(l, str(l)) for l in filters.include_languages)
         )
     if filters.exclude_artists:
         lines.append("Исключены исполнители: " + ", ".join(filters.exclude_artists))

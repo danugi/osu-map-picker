@@ -219,7 +219,7 @@ def test_overlapping_discovery_queries_dedupe_candidates(
             self.search_calls.append(query)
             return SearchPage(beatmapsets=(candidate.beatmapset,))
 
-        def get_beatmap_attributes(self, beatmap_id):
+        def get_beatmap_attributes(self, beatmap_id: int, *, ruleset: str = "osu"):
             return DifficultyAttributes(
                 beatmap_id=beatmap_id,
                 star_rating=5.6,

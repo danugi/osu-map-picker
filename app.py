@@ -53,6 +53,7 @@ from filters import FilterConfigError, active_filter_summary, validate_filters
 from models import (
     DURATION_FIELDS,
     GENRES,
+    LANGUAGES,
     MODES,
     STATUSES,
     DiscoveryResult,
@@ -1387,6 +1388,23 @@ def page_filters(cfg: PresetConfig) -> None:
         default=[g for g in filters.exclude_genres if g in GENRES],
         format_func=lambda value: GENRES.get(value, str(value)),
         key=_ck("flt_exclude_genres"),
+    )
+
+    language_options = sorted(LANGUAGES)
+    language_cols = st.columns(2)
+    filters.include_languages = language_cols[0].multiselect(
+        "Языки: только эти",
+        options=language_options,
+        default=[l for l in filters.include_languages if l in LANGUAGES],
+        format_func=lambda value: LANGUAGES.get(value, str(value)),
+        key=_ck("flt_include_languages"),
+    )
+    filters.exclude_languages = language_cols[1].multiselect(
+        "Языки: исключить",
+        options=language_options,
+        default=[l for l in filters.exclude_languages if l in LANGUAGES],
+        format_func=lambda value: LANGUAGES.get(value, str(value)),
+        key=_ck("flt_exclude_languages"),
     )
 
     st.subheader("Скрытие и исключения")

@@ -1282,7 +1282,7 @@ class _FakeSearchApi:
         self.search_calls += 1
         return SearchPage(beatmapsets=self.beatmapsets)
 
-    def get_beatmap_attributes(self, beatmap_id: int):
+    def get_beatmap_attributes(self, beatmap_id: int, *, ruleset: str = "osu"):
         return DifficultyAttributes(
             beatmap_id=beatmap_id,
             star_rating=5.3,

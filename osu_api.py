@@ -532,9 +532,14 @@ class OsuApiClient:
         return parse_beatmapset(payload)
 
     def get_beatmap_attributes(
-        self, beatmap_id: int, mods: Iterable[str] = ()
+        self,
+        beatmap_id: int,
+        mods: Iterable[str] = (),
+        ruleset: str = "osu",
     ) -> DifficultyAttributes:
-        body = {"mods": list(mods), "ruleset": "osu"}
+        # The ruleset must match the beatmap's mode; the previous hardcoded
+        # "osu" returned meaningless attributes for taiko/catch/mania maps.
+        body = {"mods": list(mods), "ruleset": ruleset}
         payload = self._request(
             "POST", f"/beatmaps/{int(beatmap_id)}/attributes", json_body=body
         )
