@@ -34,11 +34,17 @@ def test_builtin_presets_map_to_measurable_patterns() -> None:
     assert pattern_filters.relevant_patterns(
         by_name["Speed"].ranking.skill_weights
     ) == ("high_density", "bursts")
+    # osu! streams tag group: continuous streams and bursts share one preset.
     assert pattern_filters.relevant_patterns(
-        by_name["Streams & Stamina"].ranking.skill_weights
+        by_name["Streams"].ranking.skill_weights
+    ) == ("streams", "bursts")
+    assert pattern_filters.relevant_patterns(
+        by_name["Stamina"].ranking.skill_weights
     ) == ("streams", "high_density")
+    bursts = presets.known_builtin_by_name("Bursts")
+    assert bursts is not None
     assert pattern_filters.relevant_patterns(
-        by_name["Bursts"].ranking.skill_weights
+        bursts.ranking.skill_weights
     ) == ("bursts",)
     tech = pattern_filters.relevant_patterns(
         by_name["Tech"].ranking.skill_weights

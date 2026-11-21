@@ -109,8 +109,8 @@ def test_sidebar_seeds_all_presets(app_env) -> None:
         "All-rounder",
         "Aim Farm",
         "Speed",
-        "Streams & Stamina",
-        "Bursts",
+        "Streams",
+        "Stamina",
         "Finger Control",
         "Reading",
         "Accuracy",
@@ -119,8 +119,10 @@ def test_sidebar_seeds_all_presets(app_env) -> None:
     }
     assert "Any Taste" not in names
     assert "Aim Farm / PP" not in names
-    assert "Streams & Stamina" in selector.options
-    assert "Bursts" in selector.options
+    assert "Streams" in selector.options
+    assert "Stamina" in selector.options
+    assert "Streams & Stamina" not in selector.options
+    assert "Bursts" not in selector.options
 
 
 def test_search_button_without_credentials_is_honest(app_env) -> None:
@@ -916,7 +918,8 @@ def test_preset_catalog_is_grouped_with_counts(app_env) -> None:
     assert "🎯 Train · 8" in labels
     assert "🧩 Custom · 0" in labels
     assert "Aim Farm" in _texts(at)
-    assert "Streams & Stamina" in _texts(at)
+    assert "Streams" in _texts(at)
+    assert "Stamina" in _texts(at)
 
 
 def test_navigation_is_compact_and_switches_pages(app_env) -> None:
@@ -942,7 +945,7 @@ def test_sequential_preset_switching_loads_each_configuration(app_env) -> None:
     at = AppTest.from_file(APP, default_timeout=60)
     at.run()
     store = Storage(app_env)
-    sequence = ("Aim", "Reading", "Aim Farm", "Streams & Stamina")
+    sequence = ("Aim", "Reading", "Aim Farm", "Streams", "Stamina")
     for name in sequence:
         at.sidebar.selectbox[0].select(name).run()
         assert not at.exception
@@ -955,11 +958,11 @@ def test_sequential_preset_switching_loads_each_configuration(app_env) -> None:
         assert at.session_state.get("result") is None
         assert at.session_state["preset_selector"] == saved.id
 
+    # The sequence ends on Stamina: the standalone endurance profile.
     assert cfg.ranking.skill_weights == {
-        "stream_consistency": 0.90,
-        "stamina_finger": 0.65,
+        "stamina_finger": 1.0,
         "stream_long": 0.55,
-        "speed_stamina": 0.35,
+        "speed_stamina": 0.45,
     }
     assert cfg.filters.duration_max == 360
 
@@ -1119,12 +1122,13 @@ def test_local_streams_and_bursts_use_only_cached_osu_evidence(app_env) -> None:
     at = AppTest.from_file(APP, default_timeout=90)
     at.run()
 
-    at.sidebar.selectbox[0].select("Streams & Stamina").run()
+    at.sidebar.selectbox[0].select("Streams").run()
     _button(at, "run_search").click().run()
     assert not at.exception
     streams = _search_result(at)
-    assert streams is not None and streams.count == 1
-    assert streams.scored[0].beatmapset.id == 1
+    # Merged osu! streams group: the stream map and the burst map both pass.
+    assert streams is not None and streams.count == 2
+    assert {item.beatmapset.id for item in streams.scored} == {1, 2}
     assert streams.api_requests == 0
     assert streams.sequence_analyzed == 2
     assert streams.sequence_unanalyzed == 10
@@ -1136,13 +1140,8 @@ def test_local_streams_and_bursts_use_only_cached_osu_evidence(app_env) -> None:
     assert ".osu скачано: 0" in text
     assert "из локального кэша/БД: 2" in text
 
-    at.sidebar.selectbox[0].select("Bursts").run()
-    _button(at, "run_search").click().run()
-    assert not at.exception
-    bursts = _search_result(at)
-    assert bursts is not None and bursts.count == 1
-    assert bursts.scored[0].beatmapset.id == 2
-    assert bursts.api_requests == 0
+    # The burst map and the stream map were both confirmed from the local
+    # .osu cache; Stamina independence is covered by the quality suite.
 
 
 def test_specialized_card_shows_target_gate_and_threshold(app_env) -> None:
@@ -2079,17 +2078,17 @@ def test_library_pattern_filter_follows_active_preset(app_env) -> None:
     )
     assert "Переменный ритм" not in other.options
 
-    at.sidebar.selectbox[0].select("Streams & Stamina").run()
+    at.sidebar.selectbox[0].select("Streams").run()
     at.session_state["nav"] = "library"
     at.run()
     assert not at.exception, _texts(at)
     selected = at.session_state["library_preset_patterns"]
-    assert selected == ["streams", "high_density"]
+    assert selected == ["streams", "bursts"]
     assert "jump_aim" not in selected
     widget = next(
         item for item in at.multiselect if item.key == "library_preset_patterns"
     )
-    assert widget.options == ["Стримы", "Высокая плотность"]
+    assert widget.options == ["Стримы", "Бёрсты"]
 
 
 def test_library_preview_keeps_selection_and_library_state(app_env) -> None:

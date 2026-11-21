@@ -346,7 +346,7 @@ def test_v10_migration_upgrades_untouched_aim_farm(storage: Storage) -> None:
         "Sped Up",
     ]
     assert upgraded.config.ranking.relevance_targets == ["aim_classic"]
-    assert presets.BUILTIN_PRESETS_VERSION == 15
+    assert presets.BUILTIN_PRESETS_VERSION == 16
 
 
 def test_v10_migration_preserves_edited_builtin_and_user_data(
@@ -407,7 +407,7 @@ def test_v10_migration_updates_untouched_changed_builtins(
     old_targets: list[str],
     old_description: str | None,
 ) -> None:
-    modern = presets.builtin_by_name(name)
+    modern = presets.known_builtin_by_name(name)
     assert modern is not None
     old = copy.deepcopy(modern)
     old.ranking.relevance_targets = list(old_targets)
@@ -415,7 +415,12 @@ def test_v10_migration_updates_untouched_changed_builtins(
         old.description = old_description
     assert presets._preset_fingerprint(old) == presets._PRE_V10_FINGERPRINTS[name]
     preset = storage.get_preset_by_name(name)
-    assert preset is not None
+    if preset is None:
+        # Retired names (Streams & Stamina) are no longer seeded on a fresh
+        # database; restore the row explicitly to exercise its migration.
+        legacy = presets.known_builtin_by_name(name)
+        assert legacy is not None
+        preset = storage.create_preset(copy.deepcopy(legacy), is_builtin=True)
     storage.update_preset(preset.id, old)
     storage.set_preference("builtins_version", "9")
 
@@ -471,7 +476,7 @@ def test_combined_legacy_gates_keep_their_named_components() -> None:
 
 
 def test_descriptions_expose_measurement_limits() -> None:
-    streams = presets.builtin_by_name("Streams & Stamina")
+    streams = presets.known_builtin_by_name("Streams")
     reading = presets.builtin_by_name("Reading")
     flashlight = presets.builtin_by_name("Flashlight")
     farm = presets.builtin_by_name("Aim Farm")
@@ -528,18 +533,16 @@ def test_v11_migration_updates_untouched_v10_aim_farm_limits(storage) -> None:
 
     updated = storage.get_preset(farm.id)
     assert updated is not None
-    assert presets.BUILTIN_PRESETS_VERSION == 15
+    assert presets.BUILTIN_PRESETS_VERSION == 16
     assert updated.config.discovery.max_requests == 56
     assert updated.config.discovery.max_pages_per_strategy == 3
     assert updated.config.discovery.fetch_attributes_limit == 40
-    assert storage.get_preference("builtins_version") == "15"
+    assert storage.get_preference("builtins_version") == "16"
 
 
 def test_v12_migration_adds_policy_to_untouched_builtins(storage) -> None:
     names = (
         "Speed",
-        "Streams & Stamina",
-        "Bursts",
         "Finger Control",
         "Reading",
         "Accuracy",
@@ -581,12 +584,13 @@ def test_v12_migration_adds_policy_to_untouched_builtins(storage) -> None:
     assert kept is not None
     assert kept.config.filters.stars_min == 4.25
     assert kept.config.ranking.relevance_policy == {}
-    assert storage.get_preference("builtins_version") == "15"
+    assert storage.get_preference("builtins_version") == "16"
 
 
 def test_v13_migration_removes_raw_burst_feature_only_from_untouched(storage) -> None:
-    burst = storage.get_preset_by_name("Bursts")
-    assert burst is not None
+    legacy_bursts = presets.known_builtin_by_name("Bursts")
+    assert legacy_bursts is not None
+    burst = storage.create_preset(copy.deepcopy(legacy_bursts), is_builtin=True)
     old = copy.deepcopy(burst.config)
     old.ranking.relevance_policy = copy.deepcopy(
         presets._PRE_V13_BURSTS_POLICY
@@ -598,13 +602,13 @@ def test_v13_migration_removes_raw_burst_feature_only_from_untouched(storage) ->
 
     updated = storage.get_preset_by_name("Bursts")
     assert updated is not None
-    modern = presets.builtin_by_name("Bursts")
+    modern = presets.known_builtin_by_name("Bursts")
     assert modern is not None
     assert updated.config.ranking.relevance_policy == (
         modern.ranking.relevance_policy
     )
     assert "require_features_any" not in updated.config.ranking.relevance_policy
-    assert storage.get_preference("builtins_version") == "15"
+    assert storage.get_preference("builtins_version") == "16"
 
     edited = copy.deepcopy(updated.config)
     edited.ranking.relevance_policy = copy.deepcopy(
@@ -632,7 +636,7 @@ def test_v14_migration_rewrites_retired_ids_in_user_presets(storage) -> None:
     import skillsets
     from skillsets import SKILL_ALIASES
 
-    config = presets.builtin_by_name("Bursts")
+    config = presets.known_builtin_by_name("Bursts")
     assert config is not None
     config = copy.deepcopy(config)
     config.name = "My Bursts"
@@ -657,7 +661,7 @@ def test_v14_migration_rewrites_retired_ids_in_user_presets(storage) -> None:
     policy_targets = migrated.config.ranking.relevance_policy["primary_targets"]
     assert "speed_short_bursts" not in policy_targets
     assert policy_targets.count("burst_control") == 1
-    assert storage.get_preference("builtins_version") == "15"
+    assert storage.get_preference("builtins_version") == "16"
     # Alias table stays consistent with the retirement list.
     assert set(SKILL_ALIASES) == {
         "speed_short_bursts",
@@ -715,7 +719,7 @@ def test_v15_migration_renames_untouched_mixed_aim_to_aim(storage) -> None:
         "aim_bursts",
     ]
     assert storage.get_preset_by_name("Mixed Aim") is None
-    assert storage.get_preference("builtins_version") == "15"
+    assert storage.get_preference("builtins_version") == "16"
 
 
 def test_v15_rename_keeps_edited_mixed_aim_and_seeds_aim(storage) -> None:
@@ -763,3 +767,121 @@ def test_v15_rename_does_not_run_when_aim_row_already_exists(storage) -> None:
     assert kept.id == mixed.id
     assert kept.config.name == "Mixed Aim"
     assert storage.get_preset(custom_aim.id) is not None
+
+
+def test_v16_migration_merges_bursts_into_untouched_legacy_streams(storage) -> None:
+    """A pre-v8 Streams row (no gate targets) is upgraded to the merged
+    osu! streams-group body with the measured-evidence gate."""
+    seeded = storage.get_preset_by_name("Streams")
+    assert seeded is not None
+    storage.delete_preset(seeded.id)
+    legacy = presets._legacy_streams_config()
+    row = storage.create_preset(copy.deepcopy(legacy), is_builtin=True)
+    storage.set_preference("builtins_version", "15")
+
+    presets.ensure_builtin_presets(storage)
+
+    upgraded = storage.get_preset(row.id)
+    assert upgraded is not None
+    assert upgraded.config.ranking.skill_weights == {
+        "stream_consistency": 1.0,
+        "burst_control": 0.7,
+        "stream_long": 0.6,
+        "stream_burst": 0.45,
+        "speed_bursts": 0.3,
+    }
+    assert upgraded.config.ranking.relevance_targets == [
+        "stream_consistency",
+        "stream_long",
+        "burst_control",
+    ]
+    assert upgraded.config.ranking.relevance_policy["require_features_any"] == [
+        "streams",
+        "bursts",
+    ]
+    assert storage.get_preference("builtins_version") == "16"
+
+
+def test_v16_migration_upgrades_streams_row_with_legacy_targets(storage) -> None:
+    """Rows rewritten by the v10 fingerprint migration carry the old legacy
+    target list; they are upgraded too."""
+    seeded = storage.get_preset_by_name("Streams")
+    assert seeded is not None
+    storage.delete_preset(seeded.id)
+    legacy = presets._legacy_streams_config()
+    legacy.ranking.relevance_targets = [
+        "stream_consistency",
+        "stream_long",
+        "stream_burst",
+    ]
+    row = storage.create_preset(copy.deepcopy(legacy), is_builtin=True)
+    storage.set_preference("builtins_version", "15")
+
+    presets.ensure_builtin_presets(storage)
+
+    upgraded = storage.get_preset(row.id)
+    assert upgraded is not None
+    assert upgraded.config.ranking.relevance_targets == [
+        "stream_consistency",
+        "stream_long",
+        "burst_control",
+    ]
+    assert "burst_control" in upgraded.config.ranking.skill_weights
+
+
+def test_v16_migration_keeps_edited_legacy_streams(storage) -> None:
+    seeded = storage.get_preset_by_name("Streams")
+    assert seeded is not None
+    storage.delete_preset(seeded.id)
+    edited = presets._legacy_streams_config()
+    edited.filters.stars_min = 4.2
+    row = storage.create_preset(copy.deepcopy(edited), is_builtin=True)
+    storage.set_preference("builtins_version", "15")
+
+    presets.ensure_builtin_presets(storage)
+
+    kept = storage.get_preset(row.id)
+    assert kept is not None
+    assert kept.config.filters.stars_min == 4.2
+    assert "burst_control" not in kept.config.ranking.skill_weights
+
+
+def test_v16_migration_restores_the_stamina_gate(storage) -> None:
+    """A promoted legacy Stamina row must not lose its target gate."""
+    seeded = storage.get_preset_by_name("Stamina")
+    assert seeded is not None
+    storage.delete_preset(seeded.id)
+    legacy = presets._stamina()
+    assert legacy.ranking.relevance_targets == []
+    row = storage.create_preset(copy.deepcopy(legacy), is_builtin=True)
+    storage.set_preference("builtins_version", "15")
+
+    presets.ensure_builtin_presets(storage)
+
+    upgraded = storage.get_preset(row.id)
+    assert upgraded is not None
+    assert upgraded.config.ranking.relevance_targets == [
+        "stamina_finger",
+        "stream_long",
+        "speed_stamina",
+    ]
+
+
+def test_v16_retired_rows_stay_hidden_but_resolvable(storage) -> None:
+    """Bursts and Streams & Stamina rows survive as hidden legacy rows."""
+    bursts = presets.known_builtin_by_name("Bursts")
+    hybrid = presets.known_builtin_by_name("Streams & Stamina")
+    assert bursts is not None and hybrid is not None
+    assert "Bursts" in presets.LEGACY_BUILTIN_NAMES
+    assert "Streams & Stamina" in presets.LEGACY_BUILTIN_NAMES
+    # Their bodies are untouched by the merge.
+    assert bursts.ranking.skill_weights == {
+        "burst_control": 1.0,
+        "speed_bursts": 0.65,
+    }
+    assert hybrid.ranking.skill_weights == {
+        "stream_consistency": 0.90,
+        "stamina_finger": 0.65,
+        "stream_long": 0.55,
+        "speed_stamina": 0.35,
+    }

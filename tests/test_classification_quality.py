@@ -149,16 +149,32 @@ def _candidate(
 # One honest fixture per built-in skill preset: a map that genuinely belongs
 # to the category, built only from measured evidence.
 _AIM_MAP: dict = {"aim": 6.0, "speed": 2.0}
+# osu! streams tag group: continuous 10+ note streams and 5-9 note bursts
+# share one curated preset, so its fixture carries both evidence kinds.
+_STREAMS_MAP: dict = {
+    "sequence": _sequence(
+        stream_chain_length=24,
+        stream_chain_count=20,
+        burst_chain_length=7,
+        burst_chain_count=40,
+    ),
+}
+_BURSTS_MAP: dict = {
+    "sequence": _sequence(burst_chain_length=7, burst_chain_count=40),
+}
+_STAMINA_MAP: dict = {
+    "aim": 2.0,
+    "speed": 5.5,
+    "count_circles": 2200,
+    "count_sliders": 200,
+    "total_length": 300,
+}
 _PERFECT_MAPS: dict[str, dict] = {
     "Aim": _AIM_MAP,
     "Aim Farm": _AIM_MAP,
     "Speed": {"aim": 2.0, "speed": 5.5, "bpm": 200.0},
-    "Streams & Stamina": {
-        "sequence": _sequence(stream_chain_length=24, stream_chain_count=20),
-    },
-    "Bursts": {
-        "sequence": _sequence(burst_chain_length=7, burst_chain_count=40),
-    },
+    "Streams": _STREAMS_MAP,
+    "Stamina": _STAMINA_MAP,
     "Finger Control": {"aim": 2.0, "speed": 5.5},
     "Reading": {"ar": 10.0, "aim": 4.0, "speed": 3.0},
     "Accuracy": {
@@ -186,16 +202,10 @@ _PERFECT_MAPS: dict[str, dict] = {
 
 # Legacy profiles keep their own targets; a few high-value ones are covered.
 _LEGACY_PERFECT_MAPS: dict[str, dict] = {
-    "Streams": {
+    "Streams & Stamina": {
         "sequence": _sequence(stream_chain_length=24, stream_chain_count=20),
     },
-    "Stamina": {
-        "aim": 2.0,
-        "speed": 5.5,
-        "count_circles": 2200,
-        "count_sliders": 200,
-        "total_length": 300,
-    },
+    "Bursts": _BURSTS_MAP,
     "Wide Aim": {
         "sequence": _sequence(
             wide_jump_share=0.85,
@@ -263,16 +273,20 @@ def test_marathon_maps_can_pass_stream_gates() -> None:
         sequence=sequence,
     )
     assert candidate.traits.scores.get("streams") is not None
+    streams = presets.known_builtin_by_name("Streams")
+    assert streams is not None
+    check = evaluate_relevance(candidate, streams.ranking)
+    assert check.passed is True, check.reason
+    # The retired hybrid keeps its marathon pass too.
     streams_stamina = presets.known_builtin_by_name("Streams & Stamina")
     assert streams_stamina is not None
-    check = evaluate_relevance(candidate, streams_stamina.ranking)
-    assert check.passed is True, check.reason
+    assert evaluate_relevance(candidate, streams_stamina.ranking).passed is True
 
 
 def test_gates_discriminate_wrong_maps() -> None:
     """A map that matches one category must not pass every gate."""
     aim_map = _candidate(3, **_AIM_MAP)
-    streams = presets.known_builtin_by_name("Streams & Stamina")
+    streams = presets.known_builtin_by_name("Streams")
     assert streams is not None
     check = evaluate_relevance(aim_map, streams.ranking)
     assert check.passed is False
@@ -313,6 +327,45 @@ def test_pattern_maps_reference_live_skills_only() -> None:
     for labels in pattern_filters.SKILL_PATTERN_MAP.values():
         for label in labels:
             assert label in pattern_filters.SUPPORTED_PATTERNS, label
+
+
+def test_streams_gate_opens_for_streams_and_bursts_alike() -> None:
+    """osu! streams/bursts is the 5-9 note tier of the streams group: both
+    evidence kinds must open the merged gate, each on its own."""
+    streams = presets.known_builtin_by_name("Streams")
+    assert streams is not None
+    pure_streams = _candidate(
+        6,
+        sequence=_sequence(stream_chain_length=24, stream_chain_count=20),
+    )
+    check = evaluate_relevance(pure_streams, streams.ranking)
+    assert check.passed is True, check.reason
+    assert check.best_target is not None
+    assert check.best_target.target_id == "stream_consistency"
+
+    pure_bursts = _candidate(7, **_BURSTS_MAP)
+    check = evaluate_relevance(pure_bursts, streams.ranking)
+    assert check.passed is True, check.reason
+    assert check.best_target is not None
+    assert check.best_target.target_id == "burst_control"
+
+
+def test_stamina_gate_stays_independent_of_bursts() -> None:
+    """Stamina is its own preset: a short burst-only map is not endurance."""
+    stamina = presets.known_builtin_by_name("Stamina")
+    assert stamina is not None
+    short_bursts = _candidate(
+        8,
+        count_circles=400,
+        count_sliders=100,
+        total_length=95,
+        **_BURSTS_MAP,
+    )
+    check = evaluate_relevance(short_bursts, stamina.ranking)
+    assert check.passed is False, check.reason
+    # The endurance fixture still opens the stamina gate.
+    endurance = _candidate(9, **_STAMINA_MAP)
+    assert evaluate_relevance(endurance, stamina.ranking).passed is True
 
 
 def test_retired_skillset_ids_resolve_to_live_survivors() -> None:

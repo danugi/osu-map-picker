@@ -107,7 +107,7 @@ def test_user_presets_fall_back_to_custom_group() -> None:
 def test_preset_search_matches_name_description_and_group() -> None:
     builtins = presets.builtin_presets()
     assert {item.name for item in catalog.search_presets(builtins, "stream")} >= {
-        "Streams & Stamina",
+        "Streams",
     }
     assert "Discovery" in {
         item.name for item in catalog.search_presets(builtins, "новизны")

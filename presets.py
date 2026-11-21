@@ -540,6 +540,33 @@ def _speed() -> PresetConfig:
 def _streams() -> PresetConfig:
     cfg = _skill_preset(
         "Streams",
+        "Stream-карты в понимании тегов osu!: непрерывные потоки 10+ нот "
+        "(skillset/streams) вместе с burst-сериями 5–9 нот (streams/bursts — "
+        "на сайте bursts входят в группу streams). Оба вида доказательства "
+        "берутся из локального .osu; без него гейт честно не пропускает "
+        "карту. Выносливость — отдельный пресет Stamina.",
+        {
+            "stream_consistency": 1.0,
+            "burst_control": 0.7,
+            "stream_long": 0.6,
+            "stream_burst": 0.45,
+            "speed_bursts": 0.3,
+        },
+        comfort_stars=5.2,
+        ideal_length=190,
+        length_tolerance=110,
+        duration_max=300,
+        diversity=0.4,
+    )
+    cfg.ranking.factors["length"].weight = 0.5
+    return cfg
+
+
+def _legacy_streams_config() -> PresetConfig:
+    """Exact pre-v16 Streams body (streams-only, before the merge)."""
+
+    cfg = _skill_preset(
+        "Streams",
         "Stream-карты: непрерывность и длина stream-участков, bursts. "
         "Stream-признаки требуют локального .osu; без него кандидат не "
         "получает выдуманный прокси и не проходит обязательный гейт.",
@@ -561,9 +588,10 @@ def _streams() -> PresetConfig:
 def _stamina() -> PresetConfig:
     cfg = _skill_preset(
         "Stamina",
-        "Выносливость: длинные и плотные карты, finger stamina и stream "
-        "stamina. Длина — мягкое предпочтение; stream-часть требует "
-        "локального .osu, остальное остаётся явным прокси.",
+        "Выносливость как отдельный навык (streams/stamina на osu!): длинные "
+        "и плотные карты, finger stamina и stream stamina. Длина — мягкое "
+        "предпочтение; stream-часть требует локального .osu, остальное "
+        "остаётся явным прокси.",
         {
             "stamina_finger": 1.0,
             "stream_long": 0.55,
@@ -1045,11 +1073,11 @@ _RELEVANCE_TARGETS: dict[str, tuple[str, ...]] = {
     "Aim": ("aim_classic", "aim_control", "aim_bursts"),
     "Aim Farm": ("aim_classic",),
     "Speed": ("speed_high_bpm", "speed_bursts", "speed_density"),
-    "Streams & Stamina": ("stream_consistency", "stream_long"),
-    "Bursts": (
-        "burst_control",
-        "speed_bursts",
-    ),
+    # osu! groups bursts under the streams tag group (streams/bursts is the
+    # 5-9-note tier between doubles and continuous 10+ note streams), so the
+    # curated Streams preset covers both evidence kinds.
+    "Streams": ("stream_consistency", "stream_long", "burst_control"),
+    "Stamina": ("stamina_finger", "stream_long", "speed_stamina"),
     "Finger Control": ("finger_control", "alternating", "speed_control"),
     "Reading": ("ar_challenge", "high_ar", "low_ar"),
     "Accuracy": (
@@ -1062,8 +1090,11 @@ _RELEVANCE_TARGETS: dict[str, tuple[str, ...]] = {
     # Legacy profiles keep their own target sets instead of inheriting the
     # current preset that happens to have a similar name.
     "Mixed Aim": ("aim_classic", "aim_control", "aim_bursts"),
-    "Streams": ("stream_consistency", "stream_long", "stream_burst"),
-    "Stamina": ("stamina_finger", "stream_long", "speed_stamina"),
+    "Streams & Stamina": ("stream_consistency", "stream_long"),
+    "Bursts": (
+        "burst_control",
+        "speed_bursts",
+    ),
     "Wide Aim": ("aim_wide", "aim_classic"),
     "Flow Aim": ("aim_flow", "aim_classic"),
     "Aim Control": ("aim_control", "aim_precision", "aim_classic"),
@@ -1116,6 +1147,16 @@ _RELEVANCE_POLICIES: dict[str, dict[str, Any]] = {
     "Streams & Stamina": {
         "primary_targets": ["stream_consistency", "stream_long"],
         "require_features_any": ["streams"],
+    },
+    "Streams": {
+        "primary_targets": [
+            "stream_consistency",
+            "stream_long",
+            "burst_control",
+        ],
+        # Measured evidence only: continuous streams or 5-9 note bursts must
+        # come from the local .osu analysis, never from a mapper tag.
+        "require_features_any": ["streams", "bursts"],
     },
     "Bursts": {
         # Both targets require burst evidence and must exceed the relevance
@@ -1213,8 +1254,8 @@ _BUILDERS = (
     _allrounder,
     _aim_farm,
     _speed,
-    _streams_stamina,
-    _bursts,
+    _streams,
+    _stamina,
     _finger_control,
     _reading,
     _accuracy,
@@ -1225,8 +1266,8 @@ _BUILDERS = (
 _LEGACY_BUILDERS = (
     _any_taste,
     _legacy_mixed_aim_skillset,
-    _streams,
-    _stamina,
+    _streams_stamina,
+    _bursts,
     _weird_aim,
     _wide_aim,
     _flow_aim,
@@ -1255,7 +1296,7 @@ _PRE_V11_FINGERPRINTS = {
     ),
 }
 
-BUILTIN_PRESETS_VERSION = 15
+BUILTIN_PRESETS_VERSION = 16
 _V2_NEW_NAMES = frozenset(
     {
         "Speed",
@@ -1271,6 +1312,7 @@ _V5_NEW_NAMES = frozenset({"Streams & Stamina"})
 _V6_NEW_NAMES = frozenset({"Aim Farm"})
 _V9_NEW_NAMES = frozenset({"Bursts"})
 _V15_NEW_NAMES = frozenset({"Aim"})
+_V16_NEW_NAMES = frozenset({"Streams", "Stamina"})
 
 # Canonical fingerprints of the pre-v10 seeded configurations. The v10
 # migration only replaces rows that are still byte-for-byte equivalent to a
@@ -1565,7 +1607,9 @@ def _upgrade_v13_definitions(storage: Any) -> int:
     preset = storage.get_preset_by_name("Bursts")
     if preset is None or not preset.is_builtin:
         return 0
-    modern = builtin_by_name("Bursts")
+    # Bursts was demoted to a legacy row by v16; the legacy builder carries
+    # the exact same body, so the cleanup stays meaningful for old databases.
+    modern = known_builtin_by_name("Bursts")
     if modern is None:
         return 0
     before = copy.deepcopy(modern)
@@ -1659,6 +1703,54 @@ def _upgrade_v15_definitions(storage: Any) -> int:
     return changed
 
 
+def _upgrade_v16_definitions(storage: Any) -> int:
+    """Adopt the osu! streams tag model: Streams absorbs Bursts.
+
+    osu! user tags put bursts inside the streams group (streams/bursts, the
+    5-9-note tier), so the curated Streams preset now targets both continuous
+    streams and bursts, and Stamina is offered standalone again. Untouched
+    legacy Streams rows are rewritten to the merged body; Streams & Stamina
+    and Bursts stay as hidden legacy rows for whoever still uses them.
+    """
+
+    changed = 0
+    streams_row = storage.get_preset_by_name("Streams")
+    if streams_row is not None and streams_row.is_builtin:
+        modern = builtin_by_name("Streams")
+        if modern is not None and not _matches_legacy(
+            streams_row.config, modern
+        ):
+            # Stored rows come in two shapes: pre-v10 seeds without gate
+            # targets, and rows rewritten by the v10 fingerprint migration
+            # with the old legacy target list attached.
+            plain = _legacy_streams_config()
+            with_targets = _legacy_streams_config()
+            with_targets.ranking.relevance_targets = [
+                "stream_consistency",
+                "stream_long",
+                "stream_burst",
+            ]
+            if _matches_legacy(
+                streams_row.config, plain
+            ) or _matches_legacy(streams_row.config, with_targets):
+                storage.update_preset(streams_row.id, modern)
+                changed += 1
+    stamina_row = storage.get_preset_by_name("Stamina")
+    stamina_modern = builtin_by_name("Stamina")
+    # A promoted legacy row must not silently lose its gate: the pre-v8
+    # stored shape has empty relevance_targets.
+    if (
+        stamina_row is not None
+        and stamina_row.is_builtin
+        and stamina_modern is not None
+        and not _matches_legacy(stamina_row.config, stamina_modern)
+        and _matches_legacy(stamina_row.config, _stamina())
+    ):
+        storage.update_preset(stamina_row.id, stamina_modern)
+        changed += 1
+    return changed
+
+
 def ensure_builtin_presets(storage: Any) -> int:
     """Seed built-ins and add newer profiles without destroying user edits.
 
@@ -1722,6 +1814,9 @@ def ensure_builtin_presets(storage: Any) -> int:
         # satisfies the "Aim" lookup and no duplicate row is seeded.
         _upgrade_v15_definitions(storage)
         new_names.update(_V15_NEW_NAMES)
+    if version < 16:
+        _upgrade_v16_definitions(storage)
+        new_names.update(_V16_NEW_NAMES)
 
     for preset in builtin_presets():
         if preset.name not in new_names:

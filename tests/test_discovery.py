@@ -644,7 +644,7 @@ def _save_sequence(
 
 
 def test_local_analyzed_candidate_fills_short_api_result(storage: Storage) -> None:
-    bursts = presets.builtin_by_name("Bursts")
+    bursts = presets.known_builtin_by_name("Bursts")
     assert bursts is not None
     candidate = _candidate(1, sequence=_sequence("burst", 9))
     _save_sequence(storage, candidate, candidate.sequence or _sequence("burst", 9))
@@ -674,7 +674,7 @@ def test_local_analyzed_candidate_fills_short_api_result(storage: Storage) -> No
 def test_local_topup_reuses_all_persisted_analyses_beyond_limit(
     storage: Storage,
 ) -> None:
-    bursts = presets.builtin_by_name("Bursts")
+    bursts = presets.known_builtin_by_name("Bursts")
     assert bursts is not None
     candidates = []
     for set_id in range(1, 26):
@@ -726,7 +726,7 @@ def test_local_sequence_reuse_does_not_raise_new_analysis_limit(
         calls.append(beatmap_id)
         return _sequence("stream", 12)
 
-    streams = presets.builtin_by_name("Streams & Stamina")
+    streams = presets.known_builtin_by_name("Streams")
     assert streams is not None
     engine = DiscoveryEngine(
         None,
@@ -750,7 +750,7 @@ def _local_supplement_result(candidate: Candidate) -> DiscoveryResult:
 def test_local_enrichment_refreshes_stale_relevance(
     storage: Storage, monkeypatch
 ) -> None:
-    bursts = presets.builtin_by_name("Bursts")
+    bursts = presets.known_builtin_by_name("Bursts")
     assert bursts is not None
     sequence = _sequence("burst", 9)
     local_candidate = replace(
@@ -797,7 +797,7 @@ def test_local_enrichment_refreshes_stale_relevance(
 def test_local_enrichment_drops_candidate_if_refreshed_gate_fails(
     storage: Storage, monkeypatch
 ) -> None:
-    bursts = presets.builtin_by_name("Bursts")
+    bursts = presets.known_builtin_by_name("Bursts")
     assert bursts is not None
     sequence = SequenceAnalysis(analyzed_notes=10, total_notes=10)
     local_candidate = replace(
@@ -895,7 +895,7 @@ def test_local_duplicate_keeps_api_metadata_and_cached_analysis(
 def test_unanalyzed_local_candidate_does_not_bypass_gate(storage: Storage) -> None:
     storage.save_beatmapsets([make_beatmapset(1)])
     api = StubApi(lambda query: SearchPage(beatmapsets=()))
-    bursts = presets.builtin_by_name("Bursts")
+    bursts = presets.known_builtin_by_name("Bursts")
     assert bursts is not None
     engine = DiscoveryEngine(
         api,
@@ -912,9 +912,12 @@ def test_unanalyzed_local_candidate_does_not_bypass_gate(storage: Storage) -> No
     )
 
 
-def test_sequence_enrichment_keeps_streams_and_bursts_separate(
+def test_merged_streams_preset_accepts_streams_and_bursts(
     storage: Storage,
 ) -> None:
+    """osu! puts bursts inside the streams tag group, so the curated Streams
+    preset passes both evidence kinds while the legacy Bursts row still
+    refuses a pure stream map."""
     sets = (
         make_beatmapset(1, title="Stream map"),
         make_beatmapset(2, title="Burst map"),
@@ -935,12 +938,12 @@ def test_sequence_enrichment_keeps_streams_and_bursts_separate(
             sequence_loader=loader,
         )
 
-    streams = presets.builtin_by_name("Streams & Stamina")
-    bursts = presets.builtin_by_name("Bursts")
+    streams = presets.builtin_by_name("Streams")
+    bursts = presets.known_builtin_by_name("Bursts")
     assert streams is not None and bursts is not None
 
     stream_result = engine().run(streams.filters, streams.ranking)
-    assert [item.beatmapset.id for item in stream_result.scored] == [1]
+    assert {item.beatmapset.id for item in stream_result.scored} == {1, 2}
 
     burst_result = engine().run(bursts.filters, bursts.ranking)
     assert [item.beatmapset.id for item in burst_result.scored] == [2]
@@ -1047,7 +1050,7 @@ def test_sequence_selection_does_not_take_only_top_general_scores(
         calls.append(beatmap_id)
         return SequenceAnalysis()
 
-    streams = presets.builtin_by_name("Streams & Stamina")
+    streams = presets.known_builtin_by_name("Streams")
     assert streams is not None
     api = StubApi(lambda query: SearchPage(beatmapsets=sets))
     engine = DiscoveryEngine(
@@ -1084,7 +1087,7 @@ def test_sequence_selection_prefers_cached_files_first(storage: Storage) -> None
         calls.append((beatmap_id, allow_download))
         return SequenceAnalysis()
 
-    streams = presets.builtin_by_name("Streams & Stamina")
+    streams = presets.known_builtin_by_name("Streams")
     assert streams is not None
     api = StubApi(lambda query: SearchPage(beatmapsets=sets))
     engine = DiscoveryEngine(
@@ -1118,7 +1121,7 @@ def test_local_sequence_rerank_skips_missing_cache_without_blocking(
             return _sequence("stream")
         raise GameplayError("missing cache entry")
 
-    streams = presets.builtin_by_name("Streams & Stamina")
+    streams = presets.known_builtin_by_name("Streams")
     assert streams is not None
     engine = DiscoveryEngine(
         None,
@@ -1195,7 +1198,7 @@ def test_sequence_stats_distinguish_downloads_and_unanalyzed(
     def loader(beatmap_id: int, allow_download: bool) -> SequenceAnalysis:
         return SequenceAnalysis()
 
-    streams = presets.builtin_by_name("Streams & Stamina")
+    streams = presets.known_builtin_by_name("Streams")
     assert streams is not None
     api = StubApi(lambda query: SearchPage(beatmapsets=sets))
     engine = DiscoveryEngine(
@@ -1223,7 +1226,7 @@ def test_zero_sequence_limit_uses_bounded_cache_only(
         calls.append((beatmap_id, allow_download))
         return SequenceAnalysis()
 
-    streams = presets.builtin_by_name("Streams & Stamina")
+    streams = presets.known_builtin_by_name("Streams")
     assert streams is not None
     api = StubApi(lambda query: SearchPage(beatmapsets=sets))
     engine = DiscoveryEngine(
@@ -1253,7 +1256,7 @@ def test_bursts_preset_does_not_spend_attribute_budget(
         calls.append(beatmap_id)
         return SequenceAnalysis()
 
-    bursts = presets.builtin_by_name("Bursts")
+    bursts = presets.known_builtin_by_name("Bursts")
     assert bursts is not None
     api = StubApi(
         lambda query: SearchPage(beatmapsets=(make_beatmapset(1),))
@@ -1272,7 +1275,7 @@ def test_bursts_preset_does_not_spend_attribute_budget(
 def test_sequence_only_preset_does_not_reserve_attribute_requests(
     storage: Storage,
 ) -> None:
-    bursts = presets.builtin_by_name("Bursts")
+    bursts = presets.known_builtin_by_name("Bursts")
     assert bursts is not None
 
     def responder(query: SearchQuery) -> SearchPage:
@@ -1301,7 +1304,7 @@ def test_sequence_only_preset_does_not_reserve_attribute_requests(
 def test_sequence_only_preset_preselects_attributes_by_generic_score(
     storage: Storage,
 ) -> None:
-    streams = presets.builtin_by_name("Streams & Stamina")
+    streams = presets.known_builtin_by_name("Streams & Stamina")
     assert streams is not None
     low = _candidate(1, rating=5.0, play_count=100)
     high = _candidate(2, rating=10.0, play_count=1_000_000)
@@ -1324,7 +1327,7 @@ def test_sequence_only_preset_preselects_attributes_by_generic_score(
 
 
 def test_relevance_gate_reports_not_analyzed_separately() -> None:
-    bursts = presets.builtin_by_name("Bursts")
+    bursts = presets.known_builtin_by_name("Bursts")
     assert bursts is not None
     excluded: dict[str, int] = {}
     exclusions: list[Exclusion] = []
@@ -1357,7 +1360,7 @@ def test_relevance_gate_reports_insufficient_data_separately() -> None:
 
 
 def test_relevance_gate_reports_below_threshold_separately() -> None:
-    bursts = presets.builtin_by_name("Bursts")
+    bursts = presets.known_builtin_by_name("Bursts")
     assert bursts is not None
     excluded: dict[str, int] = {}
     exclusions: list[Exclusion] = []

@@ -17,8 +17,8 @@ CANONICAL = {
     "All-rounder",
     "Aim Farm",
     "Speed",
-    "Streams & Stamina",
-    "Bursts",
+    "Streams",
+    "Stamina",
     "Finger Control",
     "Reading",
     "Accuracy",
@@ -43,7 +43,14 @@ def test_legacy_builtins_are_retained_but_not_offered_by_default(
 ) -> None:
     legacy = presets.legacy_builtin_presets()
     legacy_names = {preset.name for preset in legacy}
-    assert {"Any Taste", "Wide Aim", "Custom", "Streams", "Stamina"} <= legacy_names
+    assert {
+        "Any Taste",
+        "Wide Aim",
+        "Custom",
+        "Mixed Aim",
+        "Bursts",
+        "Streams & Stamina",
+    } <= legacy_names
     assert legacy_names == presets.LEGACY_BUILTIN_NAMES
 
     hidden_config = presets.known_builtin_by_name("Wide Aim")
@@ -91,22 +98,49 @@ def test_aim_farm_is_nm_focused_without_mod_bonuses() -> None:
     assert not hasattr(preset.filters, "mods")
 
 
-def test_streams_and_stamina_is_one_train_profile() -> None:
-    preset = presets.builtin_by_name("Streams & Stamina")
+def test_streams_preset_covers_streams_and_bursts() -> None:
+    """osu! user tags put bursts inside the streams group (streams/bursts,
+    the 5-9-note tier), so the curated Streams preset ranks both."""
+    preset = presets.builtin_by_name("Streams")
     assert preset is not None
     assert preset.ranking.skill_weights == {
-        "stream_consistency": 0.90,
-        "stamina_finger": 0.65,
+        "stream_consistency": 1.0,
+        "burst_control": 0.7,
+        "stream_long": 0.6,
+        "stream_burst": 0.45,
+        "speed_bursts": 0.3,
+    }
+    assert preset.filters.duration_max == 300
+    assert preset.ranking.factors["length"].weight == 0.5
+    assert preset.ranking.relevance_targets == [
+        "stream_consistency",
+        "stream_long",
+        "burst_control",
+    ]
+    assert preset.ranking.relevance_policy["require_features_any"] == [
+        "streams",
+        "bursts",
+    ]
+
+
+def test_stamina_is_a_standalone_profile() -> None:
+    preset = presets.builtin_by_name("Stamina")
+    assert preset is not None
+    assert preset.ranking.skill_weights == {
+        "stamina_finger": 1.0,
         "stream_long": 0.55,
-        "speed_stamina": 0.35,
+        "speed_stamina": 0.45,
     }
     assert preset.filters.duration_max == 360
-    assert preset.ranking.factors["length"].weight == 0.45
+    assert preset.ranking.factors["length"].weight == 0.4
+    assert "burst_control" not in preset.ranking.skill_weights
 
 
-def test_bursts_and_streams_presets_use_separate_evidence() -> None:
-    bursts = presets.builtin_by_name("Bursts")
-    streams = presets.builtin_by_name("Streams & Stamina")
+def test_retired_bursts_row_keeps_its_separate_evidence() -> None:
+    """Bursts and Streams & Stamina are legacy rows now; their stored
+    behaviour is preserved for users who still rely on it."""
+    bursts = presets.known_builtin_by_name("Bursts")
+    streams = presets.known_builtin_by_name("Streams & Stamina")
     assert bursts is not None and streams is not None
     assert bursts.ranking.relevance_targets == [
         "burst_control",
@@ -121,6 +155,10 @@ def test_bursts_and_streams_presets_use_separate_evidence() -> None:
         for target in streams.ranking.relevance_targets
     )
     assert "stream_consistency" in streams.ranking.relevance_targets
+    assert "Bursts" in presets.LEGACY_BUILTIN_NAMES
+    assert "Streams & Stamina" in presets.LEGACY_BUILTIN_NAMES
+    assert "Streams" not in presets.LEGACY_BUILTIN_NAMES
+    assert "Stamina" not in presets.LEGACY_BUILTIN_NAMES
 
 
 def test_non_sequence_presets_do_not_require_only_stream_or_burst_evidence() -> None:
@@ -269,24 +307,29 @@ def test_v3_migration_preserves_edited_legacy_aim_profile(storage: Storage) -> N
     assert kept.config.ranking.skill_weights == {}
 
 
-def test_v5_migration_adds_streams_and_stamina_without_touching_edits(
+def test_v16_migration_seeds_streams_and_stamina_without_touching_edits(
     empty_storage: Storage,
 ) -> None:
     for preset in presets.builtin_presets():
-        if preset.name == "Streams & Stamina":
+        if preset.name in {"Streams", "Stamina"}:
             continue
         empty_storage.create_preset(copy.deepcopy(preset), is_builtin=True)
-    mixed = empty_storage.get_preset_by_name("Aim")
-    assert mixed is not None
-    edited = PresetConfig.from_dict(mixed.config.to_dict())
+    aim = empty_storage.get_preset_by_name("Aim")
+    assert aim is not None
+    edited = PresetConfig.from_dict(aim.config.to_dict())
     edited.filters.stars_min = 4.2
-    empty_storage.update_preset(mixed.id, edited)
+    empty_storage.update_preset(aim.id, edited)
     empty_storage.set_preference("builtins_seeded", "1")
-    empty_storage.set_preference("builtins_version", "4")
+    empty_storage.set_preference("builtins_version", "14")
 
     created = presets.ensure_builtin_presets(empty_storage)
-    assert created == 1
-    assert empty_storage.get_preset_by_name("Streams & Stamina") is not None
+    assert created == 2
+    streams = empty_storage.get_preset_by_name("Streams")
+    assert streams is not None
+    assert "burst_control" in streams.config.ranking.skill_weights
+    assert empty_storage.get_preset_by_name("Stamina") is not None
+    # The retired hybrid is no longer offered as a new row.
+    assert empty_storage.get_preset_by_name("Streams & Stamina") is None
     kept = empty_storage.get_preset_by_name("Aim")
     assert kept is not None and kept.config.filters.stars_min == 4.2
 
@@ -398,24 +441,15 @@ def test_v8_migration_adds_targets_only_to_untouched_builtins(
     assert kept_speed.config.filters.stars_min == 4.25
 
 
-def test_v9_migration_adds_bursts_and_updates_untouched_sequence_targets(
+def test_v9_sequence_targets_and_retired_bursts_not_seeded(
     empty_storage: Storage,
 ) -> None:
     for preset in presets.builtin_presets():
-        if preset.name == "Bursts":
-            continue
         config = copy.deepcopy(preset)
-        if config.name == "Streams & Stamina":
-            config.ranking.relevance_targets = [
-                "stream_consistency",
-                "stream_long",
-            ]
         if config.name == "Speed":
-            config.ranking.relevance_targets = [
-                "speed_high_bpm",
-                "speed_bursts",
-                "speed_density",
-            ]
+            # Pre-v9 rows carry no sequence targets yet.
+            config.ranking.relevance_targets = []
+            config.ranking.relevance_policy = {}
         if config.name == "Aim Farm":
             config.filters.stars_min = 4.2
         empty_storage.create_preset(config, is_builtin=True)
@@ -423,20 +457,10 @@ def test_v9_migration_adds_bursts_and_updates_untouched_sequence_targets(
     empty_storage.set_preference("builtins_version", "8")
 
     created = presets.ensure_builtin_presets(empty_storage)
-    assert created == 1
+    assert created == 0
 
-    bursts = empty_storage.get_preset_by_name("Bursts")
-    assert bursts is not None
-    assert bursts.config.ranking.relevance_targets == [
-        "burst_control",
-        "speed_bursts",
-    ]
-    streams = empty_storage.get_preset_by_name("Streams & Stamina")
-    assert streams is not None
-    assert streams.config.ranking.relevance_targets == [
-        "stream_consistency",
-        "stream_long",
-    ]
+    # Bursts is retired: the v9 name list no longer seeds any row.
+    assert empty_storage.get_preset_by_name("Bursts") is None
     speed = empty_storage.get_preset_by_name("Speed")
     assert speed is not None
     assert speed.config.ranking.relevance_targets == [
@@ -656,10 +680,13 @@ def test_validate_rejects_control_characters_and_long_names() -> None:
 
 
 def test_new_presets_have_honest_explicit_logic() -> None:
-    streams = presets.builtin_by_name("Streams & Stamina")
+    streams = presets.builtin_by_name("Streams")
+    stamina = presets.builtin_by_name("Stamina")
     finger = presets.builtin_by_name("Finger Control")
     farm = presets.builtin_by_name("Aim Farm")
-    assert streams is not None and streams.filters.duration_max == 360
+    assert streams is not None and streams.filters.duration_max == 300
+    assert "burst_control" in streams.ranking.skill_weights
+    assert stamina is not None and stamina.filters.duration_max == 360
     assert finger is not None and finger.ranking.skill_weights
     assert farm is not None and farm.filters.duration_max == 150
     assert farm.ranking.factors["farm_nm"].enabled

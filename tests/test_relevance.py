@@ -231,8 +231,8 @@ def test_specialized_presets_use_their_own_weighted_targets() -> None:
         "Aim",
         "Aim Farm",
         "Speed",
-        "Streams & Stamina",
-        "Bursts",
+        "Streams",
+        "Stamina",
         "Finger Control",
         "Reading",
         "Accuracy",
@@ -253,23 +253,31 @@ def test_specialized_presets_use_their_own_weighted_targets() -> None:
 
     assert target_sets["Tech"] != target_sets["Reading"]
     assert "tech" in target_sets["Tech"]
-    assert "stream_consistency" in target_sets["Streams & Stamina"]
-    assert "burst_control" in target_sets["Bursts"]
-    assert all(
-        "stream" not in target for target in target_sets["Bursts"]
-    )
-    assert all(
-        "burst" not in target for target in target_sets["Streams & Stamina"]
-    )
+    # osu! streams tag group: bursts are part of the curated Streams preset.
+    assert "stream_consistency" in target_sets["Streams"]
+    assert "burst_control" in target_sets["Streams"]
+    assert "stamina_finger" in target_sets["Stamina"]
+    assert "burst_control" not in target_sets["Stamina"]
     assert "finger_control" in target_sets["Finger Control"]
     assert "speed_high_bpm" in target_sets["Speed"]
     assert target_sets["Aim Farm"] == ("aim_classic",)
 
-    legacy_streams = presets.known_builtin_by_name("Streams")
+    # The retired Bursts row keeps its separate, stream-free targets.
+    legacy_bursts = presets.known_builtin_by_name("Bursts")
+    assert legacy_bursts is not None
+    assert legacy_bursts.ranking.relevance_targets == [
+        "burst_control",
+        "speed_bursts",
+    ]
+    assert all(
+        "stream" not in target
+        for target in legacy_bursts.ranking.relevance_targets
+    )
+    legacy_streams = presets.known_builtin_by_name("Streams & Stamina")
     assert legacy_streams is not None
-    assert legacy_streams.ranking.relevance_targets
-    assert set(legacy_streams.ranking.relevance_targets) <= set(
-        legacy_streams.ranking.skill_weights
+    assert all(
+        "burst" not in target
+        for target in legacy_streams.ranking.relevance_targets
     )
 
 
@@ -278,8 +286,8 @@ def test_specialized_presets_use_their_own_weighted_targets() -> None:
     [
         "Aim Farm",
         "Speed",
-        "Streams & Stamina",
-        "Bursts",
+        "Streams",
+        "Stamina",
         "Finger Control",
         "Reading",
         "Accuracy",
@@ -288,7 +296,7 @@ def test_specialized_presets_use_their_own_weighted_targets() -> None:
     ],
 )
 def test_each_specialized_preset_passes_on_its_own_target(name: str) -> None:
-    preset = presets.builtin_by_name(name)
+    preset = presets.known_builtin_by_name(name)
     assert preset is not None
     targets = tuple(preset.ranking.relevance_targets)
     scores = {
@@ -530,7 +538,7 @@ def test_speed_gate_rejects_missing_speed_attributes() -> None:
 
 
 def test_burst_target_without_sequence_is_not_analyzed() -> None:
-    preset = presets.builtin_by_name("Bursts")
+    preset = presets.known_builtin_by_name("Bursts")
     assert preset is not None
     candidate = _derived_candidate(1)
     check = evaluate_relevance(candidate, preset.ranking)
@@ -539,7 +547,7 @@ def test_burst_target_without_sequence_is_not_analyzed() -> None:
 
 
 def test_analyzed_burst_target_without_bursts_is_below_threshold() -> None:
-    preset = presets.builtin_by_name("Bursts")
+    preset = presets.known_builtin_by_name("Bursts")
     assert preset is not None
     candidate = _derived_candidate(
         1,
@@ -754,9 +762,9 @@ def test_flashlight_requires_its_tag_and_primary_target() -> None:
 def test_speed_and_streams_policies_require_measured_support() -> None:
     for name, target, feature in (
         ("Speed", "speed_high_bpm", "speed_pressure"),
-        ("Streams & Stamina", "stream_consistency", "streams"),
+        ("Streams", "stream_consistency", "streams"),
     ):
-        preset = presets.builtin_by_name(name)
+        preset = presets.known_builtin_by_name(name)
         assert preset is not None
         scores = {
             target: 0.80,
@@ -774,7 +782,7 @@ def test_speed_and_streams_policies_require_measured_support() -> None:
 
     # Bursts no longer uses the raw burst-note share as a separate gate. A
     # target that already requires burst evidence can pass on its own.
-    bursts = presets.builtin_by_name("Bursts")
+    bursts = presets.known_builtin_by_name("Bursts")
     assert bursts is not None
     assert evaluate_relevance(
         score_candidate(
@@ -796,7 +804,7 @@ def test_aim_farm_legacy_policy_is_empty_and_fingerprint_stable() -> None:
 
 
 def test_sequence_policy_reports_missing_partial_and_failed_analysis() -> None:
-    preset = presets.builtin_by_name("Streams & Stamina")
+    preset = presets.known_builtin_by_name("Streams")
     assert preset is not None
     expected = {
         "not_analyzed": "не анализировалось",
@@ -1015,7 +1023,7 @@ def _sequence_traits(
 
 
 def test_bursts_accepts_a_real_burst_heavy_map_with_low_raw_share() -> None:
-    preset = presets.builtin_by_name("Bursts")
+    preset = presets.known_builtin_by_name("Bursts")
     assert preset is not None
     traits = _sequence_traits(burst_chains=8)
     assert traits.scores["bursts"] == pytest.approx(72 / 480)
@@ -1032,7 +1040,7 @@ def test_bursts_accepts_a_real_burst_heavy_map_with_low_raw_share() -> None:
 
 
 def test_bursts_rejects_analyzed_map_with_no_burst_chains() -> None:
-    preset = presets.builtin_by_name("Bursts")
+    preset = presets.known_builtin_by_name("Bursts")
     assert preset is not None
     traits = _sequence_traits(burst_chains=0)
     skills = evaluate_skills(traits)
@@ -1048,7 +1056,7 @@ def test_bursts_rejects_analyzed_map_with_no_burst_chains() -> None:
 
 
 def test_partial_stream_target_never_satisfies_streams_policy() -> None:
-    preset = presets.builtin_by_name("Streams & Stamina")
+    preset = presets.known_builtin_by_name("Streams")
     assert preset is not None
     candidate = score_candidate(
         1,
@@ -1068,7 +1076,7 @@ def test_partial_stream_target_never_satisfies_streams_policy() -> None:
 
 
 def test_partial_burst_target_never_satisfies_bursts_policy() -> None:
-    preset = presets.builtin_by_name("Bursts")
+    preset = presets.known_builtin_by_name("Bursts")
     assert preset is not None
     candidate = score_candidate(
         1,
@@ -1086,8 +1094,8 @@ def test_partial_burst_target_never_satisfies_bursts_policy() -> None:
 
 
 def test_partial_required_features_never_satisfy_policy() -> None:
-    streams = presets.builtin_by_name("Streams & Stamina")
-    bursts = presets.builtin_by_name("Bursts")
+    streams = presets.known_builtin_by_name("Streams")
+    bursts = presets.known_builtin_by_name("Bursts")
     assert streams is not None and bursts is not None
 
     stream_candidate = score_candidate(
@@ -1120,7 +1128,7 @@ def test_partial_required_features_never_satisfy_policy() -> None:
 
 
 def test_non_partial_alternative_can_still_satisfy_policy() -> None:
-    preset = presets.builtin_by_name("Streams & Stamina")
+    preset = presets.known_builtin_by_name("Streams")
     assert preset is not None
     candidate = score_candidate(
         1,
@@ -1156,7 +1164,7 @@ def test_non_partial_alternative_can_still_satisfy_policy() -> None:
 
 
 def test_fully_analyzed_sequence_evidence_still_passes() -> None:
-    preset = presets.builtin_by_name("Streams & Stamina")
+    preset = presets.known_builtin_by_name("Streams")
     assert preset is not None
     candidate = score_candidate(
         1,
