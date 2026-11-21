@@ -970,12 +970,12 @@ def _slider_tech() -> PresetConfig:
 def _rhythm_control() -> PresetConfig:
     return _skill_preset(
         "Rhythm Control",
-        "Ритмический контроль: Variable rhythm, Rhythm changes, Stream "
+        "Ритмический контроль: Variable rhythm, Rhythm complexity, Stream "
         "control и Finger control. Нужны реальные изменения ритма, а не "
         "только высокий BPM.",
         {
             "variable_rhythm": 0.35,
-            "rhythm_changes": 0.25,
+            "rhythm_complexity": 0.25,
             "stream_control": 0.20,
             "finger_control": 0.20,
         },
@@ -1072,7 +1072,7 @@ _RELEVANCE_TARGETS: dict[str, tuple[str, ...]] = {
     "Slider Tech": ("slider_heavy", "tech", "angular_control"),
     "Rhythm Control": (
         "variable_rhythm",
-        "rhythm_changes",
+        "rhythm_complexity",
         "finger_control",
     ),
     "Weird Aim": ("tech", "aim_control", "unusual_spacing"),
@@ -1110,22 +1110,23 @@ _RELEVANCE_POLICIES: dict[str, dict[str, Any]] = {
     },
     "Finger Control": {
         "primary_targets": ["finger_control", "alternating", "speed_control"],
-        "require_features_any": ["tag_finger", "tag_alt"],
+        # Measured evidence only: a mapper tag alone must not open the gate.
+        # Tags still lift the skill scores via their weights.
+        "require_features_any": ["density", "speed_pressure"],
     },
     "Reading": {
         "primary_targets": ["ar_challenge"],
     },
     "Accuracy": {
         "primary_targets": ["accuracy_focused"],
-        "require_features_any": ["tag_precision", "low_density"],
+        "require_features_any": ["low_density", "od"],
     },
     "Tech": {
         "primary_targets": ["tech", "slider_heavy", "rhythm_complexity"],
+        # Measured evidence only: a mapper tag alone must not open the gate.
         "require_features_any": [
-            "tag_tech",
-            "tag_rhythm",
-            "tag_slider",
             "slider_ratio",
+            "density",
         ],
     },
     "Flashlight": {
@@ -1515,6 +1516,22 @@ def _upgrade_v12_definitions(storage: Any) -> int:
     return changed
 
 
+# require_features_any values shipped before v14. The v14 migration swaps
+# them for measured-only lists when a stored preset still carries the old
+# canonical value; user-edited policies are left alone.
+_PRE_V14_REQUIRE_FEATURES: dict[str, tuple[str, ...]] = {
+    "Tech": ("tag_tech", "tag_rhythm", "tag_slider", "slider_ratio"),
+    "Finger Control": ("tag_finger", "tag_alt"),
+    "Accuracy": ("tag_precision", "low_density"),
+}
+
+_MEASURED_REQUIRE_FEATURES: dict[str, tuple[str, ...]] = {
+    "Tech": ("slider_ratio", "density"),
+    "Finger Control": ("density", "speed_pressure"),
+    "Accuracy": ("low_density", "od"),
+}
+
+
 def _upgrade_v13_definitions(storage: Any) -> int:
     """Remove the redundant raw-burst feature requirement from untouched v12."""
 
@@ -1565,6 +1582,18 @@ def _upgrade_v14_definitions(storage: Any) -> int:
                     SKILL_ALIASES.get(str(t), str(t)) for t in primary
                 )
             )
+        # Policy upgrade: tag-only gate evidence -> measured-only lists, but
+        # only when the stored policy still carries the pre-v14 canonical
+        # value (a user-edited policy is preserved).
+        old_require = _PRE_V14_REQUIRE_FEATURES.get(preset.config.name)
+        if old_require is not None:
+            current = policy.get("require_features_any")
+            if isinstance(current, list) and [
+                str(item) for item in current
+            ] == list(old_require):
+                policy["require_features_any"] = list(
+                    _MEASURED_REQUIRE_FEATURES[preset.config.name]
+                )
         if (
             new_weights != weights
             or targets != ranking.relevance_targets

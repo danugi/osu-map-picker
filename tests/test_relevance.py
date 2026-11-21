@@ -314,7 +314,7 @@ def test_switching_preset_changes_the_target_criteria() -> None:
         {"tech": 0.8, "slider_heavy": 0.7, "rhythm_complexity": 0.6,
          "ar_challenge": 0.1, "pattern_recognition": 0.1,
          "visual_complexity": 0.1},
-        features={"tag_tech": 1.0},
+        features={"tag_tech": 1.0, "slider_ratio": 0.9},
     )
     tech = presets.builtin_by_name("Tech")
     reading = presets.builtin_by_name("Reading")
@@ -562,7 +562,9 @@ def test_tag_only_target_is_not_reported_as_confirmed() -> None:
     preset = presets.builtin_by_name("Tech")
     assert preset is not None
     check = evaluate_relevance(candidate, preset.ranking)
-    assert check.passed is True
+    # v14 measured-only policy: a tag-supported target cannot open the gate,
+    # but its honest "limited support" labeling is preserved for diagnostics.
+    assert check.passed is False
     target = next(item for item in check.targets if item.target_id == "tech")
     assert target.status == "выше порога (ограниченная поддержка)"
 
@@ -651,19 +653,26 @@ def test_accuracy_high_od_without_precision_evidence_fails() -> None:
     }
     check = evaluate_relevance(score_candidate(1, scores), preset.ranking)
     assert check.passed is False
-    assert "precision/accuracy" in check.reason.casefold()
+    assert "низкая плотность" in check.reason.casefold()
 
+    # A mapper tag alone must not open the gate (v14 measured-only policy).
     with_tag = evaluate_relevance(
         score_candidate(2, scores, features={"tag_precision": 1.0}),
         preset.ranking,
     )
-    assert with_tag.passed is True
+    assert with_tag.passed is False
 
     sparse = evaluate_relevance(
         score_candidate(3, scores, features={"low_density": 0.90}),
         preset.ranking,
     )
     assert sparse.passed is True
+
+    measured_od = evaluate_relevance(
+        score_candidate(4, scores, features={"od": 0.90}),
+        preset.ranking,
+    )
+    assert measured_od.passed is True
 
 
 def test_tech_generic_high_difficulty_needs_pattern_evidence() -> None:
@@ -672,13 +681,14 @@ def test_tech_generic_high_difficulty_needs_pattern_evidence() -> None:
     scores = {"tech": 0.80, "slider_heavy": 0.20, "rhythm_complexity": 0.20}
     check = evaluate_relevance(score_candidate(1, scores), preset.ranking)
     assert check.passed is False
-    assert "tech" in check.reason.casefold()
+    assert "доля слайдеров" in check.reason.casefold()
 
+    # A mapper tag alone must not open the gate (v14 measured-only policy).
     tagged = evaluate_relevance(
         score_candidate(2, scores, features={"tag_tech": 1.0}),
         preset.ranking,
     )
-    assert tagged.passed is True
+    assert tagged.passed is False
 
     slider = evaluate_relevance(
         score_candidate(3, scores, features={"slider_ratio": 0.80}),
@@ -686,8 +696,14 @@ def test_tech_generic_high_difficulty_needs_pattern_evidence() -> None:
     )
     assert slider.passed is True
 
+    dense = evaluate_relevance(
+        score_candidate(4, scores, features={"density": 0.80}),
+        preset.ranking,
+    )
+    assert dense.passed is True
 
-def test_finger_control_requires_finger_or_alt_metadata() -> None:
+
+def test_finger_control_requires_measured_evidence() -> None:
     preset = presets.builtin_by_name("Finger Control")
     assert preset is not None
     scores = {
@@ -697,11 +713,31 @@ def test_finger_control_requires_finger_or_alt_metadata() -> None:
     }
     check = evaluate_relevance(score_candidate(1, scores), preset.ranking)
     assert check.passed is False
-    assert "finger control" in check.reason.casefold()
-    assert evaluate_relevance(
-        score_candidate(2, scores, tags=("fingercontrol",), features={"tag_finger": 1.0}),
-        preset.ranking,
-    ).passed is True
+    assert "плотность" in check.reason.casefold()
+    # A mapper tag alone must not open the gate (v14 measured-only policy).
+    assert (
+        evaluate_relevance(
+            score_candidate(
+                2, scores, tags=("fingercontrol",), features={"tag_finger": 1.0}
+            ),
+            preset.ranking,
+        ).passed
+        is False
+    )
+    assert (
+        evaluate_relevance(
+            score_candidate(3, scores, features={"density": 0.80}),
+            preset.ranking,
+        ).passed
+        is True
+    )
+    assert (
+        evaluate_relevance(
+            score_candidate(4, scores, features={"speed_pressure": 0.80}),
+            preset.ranking,
+        ).passed
+        is True
+    )
 
 
 def test_flashlight_requires_its_tag_and_primary_target() -> None:
@@ -788,7 +824,9 @@ def test_accuracy_missing_precision_features_is_not_a_match() -> None:
         preset.ranking,
     )
     assert check.passed is False
-    assert "precision/accuracy" in check.reason.casefold()
+    # v14 measured-only policy names the missing measured features.
+    assert "низкая плотность" in check.reason.casefold()
+    assert "od" in check.reason.casefold()
 
 
 def _mark_partial(
