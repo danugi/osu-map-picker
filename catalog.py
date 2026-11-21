@@ -202,7 +202,6 @@ SKILL_CATEGORIES: tuple[SkillCategory, ...] = (
                 "Короткие серии 5–9 нот и сложные burst-паттерны.",
                 (
                     "burst_control",
-                    "speed_short_bursts",
                     "speed_bursts",
                     "complex_bursts",
                 ),
@@ -215,7 +214,6 @@ SKILL_CATEGORIES: tuple[SkillCategory, ...] = (
                     "speed_streams",
                     "stream_consistency",
                     "stream_long",
-                    "stream_short",
                     "stream_burst",
                     "stream_control",
                     "stream_reading",
@@ -250,7 +248,7 @@ SKILL_CATEGORIES: tuple[SkillCategory, ...] = (
                 "rhythm",
                 "Rhythm",
                 "Смена ритма и переменный ритм.",
-                ("variable_rhythm", "rhythm_changes"),
+                ("variable_rhythm",),
             ),
             SkillSubcategory(
                 "uneven",
@@ -286,7 +284,6 @@ SKILL_CATEGORIES: tuple[SkillCategory, ...] = (
                     "density_changes",
                     "pattern_recognition",
                     "visual_complexity",
-                    "unusual_rhythms",
                 ),
             ),
             SkillSubcategory(

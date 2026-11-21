@@ -294,19 +294,6 @@ _add(
 )
 _add(
     _base(
-        "speed_short_bursts",
-        "Short bursts",
-        "speed",
-        "Короткие burst-цепочки 5–9 нот, найденные в .osu. Длина, число "
-        "цепочек и их доля считаются отдельно от streams.",
-        {"bursts": 0.50, "burst_count": 0.30, "burst_median": 0.20},
-        support="measured",
-        required=("bursts",),
-        limitations=("Нужен публичный .osu этой difficulty.",),
-    )
-)
-_add(
-    _base(
         "speed_streams",
         "Continuous streams",
         "speed",
@@ -418,19 +405,6 @@ _add(
         support="measured",
         required=("streams",),
         limitations=("Длина считается по максимальной цепочке, а не по карте.",),
-    )
-)
-_add(
-    _base(
-        "stream_short",
-        "Short streams",
-        "streams",
-        "Короткие stream-цепочки: доля, число цепочек и ровность интервалов. "
-        "Burst-серии 5–9 нот сюда не входят.",
-        {"streams": 0.55, "stream_chain_count": 0.25, "stream_rhythm_quality": 0.20},
-        support="measured",
-        required=("streams",),
-        limitations=("Цепочка короче 10 нот классифицируется как burst, не stream.",),
     )
 )
 _add(
@@ -548,17 +522,6 @@ _add(
         support="measured",
         required_any=("tag_rhythm", "rhythm_variability"),
         limitations=("Без тега и .osu-анализа переменный ритм не определяется.",),
-    )
-)
-_add(
-    _base(
-        "rhythm_changes",
-        "Rhythm changes",
-        "finger",
-        "Смены ритма. Тег rhythm/variable плюс tech-тег.",
-        {"tag_rhythm": 0.70, "tag_tech": 0.30},
-        required=("tag_rhythm",),
-        limitations=("Смены ритма требуют анализа таймингов .osu.",),
     )
 )
 _add(
@@ -758,17 +721,6 @@ _add(
         "Распознавание паттернов: reading/tech-теги и плотность.",
         {"tag_reading": 0.55, "tag_tech": 0.25, "density": 0.20},
         limitations=("Распознавание паттернов не измеряется по API.",),
-    )
-)
-_add(
-    _base(
-        "unusual_rhythms",
-        "Unusual rhythms",
-        "reading",
-        "Необычные ритмы: rhythm/tech-теги.",
-        {"tag_rhythm": 0.70, "tag_tech": 0.30},
-        required=("tag_rhythm",),
-        limitations=("Необычный ритм требует анализа таймингов .osu.",),
     )
 )
 _add(
@@ -1044,6 +996,7 @@ _add(
         "combined",
         "Aim вместе со скоростью.",
         {"aim_classic": 0.50, "speed_high_bpm": 0.50},
+        required_components=("aim_classic", "speed_high_bpm"),
     )
 )
 _add(
@@ -1142,13 +1095,31 @@ def skill_uses_sequences(skill_id: str, seen: set[str] | None = None) -> bool:
 # Public alias used by validation and UI.
 DEFINITIONS = SKILL_DEFINITIONS
 
+# Retired near-duplicate skillsets mapped to their canonical survivor.
+# v14 rewrites stored preset configs; this table keeps older JSON imports
+# and un-migrated rows working instead of silently weighting nothing.
+SKILL_ALIASES: dict[str, str] = {
+    # "Short bursts" differed from burst_control by one weight (0.05).
+    "speed_short_bursts": "burst_control",
+    # "Short streams" differed from stream_consistency by one feature.
+    "stream_short": "stream_consistency",
+    # Three tag-based rhythm skills were byte-identical in weights.
+    "rhythm_changes": "rhythm_complexity",
+    "unusual_rhythms": "rhythm_complexity",
+}
+
+
+def resolve_skill_id(skill_id: str) -> str:
+    """Map a retired skillset id to its canonical survivor."""
+    return SKILL_ALIASES.get(skill_id, skill_id)
+
 
 def skills_by_family(family: str) -> tuple[SkillDefinition, ...]:
     return tuple(item for item in SKILL_DEFINITIONS if item.family == family)
 
 
 def skill_label(skill_id: str) -> str:
-    item = SKILLS.get(skill_id)
+    item = SKILLS.get(resolve_skill_id(skill_id))
     if item is None:
         return skill_id
     return f"{FAMILY_LABELS.get(item.family, item.family)} — {item.name}"
@@ -1312,7 +1283,11 @@ def evaluate_skills(
 ) -> dict[str, SkillScore]:
     """Evaluate all (or selected) skillsets from one feature set."""
 
-    wanted = set(only) if only is not None else set(SKILLS)
+    wanted = (
+        {resolve_skill_id(item) for item in only}
+        if only is not None
+        else set(SKILLS)
+    )
     cache: dict[str, SkillScore] = {}
     visiting: set[str] = set()
 
@@ -1460,13 +1435,21 @@ def skill_fit(
     they are reported instead of being silently treated as zero.
     """
 
-    positive = {
-        key: float(weight)
-        for key, weight in weights.items()
-        if skill_id_valid(key) and float(weight) > 0
-    }
-    if not positive:
-        return None
+    positive: dict[str, float] = {}
+    for key, raw in weights.items():
+        try:
+            weight = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if weight <= 0:
+            continue
+        resolved = resolve_skill_id(str(key))
+        if resolved not in SKILLS:
+            continue
+        # An alias and its canonical id may coexist in an un-migrated config;
+        # the canonical entry wins deterministically.
+        if resolved not in positive:
+            positive[resolved] = weight
     total_weight = sum(positive.values())
     available: list[tuple[str, float, SkillScore]] = []
     missing: list[str] = []
@@ -1501,7 +1484,7 @@ def skill_fit(
 
 
 def skill_id_valid(skill_id: str) -> bool:
-    return skill_id in SKILLS
+    return resolve_skill_id(skill_id) in SKILLS
 
 
 def top_skills(

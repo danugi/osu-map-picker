@@ -19,7 +19,7 @@ from models import (
 )
 from ranking import RankingContext, evaluate_candidate
 from relevance import evaluate_relevance
-from skillsets import evaluate_skills
+from skillsets import evaluate_skills, SKILLS
 from storage import Storage
 
 
@@ -346,7 +346,7 @@ def test_v10_migration_upgrades_untouched_aim_farm(storage: Storage) -> None:
         "Sped Up",
     ]
     assert upgraded.config.ranking.relevance_targets == ["aim_classic"]
-    assert presets.BUILTIN_PRESETS_VERSION == 13
+    assert presets.BUILTIN_PRESETS_VERSION == 14
 
 
 def test_v10_migration_preserves_edited_builtin_and_user_data(
@@ -528,11 +528,11 @@ def test_v11_migration_updates_untouched_v10_aim_farm_limits(storage) -> None:
 
     updated = storage.get_preset(farm.id)
     assert updated is not None
-    assert presets.BUILTIN_PRESETS_VERSION == 13
+    assert presets.BUILTIN_PRESETS_VERSION == 14
     assert updated.config.discovery.max_requests == 56
     assert updated.config.discovery.max_pages_per_strategy == 3
     assert updated.config.discovery.fetch_attributes_limit == 40
-    assert storage.get_preference("builtins_version") == "13"
+    assert storage.get_preference("builtins_version") == "14"
 
 
 def test_v12_migration_adds_policy_to_untouched_builtins(storage) -> None:
@@ -582,7 +582,7 @@ def test_v12_migration_adds_policy_to_untouched_builtins(storage) -> None:
     assert kept is not None
     assert kept.config.filters.stars_min == 4.25
     assert kept.config.ranking.relevance_policy == {}
-    assert storage.get_preference("builtins_version") == "13"
+    assert storage.get_preference("builtins_version") == "14"
 
 
 def test_v13_migration_removes_raw_burst_feature_only_from_untouched(storage) -> None:
@@ -605,7 +605,7 @@ def test_v13_migration_removes_raw_burst_feature_only_from_untouched(storage) ->
         modern.ranking.relevance_policy
     )
     assert "require_features_any" not in updated.config.ranking.relevance_policy
-    assert storage.get_preference("builtins_version") == "13"
+    assert storage.get_preference("builtins_version") == "14"
 
     edited = copy.deepcopy(updated.config)
     edited.ranking.relevance_policy = copy.deepcopy(
@@ -619,9 +619,55 @@ def test_v13_migration_removes_raw_burst_feature_only_from_untouched(storage) ->
     kept = storage.get_preset_by_name("Bursts")
     assert kept is not None
     assert kept.config.filters.stars_min == 4.25
-    assert kept.config.ranking.relevance_policy == (
-        presets._PRE_V13_BURSTS_POLICY
+    # v14 rewrites retired skillset ids in edited presets too, while the
+    # user's own edit (stars_min) is preserved untouched.
+    assert kept.config.ranking.relevance_policy == {
+        "primary_targets": ["burst_control", "speed_bursts"],
+        "require_features_any": ["bursts"],
+    }
+
+
+def test_v14_migration_rewrites_retired_ids_in_user_presets(storage) -> None:
+    """Retired near-duplicate ids must survive migration as their canonical
+    survivor, in weights, gate targets and policy alike."""
+    import skillsets
+    from skillsets import SKILL_ALIASES
+
+    config = presets.builtin_by_name("Bursts")
+    assert config is not None
+    config = copy.deepcopy(config)
+    config.name = "My Bursts"
+    config.ranking.skill_weights["speed_short_bursts"] = 0.45
+    config.ranking.skill_weights["burst_control"] = 1.0
+    config.ranking.relevance_targets.append("stream_short")
+    config.ranking.relevance_policy["primary_targets"].append(
+        "speed_short_bursts"
     )
+    preset = storage.create_preset(config, is_builtin=False)
+    storage.set_preference("builtins_version", "13")
+
+    presets.ensure_builtin_presets(storage)
+
+    migrated = storage.get_preset(preset.id)
+    assert migrated is not None
+    weights = migrated.config.ranking.skill_weights
+    assert "speed_short_bursts" not in weights
+    assert weights["burst_control"] == 1.0  # max(existing, alias) merge
+    assert "stream_short" not in migrated.config.ranking.relevance_targets
+    assert "stream_consistency" in migrated.config.ranking.relevance_targets
+    policy_targets = migrated.config.ranking.relevance_policy["primary_targets"]
+    assert "speed_short_bursts" not in policy_targets
+    assert policy_targets.count("burst_control") == 1
+    assert storage.get_preference("builtins_version") == "14"
+    # Alias table stays consistent with the retirement list.
+    assert set(SKILL_ALIASES) == {
+        "speed_short_bursts",
+        "stream_short",
+        "rhythm_changes",
+        "unusual_rhythms",
+    }
+    assert all(alias not in skillsets.SKILLS for alias in SKILL_ALIASES)
+    assert all(target in skillsets.SKILLS for target in SKILL_ALIASES.values())
 
 
 def test_v11_migration_preserves_edited_v10_aim_farm(storage) -> None:

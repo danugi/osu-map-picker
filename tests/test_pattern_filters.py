@@ -43,9 +43,11 @@ def test_builtin_presets_map_to_measurable_patterns() -> None:
     tech = pattern_filters.relevant_patterns(
         by_name["Tech"].ranking.skill_weights
     )
-    assert "mixed_patterns" in tech
+    # tech weighs slider_ratio/density, not angle evidence; angle labels only
+    # appear through mixed_technical's angular_control component.
     assert "slider_heavy" in tech
-    assert "angle_control" in tech
+    assert "high_density" in tech
+    assert "mixed_patterns" not in tech
 
 
 def test_unsupported_goals_do_not_invent_patterns() -> None:

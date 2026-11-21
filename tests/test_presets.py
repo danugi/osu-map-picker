@@ -111,7 +111,6 @@ def test_bursts_and_streams_presets_use_separate_evidence() -> None:
     assert bursts.ranking.relevance_targets == [
         "burst_control",
         "speed_bursts",
-        "speed_short_bursts",
     ]
     assert all(
         "stream" not in target for target in bursts.ranking.relevance_targets
@@ -417,7 +416,6 @@ def test_v9_migration_adds_bursts_and_updates_untouched_sequence_targets(
     assert bursts.config.ranking.relevance_targets == [
         "burst_control",
         "speed_bursts",
-        "speed_short_bursts",
     ]
     streams = empty_storage.get_preset_by_name("Streams & Stamina")
     assert streams is not None

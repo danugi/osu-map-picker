@@ -13,7 +13,7 @@ def test_every_skill_appears_exactly_once_in_the_hierarchy() -> None:
         for category in catalog.SKILL_CATEGORIES
         for skill_id in category.skill_ids
     ]
-    assert len(flattened) == len(set(flattened)) == len(SKILL_IDS) == 76
+    assert len(flattened) == len(set(flattened)) == len(SKILL_IDS) == 72
     assert set(flattened) == set(SKILL_IDS)
     assert all(category.subcategories for category in catalog.SKILL_CATEGORIES)
     assert all(

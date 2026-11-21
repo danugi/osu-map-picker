@@ -24,7 +24,12 @@ import evidence
 from features import FEATURE_LABELS, SOURCE_LABELS
 from models import Candidate, RankingSettings, RelevanceResult, TargetMatch
 from patterns import SEQUENCE_FEATURE_KEYS
-from skillsets import SKILLS, evaluate_skills, skill_uses_sequences
+from skillsets import (
+    SKILLS,
+    evaluate_skills,
+    resolve_skill_id,
+    skill_uses_sequences,
+)
 
 NO_DATA = "недостаточно данных"
 MATCHED = "подтверждено"
@@ -100,10 +105,13 @@ def _target_match(
     candidate: Candidate,
     threshold: float,
 ) -> TargetMatch:
-    definition = SKILLS.get(target_id)
+    # Retired skillset ids resolve to their canonical survivor so an
+    # un-migrated target still evaluates against real evidence.
+    resolved_id = resolve_skill_id(target_id)
+    definition = SKILLS.get(resolved_id)
     label = definition.name if definition is not None else target_id
     skillsets = candidate.skillsets or evaluate_skills(candidate.traits)
-    item = skillsets.get(target_id)
+    item = skillsets.get(resolved_id)
     if item is None or item.score is None:
         status_code = item.status if item is not None else evidence.NOT_ANALYZED
         status_labels = {

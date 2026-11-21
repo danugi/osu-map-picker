@@ -67,11 +67,9 @@ def test_stream_and_burst_scores_are_independent() -> None:
         "speed_streams",
         "stream_consistency",
         "stream_long",
-        "stream_short",
         "stream_control",
     }
     burst_skills = {
-        "speed_short_bursts",
         "speed_bursts",
         "burst_control",
         "complex_bursts",
@@ -95,7 +93,7 @@ def test_stream_and_burst_scores_are_independent() -> None:
 
 
 def test_catalog_covers_required_families_and_compact_aim_taxonomy() -> None:
-    assert len(SKILL_DEFINITIONS) == 76
+    assert len(SKILL_DEFINITIONS) == 72
     assert tuple(skills_by_family("aim")) and len(skills_by_family("aim")) == 6
     assert {item.id for item in skills_by_family("aim")} == {
         "aim_classic",

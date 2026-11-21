@@ -39,14 +39,12 @@ SKILL_PATTERN_MAP: dict[str, tuple[str, ...]] = {
     "aim_control": ("angle_control", "flow_aim"),
     "aim_bursts": ("bursts",),
     "speed_high_bpm": ("high_density",),
-    "speed_short_bursts": ("bursts",),
     "speed_streams": ("streams",),
     "speed_bursts": ("bursts",),
     "burst_control": ("bursts",),
     "speed_density": ("high_density",),
     "stream_consistency": ("streams",),
     "stream_long": ("streams",),
-    "stream_short": ("streams",),
     "stream_burst": ("bursts",),
     "stream_jump": ("streams", "jump_aim"),
     "stream_control": ("streams",),
@@ -57,7 +55,9 @@ SKILL_PATTERN_MAP: dict[str, tuple[str, ...]] = {
     "angular_control": ("angle_control",),
     "slider_heavy": ("slider_heavy",),
     "unusual_spacing": ("wide_aim",),
-    "tech": ("mixed_patterns", "slider_heavy", "angle_control"),
+    # tech weighs slider_ratio and density, not angle evidence; offering
+    # "angle control" for it asserted a relation the skill does not have.
+    "tech": ("slider_heavy", "high_density"),
 }
 
 # Legacy trait targets (kept for explicitly imported/legacy presets). Only
@@ -89,6 +89,7 @@ def _expand_skill(
     seen: set[str],
     scores: dict[str, float],
 ) -> None:
+    skill_id = skillsets.resolve_skill_id(skill_id)
     if weight <= 0 or skill_id in seen:
         return
     seen.add(skill_id)
@@ -158,12 +159,13 @@ def unsupported_goal_names(
             continue
         if weight <= 0:
             continue
-        definition = skillsets.SKILLS.get(str(skill_id))
+        resolved = skillsets.resolve_skill_id(str(skill_id))
+        definition = skillsets.SKILLS.get(resolved)
         if definition is None:
             continue
-        directly_supported = bool(SKILL_PATTERN_MAP.get(str(skill_id)))
+        directly_supported = bool(SKILL_PATTERN_MAP.get(resolved))
         recursive: dict[str, float] = {}
-        _expand_skill(str(skill_id), weight, set(), recursive)
+        _expand_skill(resolved, weight, set(), recursive)
         if not directly_supported and not recursive:
             if definition.family in _UNSUPPORTED_FAMILIES_FOR_NOTE:
                 names.append(definition.name)

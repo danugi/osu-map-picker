@@ -23,6 +23,7 @@ from models import (
     RankingSettings,
 )
 from ranking import RankingConfigError, validate_ranking
+from skillsets import SKILL_ALIASES
 
 
 class PresetError(ValueError):
@@ -591,7 +592,6 @@ def _bursts() -> PresetConfig:
         {
             "burst_control": 1.0,
             "speed_bursts": 0.65,
-            "speed_short_bursts": 0.45,
         },
         comfort_stars=5.2,
         ideal_length=150,
@@ -1030,7 +1030,6 @@ _RELEVANCE_TARGETS: dict[str, tuple[str, ...]] = {
     "Bursts": (
         "burst_control",
         "speed_bursts",
-        "speed_short_bursts",
     ),
     "Finger Control": ("finger_control", "alternating", "speed_control"),
     "Reading": ("ar_challenge", "high_ar", "low_ar"),
@@ -1099,15 +1098,14 @@ _RELEVANCE_POLICIES: dict[str, dict[str, Any]] = {
         "require_features_any": ["streams"],
     },
     "Bursts": {
-        # All three targets already require burst evidence and must exceed the
-        # relevance threshold. The raw burst-note share is a fraction of the
-        # whole map, not a 0..1 evidence score; requiring it above 0.55 would
-        # reject legitimately burst-heavy maps (e.g. bursts=0.15) whose target
-        # score is already strong.
+        # Both targets require burst evidence and must exceed the relevance
+        # threshold. The raw burst-note share is a fraction of the whole map,
+        # not a 0..1 evidence score; requiring it above 0.55 would reject
+        # legitimately burst-heavy maps (e.g. bursts=0.15) whose target score
+        # is already strong.
         "primary_targets": [
             "burst_control",
             "speed_bursts",
-            "speed_short_bursts",
         ],
     },
     "Finger Control": {
@@ -1230,7 +1228,7 @@ _PRE_V11_FINGERPRINTS = {
     ),
 }
 
-BUILTIN_PRESETS_VERSION = 13
+BUILTIN_PRESETS_VERSION = 14
 _V2_NEW_NAMES = frozenset(
     {
         "Speed",
@@ -1534,6 +1532,52 @@ def _upgrade_v13_definitions(storage: Any) -> int:
     return 1
 
 
+def _upgrade_v14_definitions(storage: Any) -> int:
+    """Rewrite retired near-duplicate skillset ids to their canonical survivor.
+
+    Unlike the earlier definition upgrades this touches user presets and
+    edited built-ins too: a stored weight or gate target pointing at a
+    retired id would otherwise silently weight nothing.
+    """
+
+    changed = 0
+    for preset in storage.list_presets():
+        ranking = preset.config.ranking
+        weights = ranking.skill_weights
+        new_weights: dict[str, float] = {}
+        for key, value in weights.items():
+            resolved = SKILL_ALIASES.get(str(key), str(key))
+            value = float(value)
+            if resolved in new_weights:
+                new_weights[resolved] = max(new_weights[resolved], value)
+            else:
+                new_weights[resolved] = value
+        targets = list(
+            dict.fromkeys(
+                SKILL_ALIASES.get(str(t), str(t)) for t in ranking.relevance_targets
+            )
+        )
+        policy = copy.deepcopy(ranking.relevance_policy)
+        primary = policy.get("primary_targets")
+        if isinstance(primary, list):
+            policy["primary_targets"] = list(
+                dict.fromkeys(
+                    SKILL_ALIASES.get(str(t), str(t)) for t in primary
+                )
+            )
+        if (
+            new_weights != weights
+            or targets != ranking.relevance_targets
+            or policy != ranking.relevance_policy
+        ):
+            ranking.skill_weights = new_weights
+            ranking.relevance_targets = targets
+            ranking.relevance_policy = policy
+            storage.update_preset(preset.id, preset.config)
+            changed += 1
+    return changed
+
+
 def ensure_builtin_presets(storage: Any) -> int:
     """Seed built-ins and add newer profiles without destroying user edits.
 
@@ -1630,6 +1674,8 @@ def ensure_builtin_presets(storage: Any) -> int:
         _upgrade_v12_definitions(storage)
     if version < 13:
         _upgrade_v13_definitions(storage)
+    if version < 14:
+        _upgrade_v14_definitions(storage)
 
     storage.set_preference("builtins_version", str(BUILTIN_PRESETS_VERSION))
     return created
