@@ -1307,6 +1307,13 @@ def _preset_fingerprint(cfg: PresetConfig) -> str:
     data.get("ranking", {}).pop("farm_tolerance_seconds", None)
     data.get("ranking", {}).pop("relevance_policy", None)
     data.get("discovery", {}).pop("title_queries", None)
+    # Language filters were added after v13. Old rows (and every canonical
+    # pre-v14 fingerprint) implicitly mean "no language filter", so drop the
+    # fields while they still hold the default empty value.
+    filters = data.get("filters", {})
+    for key in ("include_languages", "exclude_languages"):
+        if not filters.get(key):
+            filters.pop(key, None)
     raw = json.dumps(
         data, sort_keys=True, ensure_ascii=False, separators=(",", ":")
     ).encode("utf-8")

@@ -339,3 +339,35 @@ def test_stream_consistency_requires_streams_field() -> None:
     skill = evaluate_skills(features)["stream_consistency"]
     assert skill.score is None
     assert "streams" in skill.missing
+
+
+def test_ar_challenge_passes_for_extreme_ar_without_mapper_tag() -> None:
+    """Regression: with range-conditional availability the gate must be
+    satisfiable by measured AR extremes alone (the low-AR side used to be
+    structurally unreachable)."""
+    for ar, expected in ((10.5, True), (2.5, True), (7.0, False)):
+        features = derive_features(
+            make_beatmap(11, 1, ar=ar), make_beatmapset(1)
+        )
+        skill = evaluate_skills(features)["ar_challenge"]
+        assert skill.score is not None
+        assert (skill.score > 0.55) is expected, f"AR={ar}: {skill.score}"
+
+
+def test_ar_challenge_tag_extends_the_satisfiable_range() -> None:
+    features = derive_features(
+        make_beatmap(11, 1, ar=9.5), make_beatmapset(1, tags=("reading",))
+    )
+    skill = evaluate_skills(features)["ar_challenge"]
+    assert skill.score is not None
+    assert skill.score > 0.55
+
+
+def test_high_ar_skill_unavailable_for_moderate_ar() -> None:
+    """AR inside the opposite band is unavailable, not a 0.0 score."""
+    features = derive_features(
+        make_beatmap(11, 1, ar=7.0), make_beatmapset(1)
+    )
+    skill = evaluate_skills(features)["high_ar"]
+    assert skill.score is None
+    assert "high_ar" in skill.missing

@@ -334,8 +334,15 @@ def derive_features(
 
     if beatmap.ar is not None:
         _put(scores, sources, statuses, "ar", beatmap.ar / 10.0, "beatmap_ar")
-        _put(scores, sources, statuses, "high_ar", (beatmap.ar - 8.0) / 3.0, "beatmap_ar")
-        _put(scores, sources, statuses, "low_ar", (6.0 - beatmap.ar) / 6.0, "beatmap_ar")
+        # Range-conditional availability: an AR value inside the opposite
+        # band must not register as an available 0.0 score, otherwise the
+        # weight normalization drags every AR-challenge score below the gate
+        # threshold. High-AR reading lives above AR 8; low-AR reading starts
+        # below ~7.5, which is where object overlap actually begins.
+        if beatmap.ar > 8.0:
+            _put(scores, sources, statuses, "high_ar", (beatmap.ar - 8.0) / 3.0, "beatmap_ar")
+        if beatmap.ar < 7.5:
+            _put(scores, sources, statuses, "low_ar", (7.5 - beatmap.ar) / 7.5, "beatmap_ar")
     if beatmap.od is not None:
         _put(scores, sources, statuses, "od", beatmap.od / 10.0, "beatmap_od")
     if beatmap.hp is not None:

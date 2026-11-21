@@ -29,7 +29,12 @@ import httpx
 
 OSU_FILE_URL = "https://osu.ppy.sh/osu/{beatmap_id}"
 MAX_OSU_BYTES = 5_000_000
-MAX_PREVIEW_OBJECTS = 6000
+# Analysis-only parse cap. At 6000 objects a long marathon/stamina map was
+# always truncated, which marked its sequence evidence PARTIAL and the
+# relevance gate then refused to confirm it - exactly the maps the
+# Streams/Stamina presets target. 24000 covers ~7-8 minute marathons; the
+# "never confirm from truncated evidence" rule stays untouched.
+MAX_PREVIEW_OBJECTS = 24_000
 USER_AGENT = "Personal-osu-Map-Picker/0.4 (+local gameplay preview)"
 
 

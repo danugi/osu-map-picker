@@ -706,9 +706,13 @@ _add(
         "AR challenge",
         "reading",
         "Челлендж по approach rate: высокий или низкий AR плюс reading-тег.",
-        {"high_ar": 0.40, "low_ar": 0.30, "tag_reading": 0.30},
+        {"high_ar": 0.55, "low_ar": 0.55, "tag_reading": 0.25},
         required_any=("high_ar", "low_ar"),
-        limitations=("AR измеряется, но читаемость паттерна — нет.",),
+        limitations=(
+            "AR измеряется, но читаемость паттерна — нет.",
+            "Экстремальный AR проходит без тега; reading-тег расширяет "
+            "диапазон (например AR 9.5+ или AR 4-).",
+        ),
     )
 )
 _add(
