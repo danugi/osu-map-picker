@@ -200,7 +200,7 @@ def test_clearing_cache_keeps_user_data(storage: Storage) -> None:
     storage.set_feedback(1, ["like"])
     storage.set_favorite(1, True)
     storage.cache_set("key", {"x": 1}, 10)
-    preset = storage.get_preset_by_name("Mixed Aim")
+    preset = storage.get_preset_by_name("Aim")
     assert preset is not None
     result = storage.cache_clear()
     assert result["search_cache"] == 1
@@ -243,7 +243,7 @@ def test_recent_sets_can_be_limited_to_randomization_surfaces(
 def test_preset_crud_does_not_touch_ratings(storage: Storage) -> None:
     storage.save_beatmapset(make_beatmapset(1))
     storage.set_feedback(1, ["fine"])
-    preset = storage.get_preset_by_name("Mixed Aim")
+    preset = storage.get_preset_by_name("Aim")
     assert preset is not None
     edited = PresetConfig.from_dict(preset.config.to_dict())
     edited.name = "Renamed"
@@ -359,7 +359,7 @@ def test_validate_backup_rejects_garbage(storage: Storage, tmp_path) -> None:
 
 
 def test_corrupted_preset_row_is_skipped(storage: Storage) -> None:
-    preset = storage.get_preset_by_name("Mixed Aim")
+    preset = storage.get_preset_by_name("Aim")
     assert preset is not None
     with storage.connection() as conn:
         conn.execute(
@@ -367,7 +367,7 @@ def test_corrupted_preset_row_is_skipped(storage: Storage) -> None:
             (preset.id,),
         )
     names = [item.name for item in storage.list_presets()]
-    assert "Mixed Aim" not in names
+    assert "Aim" not in names
     with pytest.raises(StorageError):
         storage.get_preset(preset.id)
 

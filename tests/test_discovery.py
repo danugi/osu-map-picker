@@ -1137,7 +1137,7 @@ def test_local_sequence_rerank_skips_missing_cache_without_blocking(
 
 @pytest.mark.parametrize(
     "name",
-    ("Mixed Aim", "All-rounder", "Speed", "Stamina", "Rhythm Control"),
+    ("Aim", "All-rounder", "Speed", "Stamina", "Rhythm Control"),
 )
 def test_sequence_analysis_triggers_for_skill_weights(
     name: str, storage: Storage

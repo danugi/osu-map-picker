@@ -454,7 +454,7 @@ def _choose_preset(store: Storage) -> int:
         if any(item.id == pid for item in presets_list):
             return pid
     for item in presets_list:
-        if item.name == "Mixed Aim":
+        if item.name == "Aim":
             return item.id
     return presets_list[0].id
 
@@ -1479,7 +1479,7 @@ def page_ranking(store: Storage, cfg: PresetConfig) -> None:
     else:
         st.caption(
             "У активного пресета нет обязательных целевых тегов. Гейт не "
-            "применяется, поэтому Mixed Aim и All-rounder не наследуют "
+            "применяется, поэтому Aim и All-rounder не наследуют "
             "ограничения специализированных профилей."
         )
     ranking.relevance_threshold = float(
@@ -1633,7 +1633,8 @@ def page_ranking(store: Storage, cfg: PresetConfig) -> None:
 
     with st.expander("Legacy aim-профиль (совместимость старых пресетов)", expanded=False):
         st.caption(
-            "Это старый механизм Mixed Aim / Wide Aim и подобных пресетов. "
+            "Это старый механизм Mixed Aim / Wide Aim и подобных пресетов "
+            "(до переименования Mixed Aim в Aim). "
             "Новые пресеты используют универсальные навыки выше. Геометрия "
             "wide/flow/углов здесь не угадывается."
         )
@@ -1696,7 +1697,7 @@ def _render_target_gate(scored: ScoredCandidate) -> None:
     if check is None or not check.targets:
         st.caption(
             "Обязательные целевые теги не заданы: у этого пресета нет "
-            "дополнительного гейта (например, Mixed Aim или All-rounder)."
+            "дополнительного гейта (например, Aim или All-rounder)."
         )
         return
     st.markdown("**Целевые теги пресета**")
@@ -5133,7 +5134,7 @@ def page_presets(store: Storage, cfg: PresetConfig) -> None:
             if not remaining:
                 remaining = store.list_presets()
             fallback = next(
-                (item for item in remaining if item.name == "Mixed Aim"),
+                (item for item in remaining if item.name == "Aim"),
                 remaining[0],
             )
             _apply_preset(store, fallback.id)

@@ -307,7 +307,7 @@ def _preset_for_worker(store: Storage):
     except (TypeError, ValueError):
         preset = None
     if preset is None:
-        preset = store.get_preset_by_name("Mixed Aim")
+        preset = store.get_preset_by_name("Aim")
     return preset
 
 

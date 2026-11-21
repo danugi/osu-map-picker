@@ -58,7 +58,7 @@ PRESET_GROUP_BY_ID = {group.id: group for group in PRESET_GROUPS}
 # Curated built-ins are assigned explicitly. A new built-in without a group
 # is a programming error caught by tests, not something the UI guesses.
 PRESET_GROUP_BY_NAME = {
-    "Mixed Aim": "explore",
+    "Aim": "explore",
     "Discovery": "explore",
     "All-rounder": "explore",
     "Aim Farm": "farm",

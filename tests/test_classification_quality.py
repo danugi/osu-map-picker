@@ -150,7 +150,7 @@ def _candidate(
 # to the category, built only from measured evidence.
 _AIM_MAP: dict = {"aim": 6.0, "speed": 2.0}
 _PERFECT_MAPS: dict[str, dict] = {
-    "Mixed Aim": _AIM_MAP,
+    "Aim": _AIM_MAP,
     "Aim Farm": _AIM_MAP,
     "Speed": {"aim": 2.0, "speed": 5.5, "bpm": 200.0},
     "Streams & Stamina": {

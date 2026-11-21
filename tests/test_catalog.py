@@ -93,7 +93,7 @@ def test_all_builtin_presets_have_a_real_group() -> None:
 
 def test_user_presets_fall_back_to_custom_group() -> None:
     user = SimpleNamespace(
-        name="Mixed Aim",
+        name="Aim",
         is_builtin=False,
         config=SimpleNamespace(description="my own edit"),
     )

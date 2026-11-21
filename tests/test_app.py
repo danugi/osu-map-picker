@@ -104,7 +104,7 @@ def test_sidebar_seeds_all_presets(app_env) -> None:
     store = Storage(app_env)
     names = {preset.name for preset in store.list_presets()}
     assert names == {
-        "Mixed Aim",
+        "Aim",
         "Discovery",
         "All-rounder",
         "Aim Farm",
@@ -462,7 +462,7 @@ def _set_skills(at: AppTest, selected: list[str]) -> None:
 def test_preset_selection_loads_the_whole_configuration(app_env) -> None:
     at = AppTest.from_file(APP, default_timeout=60)
     at.run()
-    assert at.session_state["active_config"].name == "Mixed Aim"
+    assert at.session_state["active_config"].name == "Aim"
 
     at.sidebar.selectbox[0].select("Speed").run()
     assert not at.exception
@@ -528,7 +528,7 @@ def test_dirty_preset_switch_requires_an_explicit_choice(app_env) -> None:
 
     at.sidebar.selectbox[0].select("Speed").run()
     assert not at.exception
-    assert at.session_state["active_config"].name == "Mixed Aim"
+    assert at.session_state["active_config"].name == "Aim"
     assert at.session_state["_pending_preset_id"] is not None
     assert at.session_state["preset_selector"] == at.session_state["active_preset_id"]
     assert "несохранённые изменения" in _texts(at)
@@ -539,7 +539,7 @@ def test_dirty_preset_switch_requires_an_explicit_choice(app_env) -> None:
     assert "_pending_preset_id" not in at.session_state
 
     store = Storage(app_env)
-    mixed = store.get_preset_by_name("Mixed Aim")
+    mixed = store.get_preset_by_name("Aim")
     assert mixed is not None
     assert mixed.config.ranking.skill_weights == {
         "aim_classic": 0.6,
@@ -561,7 +561,7 @@ def test_dirty_preset_switch_can_save_before_switching(app_env) -> None:
     assert not at.exception
     assert at.session_state["active_config"].name == "Speed"
     store = Storage(app_env)
-    mixed = store.get_preset_by_name("Mixed Aim")
+    mixed = store.get_preset_by_name("Aim")
     assert mixed is not None
     assert mixed.config.ranking.skill_weights == {"aim_classic": 2.0}
 
@@ -634,7 +634,7 @@ def test_save_and_reload_restores_skills_and_filters(app_env) -> None:
     assert saved_cfg.filters.stars_max == 6.5
     assert not _has_button(at, "status_save_active")
 
-    at.sidebar.selectbox[0].select("Mixed Aim").run()
+    at.sidebar.selectbox[0].select("Aim").run()
     at.sidebar.selectbox[0].select("Speed").run()
     reloaded = at.session_state["active_config"]
     assert reloaded.ranking.skill_weights["speed_high_bpm"] == 1.75
@@ -657,7 +657,7 @@ def test_save_as_new_preset_keeps_the_original_unchanged(app_env) -> None:
 
     store = Storage(app_env)
     created = store.get_preset_by_name("My Aim Draft")
-    original = store.get_preset_by_name("Mixed Aim")
+    original = store.get_preset_by_name("Aim")
     assert created is not None
     assert created.config.ranking.skill_weights == {"aim_classic": 1.5}
     assert original is not None
@@ -744,13 +744,13 @@ def test_duplicating_with_unsaved_edits_copies_what_the_user_sees(app_env) -> No
 
     _button(at, "preset_duplicate").click().run()
     assert not at.exception
-    assert at.session_state["active_config"].name == "Mixed Aim copy"
+    assert at.session_state["active_config"].name == "Aim copy"
     assert at.session_state["active_config"].ranking.skill_weights == {
         "aim_classic": 1.5
     }
 
     store = Storage(app_env)
-    original = store.get_preset_by_name("Mixed Aim")
+    original = store.get_preset_by_name("Aim")
     assert original is not None
     assert original.config.ranking.skill_weights == {
         "aim_classic": 0.6,
@@ -942,7 +942,7 @@ def test_sequential_preset_switching_loads_each_configuration(app_env) -> None:
     at = AppTest.from_file(APP, default_timeout=60)
     at.run()
     store = Storage(app_env)
-    sequence = ("Mixed Aim", "Reading", "Aim Farm", "Streams & Stamina")
+    sequence = ("Aim", "Reading", "Aim Farm", "Streams & Stamina")
     for name in sequence:
         at.sidebar.selectbox[0].select(name).run()
         assert not at.exception
@@ -1023,11 +1023,11 @@ def test_local_cache_search_reranks_for_each_switched_preset(app_env) -> None:
     at.run()
 
     for name in (
-        "Mixed Aim",
+        "Aim",
         "Reading",
         "Tech",
         "Aim Farm",
-        "Mixed Aim",
+        "Aim",
     ):
         at.sidebar.selectbox[0].select(name).run()
         _button(at, "run_search").click().run()
@@ -1343,7 +1343,7 @@ def test_collect_random_pool_reads_only_filtered_local_catalog(
 
 
 def test_random_scope_reacts_to_ranking_and_filter_changes() -> None:
-    cfg = presets.builtin_by_name("Mixed Aim")
+    cfg = presets.builtin_by_name("Aim")
     assert cfg is not None
     baseline = app_module._random_scope_key(cfg)
     cfg.filters.stars_min = 5.0

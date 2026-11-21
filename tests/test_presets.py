@@ -12,7 +12,7 @@ from models import PresetConfig
 from storage import Storage
 
 CANONICAL = {
-    "Mixed Aim",
+    "Aim",
     "Discovery",
     "All-rounder",
     "Aim Farm",
@@ -204,48 +204,62 @@ def test_v2_migration_does_not_overwrite_edited_aim_farm(storage: Storage) -> No
     assert fresh.config.ranking.skill_weights == {"aim_classic": 1.0}
 
 
-def test_v3_migration_upgrades_unedited_legacy_aim_profiles(
+def test_v3_proxy_era_aim_rows_are_preserved_and_aim_is_seeded(
     storage: Storage,
 ) -> None:
-    mixed = storage.get_preset_by_name("Mixed Aim")
-    assert mixed is not None
-    storage.update_preset(mixed.id, _legacy_mixed_aim())
-    storage.create_preset(presets._legacy_wide_aim_config(), is_builtin=True)
+    """Proxy-era (pre-skillset) aim rows predate every fingerprint the
+    migrations know, so they are kept exactly as stored while the modern
+    Aim preset is seeded next to them."""
+    aim = storage.get_preset_by_name("Aim")
+    assert aim is not None
+    storage.update_preset(aim.id, _legacy_mixed_aim())
+    wide = storage.create_preset(presets._legacy_wide_aim_config(), is_builtin=True)
     storage.set_preference("builtins_version", "2")
 
     presets.ensure_builtin_presets(storage)
 
-    upgraded_mixed = storage.get_preset_by_name("Mixed Aim")
-    upgraded_wide = storage.get_preset_by_name("Wide Aim")
-    assert upgraded_mixed is not None and upgraded_wide is not None
-    assert upgraded_mixed.config.ranking.trait_targets == {}
-    assert upgraded_mixed.config.ranking.skill_weights == {
+    kept_mixed = storage.get_preset_by_name("Mixed Aim")
+    assert kept_mixed is not None
+    assert kept_mixed.id == aim.id
+    assert kept_mixed.config.ranking.trait_targets == {
+        "aim": 0.72,
+        "speed": 0.45,
+        "density": 0.55,
+    }
+    assert kept_mixed.config.ranking.skill_weights == {}
+    # Wide Aim is a legacy-only row. It is preserved exactly as stored
+    # instead of being silently rewritten into a profile that is no longer
+    # offered in the curated catalog.
+    kept_wide = storage.get_preset(wide.id)
+    assert kept_wide is not None
+    assert kept_wide.config.ranking.trait_targets == {
+        "aim": 0.9,
+        "density": 0.35,
+    }
+    assert kept_wide.config.ranking.skill_weights == {}
+    # The curated catalog still gets a modern Aim row.
+    seeded_aim = storage.get_preset_by_name("Aim")
+    assert seeded_aim is not None and seeded_aim.id != aim.id
+    assert seeded_aim.config.ranking.skill_weights == {
         "aim_classic": 0.60,
         "aim_control": 0.20,
         "aim_bursts": 0.20,
     }
-    # Wide Aim is now a legacy-only row. It is preserved exactly as stored
-    # instead of being silently rewritten into a profile that is no longer
-    # offered in the curated catalog.
-    assert upgraded_wide.config.ranking.trait_targets == {
-        "aim": 0.9,
-        "density": 0.35,
-    }
-    assert upgraded_wide.config.ranking.skill_weights == {}
 
 
 def test_v3_migration_preserves_edited_legacy_aim_profile(storage: Storage) -> None:
-    mixed = storage.get_preset_by_name("Mixed Aim")
-    assert mixed is not None
+    aim = storage.get_preset_by_name("Aim")
+    assert aim is not None
     edited = _legacy_mixed_aim()
     edited.filters.stars_min = 4.2
-    storage.update_preset(mixed.id, edited)
+    storage.update_preset(aim.id, edited)
     storage.set_preference("builtins_version", "2")
 
     presets.ensure_builtin_presets(storage)
 
     kept = storage.get_preset_by_name("Mixed Aim")
     assert kept is not None
+    assert kept.id == aim.id
     assert kept.config.filters.stars_min == 4.2
     assert kept.config.ranking.trait_targets == {
         "aim": 0.72,
@@ -262,7 +276,7 @@ def test_v5_migration_adds_streams_and_stamina_without_touching_edits(
         if preset.name == "Streams & Stamina":
             continue
         empty_storage.create_preset(copy.deepcopy(preset), is_builtin=True)
-    mixed = empty_storage.get_preset_by_name("Mixed Aim")
+    mixed = empty_storage.get_preset_by_name("Aim")
     assert mixed is not None
     edited = PresetConfig.from_dict(mixed.config.to_dict())
     edited.filters.stars_min = 4.2
@@ -273,14 +287,14 @@ def test_v5_migration_adds_streams_and_stamina_without_touching_edits(
     created = presets.ensure_builtin_presets(empty_storage)
     assert created == 1
     assert empty_storage.get_preset_by_name("Streams & Stamina") is not None
-    kept = empty_storage.get_preset_by_name("Mixed Aim")
+    kept = empty_storage.get_preset_by_name("Aim")
     assert kept is not None and kept.config.filters.stars_min == 4.2
 
 
 def test_v7_migration_reduces_only_the_old_default_search_budget(
     empty_storage: Storage,
 ) -> None:
-    base = presets.builtin_by_name("Mixed Aim")
+    base = presets.builtin_by_name("Aim")
     assert base is not None
 
     old = copy.deepcopy(base)
@@ -325,7 +339,7 @@ def test_v7_migration_reduces_only_the_old_default_search_budget(
 
 
 def test_old_json_without_skillset_fields_still_loads() -> None:
-    preset = presets.builtin_by_name("Mixed Aim")
+    preset = presets.builtin_by_name("Aim")
     assert preset is not None
     data = preset.to_dict()
     data["ranking"].pop("skill_weights", None)
@@ -440,7 +454,7 @@ def test_builtins_are_seeded_once(storage: Storage) -> None:
     assert len(stored) == 12
     assert all(preset.is_builtin for preset in stored)
     assert {preset.name for preset in stored} == CANONICAL
-    mixed = storage.get_preset_by_name("Mixed Aim")
+    mixed = storage.get_preset_by_name("Aim")
     assert mixed is not None
     assert mixed.config.ranking.trait_targets == {}
     assert mixed.config.ranking.skill_weights == {
@@ -463,7 +477,7 @@ def test_deleted_builtin_is_not_recreated_on_startup(storage: Storage) -> None:
 
 
 def test_duplicate_is_independent(storage: Storage) -> None:
-    original = storage.get_preset_by_name("Mixed Aim")
+    original = storage.get_preset_by_name("Aim")
     assert original is not None
     copy_preset = presets.duplicate_preset(storage, original.id, "My Mixed")
     assert copy_preset.name == "My Mixed"
@@ -489,11 +503,11 @@ def test_create_custom_from_base_and_rename(storage: Storage) -> None:
     renamed = presets.rename_preset(storage, created.id, "My Reading 2")
     assert renamed.name == "My Reading 2"
     with pytest.raises(presets.PresetError):
-        presets.rename_preset(storage, created.id, "Mixed Aim")
+        presets.rename_preset(storage, created.id, "Aim")
 
 
 def test_reset_preset_to_default(storage: Storage) -> None:
-    preset = storage.get_preset_by_name("Mixed Aim")
+    preset = storage.get_preset_by_name("Aim")
     assert preset is not None
     edited = PresetConfig.from_dict(preset.config.to_dict())
     edited.filters.stars_min = 2.0
@@ -501,7 +515,7 @@ def test_reset_preset_to_default(storage: Storage) -> None:
     storage.update_preset(preset.id, edited)
     restored = presets.reset_preset_to_default(storage, preset.id)
     assert restored.config.filters.stars_min == 4.0
-    assert restored.config.description.startswith("Основной баланс")
+    assert restored.config.description.startswith("Основной aim-профиль")
 
 
 def test_legacy_reset_uses_original_legacy_config(storage: Storage) -> None:
@@ -526,7 +540,7 @@ def test_deleting_preset_keeps_user_data(storage: Storage) -> None:
     storage.set_feedback(1, ["like"])
     storage.set_favorite(1, True)
     storage.record_history([(1, 0.8, 1)])
-    preset = storage.get_preset_by_name("Mixed Aim")
+    preset = storage.get_preset_by_name("Aim")
     assert preset is not None
     storage.delete_preset(preset.id)
     assert storage.get_feedback(1) == ("like",)
@@ -540,11 +554,11 @@ def test_preset_json_export_import_roundtrip(storage: Storage) -> None:
     selected = [
         preset
         for preset in storage.list_presets()
-        if preset.name in {"Mixed Aim", "Reading"} or preset.id == custom.id
+        if preset.name in {"Aim", "Reading"} or preset.id == custom.id
     ]
     text = presets.export_presets_json(selected)
     parsed = presets.import_presets_json(text)
-    assert {preset.name for preset in parsed} == {"Mixed Aim", "Reading", "My Profile"}
+    assert {preset.name for preset in parsed} == {"Aim", "Reading", "My Profile"}
     assert [p.to_dict() for p in parsed] == [p.config.to_dict() for p in selected]
 
 

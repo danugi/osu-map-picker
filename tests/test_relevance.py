@@ -215,7 +215,7 @@ def test_discovery_and_allrounder_have_no_target_gate() -> None:
         assert preset is not None
         assert preset.ranking.relevance_targets == []
         assert preset.ranking.relevance_policy == {}
-    mixed = presets.builtin_by_name("Mixed Aim")
+    mixed = presets.builtin_by_name("Aim")
     assert mixed is not None
     assert mixed.ranking.relevance_targets
     assert mixed.ranking.relevance_policy["primary_targets"]
@@ -228,7 +228,7 @@ def test_discovery_and_allrounder_have_no_target_gate() -> None:
 
 def test_specialized_presets_use_their_own_weighted_targets() -> None:
     expected = {
-        "Mixed Aim",
+        "Aim",
         "Aim Farm",
         "Speed",
         "Streams & Stamina",
@@ -599,7 +599,7 @@ def test_strict_filters_run_before_relevance(storage) -> None:
 
 
 def test_mixed_aim_requires_an_aim_target() -> None:
-    preset = presets.builtin_by_name("Mixed Aim")
+    preset = presets.builtin_by_name("Aim")
     assert preset is not None
     scores = {
         "aim_classic": 0.20,
@@ -867,7 +867,7 @@ def _mark_skill(
 
 
 def test_aim_control_partial_coverage_without_sequence_is_allowed() -> None:
-    preset = presets.builtin_by_name("Mixed Aim")
+    preset = presets.builtin_by_name("Aim")
     assert preset is not None
     candidate = score_candidate(
         1,
@@ -905,7 +905,7 @@ def test_aim_control_partial_coverage_without_sequence_is_allowed() -> None:
 
 
 def test_aim_control_rejects_actual_partial_sequence_contribution() -> None:
-    preset = presets.builtin_by_name("Mixed Aim")
+    preset = presets.builtin_by_name("Aim")
     assert preset is not None
     candidate = score_candidate(
         1,
@@ -945,7 +945,7 @@ def test_aim_control_rejects_actual_partial_sequence_contribution() -> None:
 
 
 def test_aim_control_rejects_partial_feature_status_without_partial_score_source() -> None:
-    preset = presets.builtin_by_name("Mixed Aim")
+    preset = presets.builtin_by_name("Aim")
     assert preset is not None
     candidate = score_candidate(
         1,

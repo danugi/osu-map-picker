@@ -140,7 +140,29 @@ def _skill_preset(
     return cfg
 
 
-def _mixed_aim() -> PresetConfig:
+def _aim() -> PresetConfig:
+    cfg = _skill_preset(
+        "Aim",
+        "Основной aim-профиль: классический aim как база, aim control и aim "
+        "bursts как равные альтернативы, короткие карты. В тегах osu! нет "
+        "отдельного skillset/aim — aim-навыки распределены между jumps, "
+        "aim control и bursts, поэтому пресет покрывает их все. "
+        "Цель — разнообразие, а не максимум звёзд.",
+        {
+            "aim_classic": 0.60,
+            "aim_control": 0.20,
+            "aim_bursts": 0.20,
+        },
+        comfort_stars=5.4,
+        ideal_length=140,
+        mapping_weight=1.3,
+    )
+    return cfg
+
+
+def _legacy_mixed_aim_skillset() -> PresetConfig:
+    """Exact pre-v15 Mixed Aim body (the v14 skillset-engine era)."""
+
     cfg = _skill_preset(
         "Mixed Aim",
         "Основной баланс: интересный mixed aim, немного aimslop для стабильности "
@@ -492,13 +514,10 @@ def _legacy_aim_alt_matches(cfg: PresetConfig) -> bool:
     return _matches_legacy(cfg, _legacy_aim_alt_config())
 
 
-_LEGACY_SKILL_PROFILES = (
-    ("Mixed Aim", _legacy_mixed_aim_config),
-    ("Wide Aim", _legacy_wide_aim_config),
-    ("Flow Aim", _legacy_flow_aim_config),
-    ("Aim Control", _legacy_aim_control_config),
-    ("Weird Aim", _legacy_weird_aim_config),
-)
+# Exact pre-v10 fingerprints are handled by _upgrade_v10_definitions; the
+# proxy-era skill-profile upgrade loop was removed when Mixed Aim was renamed
+# to Aim (v15): proxy-era rows stay as hidden legacy rows instead of being
+# silently rewritten into a profile that is no longer offered.
 
 
 def _speed() -> PresetConfig:
@@ -1020,10 +1039,10 @@ def _custom() -> PresetConfig:
 # exactly three skillsets. A map must be strictly above the relevance
 # All-rounder, Any Taste and the generic discovery presets deliberately have
 # no entry: they must not inherit the restrictions of specialized profiles.
-# Mixed Aim has a specialized aim gate now, but keeps its classic/control/burst
-# alternatives instead of collapsing to one pattern.
+# Aim (formerly Mixed Aim) keeps its classic/control/burst alternatives
+# instead of collapsing to one pattern.
 _RELEVANCE_TARGETS: dict[str, tuple[str, ...]] = {
-    "Mixed Aim": ("aim_classic", "aim_control", "aim_bursts"),
+    "Aim": ("aim_classic", "aim_control", "aim_bursts"),
     "Aim Farm": ("aim_classic",),
     "Speed": ("speed_high_bpm", "speed_bursts", "speed_density"),
     "Streams & Stamina": ("stream_consistency", "stream_long"),
@@ -1042,6 +1061,7 @@ _RELEVANCE_TARGETS: dict[str, tuple[str, ...]] = {
     "Flashlight": ("fl_friendly", "fl_reading", "fl_aim"),
     # Legacy profiles keep their own target sets instead of inheriting the
     # current preset that happens to have a similar name.
+    "Mixed Aim": ("aim_classic", "aim_control", "aim_bursts"),
     "Streams": ("stream_consistency", "stream_long", "stream_burst"),
     "Stamina": ("stamina_finger", "stream_long", "speed_stamina"),
     "Wide Aim": ("aim_wide", "aim_classic"),
@@ -1082,7 +1102,7 @@ _RELEVANCE_TARGETS: dict[str, tuple[str, ...]] = {
 # strict > relevance_threshold; these rules only decide which targets are
 # primary and which feature evidence must corroborate them.
 _RELEVANCE_POLICIES: dict[str, dict[str, Any]] = {
-    "Mixed Aim": {
+    "Aim": {
         "primary_targets": ["aim_classic", "aim_control", "aim_bursts"],
     },
     "Speed": {
@@ -1132,6 +1152,11 @@ _RELEVANCE_POLICIES: dict[str, dict[str, Any]] = {
     "Flashlight": {
         "primary_targets": ["fl_friendly"],
         "require_features_any": ["tag_fl"],
+    },
+    # Retired names keep their stored policies so an untouched legacy row
+    # round-trips through known_builtin_by_name() unchanged.
+    "Mixed Aim": {
+        "primary_targets": ["aim_classic", "aim_control", "aim_bursts"],
     },
 }
 
@@ -1183,7 +1208,7 @@ def _apply_relevance_defaults(cfg: PresetConfig) -> PresetConfig:
 # overlapping experiments from earlier versions stays available as legacy
 # rows, but is no longer offered as a ready-made preset.
 _BUILDERS = (
-    _mixed_aim,
+    _aim,
     _discovery,
     _allrounder,
     _aim_farm,
@@ -1199,6 +1224,7 @@ _BUILDERS = (
 
 _LEGACY_BUILDERS = (
     _any_taste,
+    _legacy_mixed_aim_skillset,
     _streams,
     _stamina,
     _weird_aim,
@@ -1229,7 +1255,7 @@ _PRE_V11_FINGERPRINTS = {
     ),
 }
 
-BUILTIN_PRESETS_VERSION = 14
+BUILTIN_PRESETS_VERSION = 15
 _V2_NEW_NAMES = frozenset(
     {
         "Speed",
@@ -1244,6 +1270,7 @@ _V2_NEW_NAMES = frozenset(
 _V5_NEW_NAMES = frozenset({"Streams & Stamina"})
 _V6_NEW_NAMES = frozenset({"Aim Farm"})
 _V9_NEW_NAMES = frozenset({"Bursts"})
+_V15_NEW_NAMES = frozenset({"Aim"})
 
 # Canonical fingerprints of the pre-v10 seeded configurations. The v10
 # migration only replaces rows that are still byte-for-byte equivalent to a
@@ -1607,6 +1634,31 @@ def _upgrade_v14_definitions(storage: Any) -> int:
     return changed
 
 
+def _upgrade_v15_definitions(storage: Any) -> int:
+    """Rename untouched Mixed Aim rows to Aim (v15 taxonomy rename).
+
+    The profile itself is unchanged; only the name and description differ,
+    mirroring the osu! tag model where aim skills have no dedicated
+    skillset/aim tag. A user-edited Mixed Aim row is left alone and stays
+    as a hidden legacy row.
+    """
+
+    changed = 0
+    mixed_row = storage.get_preset_by_name("Mixed Aim")
+    if mixed_row is None or not mixed_row.is_builtin:
+        return 0
+    if storage.get_preset_by_name("Aim") is not None:
+        return 0
+    before = _apply_relevance_defaults(_legacy_mixed_aim_skillset())
+    if not _matches_legacy(mixed_row.config, before):
+        return 0
+    upgraded = builtin_by_name("Aim")
+    if upgraded is not None:
+        storage.update_preset(mixed_row.id, upgraded)
+        changed += 1
+    return changed
+
+
 def ensure_builtin_presets(storage: Any) -> int:
     """Seed built-ins and add newer profiles without destroying user edits.
 
@@ -1665,6 +1717,11 @@ def ensure_builtin_presets(storage: Any) -> int:
                 storage.update_preset(old_farm.id, upgraded)
     if version < 9:
         new_names.update(_V9_NEW_NAMES)
+    if version < 15:
+        # The rename must run before the create loop so the renamed row
+        # satisfies the "Aim" lookup and no duplicate row is seeded.
+        _upgrade_v15_definitions(storage)
+        new_names.update(_V15_NEW_NAMES)
 
     for preset in builtin_presets():
         if preset.name not in new_names:
@@ -1682,18 +1739,6 @@ def ensure_builtin_presets(storage: Any) -> int:
         upgraded_alt = builtin_by_name("Aim + Alt")
         if upgraded_alt is not None:
             storage.update_preset(existing_alt.id, upgraded_alt)
-
-    for name, legacy_factory in _LEGACY_SKILL_PROFILES:
-        existing_profile = storage.get_preset_by_name(name)
-        if (
-            existing_profile is None
-            or not existing_profile.is_builtin
-            or not _matches_legacy(existing_profile.config, legacy_factory())
-        ):
-            continue
-        upgraded_profile = builtin_by_name(name)
-        if upgraded_profile is not None:
-            storage.update_preset(existing_profile.id, upgraded_profile)
 
     if version < 10:
         _upgrade_v10_definitions(storage)

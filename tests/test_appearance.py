@@ -86,7 +86,7 @@ def test_appearance_persists_separately_from_presets(
 
     # Appearance is one preference, never part of a preset configuration.
     assert storage.get_preference(appearance.PREFERENCE_KEY)
-    mixed = storage.get_preset_by_name("Mixed Aim")
+    mixed = storage.get_preset_by_name("Aim")
     assert mixed is not None
     assert "appearance" not in repr(mixed.config.to_dict())
     assert "background_file" not in repr(mixed.config.to_dict())

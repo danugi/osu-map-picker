@@ -267,7 +267,7 @@ def test_broad_presets_do_not_inherit_specialized_gates() -> None:
         preset = presets.known_builtin_by_name(name)
         assert preset is not None
         assert preset.ranking.relevance_targets == []
-    mixed = presets.known_builtin_by_name("Mixed Aim")
+    mixed = presets.known_builtin_by_name("Aim")
     assert mixed is not None
     assert mixed.ranking.relevance_targets
     assert mixed.ranking.relevance_policy["primary_targets"]
@@ -346,7 +346,7 @@ def test_v10_migration_upgrades_untouched_aim_farm(storage: Storage) -> None:
         "Sped Up",
     ]
     assert upgraded.config.ranking.relevance_targets == ["aim_classic"]
-    assert presets.BUILTIN_PRESETS_VERSION == 14
+    assert presets.BUILTIN_PRESETS_VERSION == 15
 
 
 def test_v10_migration_preserves_edited_builtin_and_user_data(
@@ -528,16 +528,15 @@ def test_v11_migration_updates_untouched_v10_aim_farm_limits(storage) -> None:
 
     updated = storage.get_preset(farm.id)
     assert updated is not None
-    assert presets.BUILTIN_PRESETS_VERSION == 14
+    assert presets.BUILTIN_PRESETS_VERSION == 15
     assert updated.config.discovery.max_requests == 56
     assert updated.config.discovery.max_pages_per_strategy == 3
     assert updated.config.discovery.fetch_attributes_limit == 40
-    assert storage.get_preference("builtins_version") == "14"
+    assert storage.get_preference("builtins_version") == "15"
 
 
 def test_v12_migration_adds_policy_to_untouched_builtins(storage) -> None:
     names = (
-        "Mixed Aim",
         "Speed",
         "Streams & Stamina",
         "Bursts",
@@ -582,7 +581,7 @@ def test_v12_migration_adds_policy_to_untouched_builtins(storage) -> None:
     assert kept is not None
     assert kept.config.filters.stars_min == 4.25
     assert kept.config.ranking.relevance_policy == {}
-    assert storage.get_preference("builtins_version") == "14"
+    assert storage.get_preference("builtins_version") == "15"
 
 
 def test_v13_migration_removes_raw_burst_feature_only_from_untouched(storage) -> None:
@@ -605,7 +604,7 @@ def test_v13_migration_removes_raw_burst_feature_only_from_untouched(storage) ->
         modern.ranking.relevance_policy
     )
     assert "require_features_any" not in updated.config.ranking.relevance_policy
-    assert storage.get_preference("builtins_version") == "14"
+    assert storage.get_preference("builtins_version") == "15"
 
     edited = copy.deepcopy(updated.config)
     edited.ranking.relevance_policy = copy.deepcopy(
@@ -658,7 +657,7 @@ def test_v14_migration_rewrites_retired_ids_in_user_presets(storage) -> None:
     policy_targets = migrated.config.ranking.relevance_policy["primary_targets"]
     assert "speed_short_bursts" not in policy_targets
     assert policy_targets.count("burst_control") == 1
-    assert storage.get_preference("builtins_version") == "14"
+    assert storage.get_preference("builtins_version") == "15"
     # Alias table stays consistent with the retirement list.
     assert set(SKILL_ALIASES) == {
         "speed_short_bursts",
@@ -687,3 +686,80 @@ def test_v11_migration_preserves_edited_v10_aim_farm(storage) -> None:
     assert kept is not None
     assert kept.config.filters.stars_min == 4.5
     assert kept.config.discovery.max_requests == 18
+
+
+def test_v15_migration_renames_untouched_mixed_aim_to_aim(storage) -> None:
+    """A v14 database keeps Mixed Aim with the exact pre-v15 body; the v15
+    rename rewrites it in place so no duplicate Aim row appears."""
+    mixed = storage.get_preset_by_name("Aim")
+    assert mixed is not None
+    old_body = presets._apply_relevance_defaults(
+        presets._legacy_mixed_aim_skillset()
+    )
+    storage.update_preset(mixed.id, old_body)
+    storage.set_preference("builtins_version", "14")
+
+    presets.ensure_builtin_presets(storage)
+
+    renamed = storage.get_preset(mixed.id)
+    assert renamed is not None
+    assert renamed.config.name == "Aim"
+    assert renamed.config.ranking.skill_weights == {
+        "aim_classic": 0.60,
+        "aim_control": 0.20,
+        "aim_bursts": 0.20,
+    }
+    assert renamed.config.ranking.relevance_targets == [
+        "aim_classic",
+        "aim_control",
+        "aim_bursts",
+    ]
+    assert storage.get_preset_by_name("Mixed Aim") is None
+    assert storage.get_preference("builtins_version") == "15"
+
+
+def test_v15_rename_keeps_edited_mixed_aim_and_seeds_aim(storage) -> None:
+    mixed = storage.get_preset_by_name("Aim")
+    assert mixed is not None
+    edited = presets._apply_relevance_defaults(
+        presets._legacy_mixed_aim_skillset()
+    )
+    edited.filters.stars_min = 4.2
+    storage.update_preset(mixed.id, edited)
+    storage.set_preference("builtins_version", "14")
+
+    presets.ensure_builtin_presets(storage)
+
+    kept = storage.get_preset_by_name("Mixed Aim")
+    assert kept is not None
+    assert kept.config.filters.stars_min == 4.2
+    fresh = storage.get_preset_by_name("Aim")
+    assert fresh is not None and fresh.id != kept.id
+    assert fresh.config.ranking.skill_weights == {
+        "aim_classic": 0.60,
+        "aim_control": 0.20,
+        "aim_bursts": 0.20,
+    }
+
+
+def test_v15_rename_does_not_run_when_aim_row_already_exists(storage) -> None:
+    mixed = storage.get_preset_by_name("Aim")
+    assert mixed is not None
+    old_body = presets._apply_relevance_defaults(
+        presets._legacy_mixed_aim_skillset()
+    )
+    storage.update_preset(mixed.id, old_body)
+    custom_aim = storage.create_preset(
+        copy.deepcopy(presets.builtin_by_name("Aim")), is_builtin=False
+    )
+    storage.set_preference("builtins_version", "14")
+
+    presets.ensure_builtin_presets(storage)
+
+    # A user preset already owns the name Aim: the untouched Mixed Aim row
+    # is preserved as a hidden legacy row instead of colliding.
+    kept = storage.get_preset_by_name("Mixed Aim")
+    assert kept is not None
+    assert kept.id == mixed.id
+    assert kept.config.name == "Mixed Aim"
+    assert storage.get_preset(custom_aim.id) is not None
