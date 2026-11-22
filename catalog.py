@@ -260,7 +260,7 @@ SKILL_CATEGORIES: tuple[SkillCategory, ...] = (
                 "stamina",
                 "Stamina",
                 "Выносливость пальцев и alternation на длинной дистанции.",
-                ("stamina_finger", "stamina_alt"),
+                ("stamina_finger", "stamina_alt", "stream_endurance"),
             ),
         ),
     ),

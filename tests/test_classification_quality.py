@@ -168,6 +168,7 @@ _STAMINA_MAP: dict = {
     "count_circles": 2200,
     "count_sliders": 200,
     "total_length": 300,
+    "sequence": _sequence(stream_chain_length=24, stream_chain_count=4),
 }
 _PERFECT_MAPS: dict[str, dict] = {
     "Aim": _AIM_MAP,

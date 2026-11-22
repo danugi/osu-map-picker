@@ -409,6 +409,29 @@ _add(
 )
 _add(
     _base(
+        "stream_endurance",
+        "Stream endurance",
+        "streams",
+        "Длительная stream-нагрузка: доля stream-нот, длина самой длинной "
+        "цепочки, число цепочек, их ровность и общая длительность карты. "
+        "Одна короткая stream-серия не должна считаться выносливостью.",
+        {
+            "streams": 0.30,
+            "stream_longest": 0.25,
+            "stream_chain_count": 0.20,
+            "stream_rhythm_quality": 0.10,
+            "length": 0.15,
+        },
+        support="measured",
+        required=("streams",),
+        limitations=(
+            "Нужен .osu; распределение цепочек по карте оценивается косвенно "
+            "через их число и общую длину.",
+        ),
+    )
+)
+_add(
+    _base(
         "stream_burst",
         "Burst streams",
         "streams",

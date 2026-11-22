@@ -113,6 +113,158 @@ def test_build_strategies_flags_and_seeds() -> None:
     assert len(names) == len(set(names))
 
 
+def test_date_filter_is_added_to_api_query_without_losing_text() -> None:
+    filters = Filters(
+        statuses=["ranked"],
+        query="artist=xi",
+        published_after="2020-01-01",
+        published_before="2020-12-31",
+    )
+    strategies = build_strategies(filters, settings())
+    assert strategies
+    assert all(strategy.query and "artist=xi" in strategy.query for strategy in strategies)
+    assert all("ranked>=2020-01-01" in strategy.query for strategy in strategies)
+    assert all("ranked<2021-01-01" in strategy.query for strategy in strategies)
+
+
+def test_date_filter_preserves_title_query_strategies() -> None:
+    filters = Filters(
+        query="",
+        published_date_field="submitted",
+        published_after="2018-01-01",
+    )
+    strategies = build_strategies(
+        filters, settings(title_queries=["Cut Ver"])
+    )
+    title = next(strategy for strategy in strategies if strategy.name.startswith("title:"))
+    assert title.query is not None
+    assert "Cut Ver" in title.query
+    assert "created>=2018-01-01" in title.query
+
+
+def test_ranked_date_window_uses_a_cursor_jump() -> None:
+    filters = Filters(
+        published_after="2020-01-01",
+        published_before="2020-12-31",
+    )
+    strategies = build_strategies(filters, settings())
+    assert strategies
+    window = strategies[0]
+    assert window.name == "date:window"
+    assert window.cursor is not None
+    assert window.cursor["approved_date"] > 0
+    assert window.cursor["id"] == 0
+    params = SearchQuery(cursor=window.cursor).to_params()
+    assert params["cursor[approved_date]"] == window.cursor["approved_date"]
+    assert params["cursor[id]"] == 0
+    # Submitted date has no ranked-sort cursor; it must not silently jump to
+    # an unrelated ranking date.
+    submitted = Filters(
+        published_date_field="submitted",
+        published_after="2020-01-01",
+        published_before="2020-12-31",
+    )
+    assert not any(
+        strategy.cursor
+        for strategy in build_strategies(submitted, settings())
+    )
+
+
+def test_old_map_is_returned_for_historical_query(storage: Storage) -> None:
+    old = make_beatmapset(
+        1,
+        ranked_date="2020-05-05T00:00:00+00:00",
+        submitted_date="2018-01-01T00:00:00+00:00",
+    )
+    seen_queries: list[str] = []
+
+    def responder(query: SearchQuery) -> SearchPage:
+        seen_queries.append(query.query or "")
+        if "ranked>=2020-01-01" in (query.query or ""):
+            return SearchPage(beatmapsets=(old,))
+        return SearchPage(beatmapsets=())
+
+    api = StubApi(responder)
+    filters = Filters(
+        statuses=["ranked"],
+        published_after="2020-01-01",
+        published_before="2020-12-31",
+    )
+    result = DiscoveryEngine(api, storage, settings()).run(
+        filters, RankingSettings()
+    )
+    assert [item.beatmapset.id for item in result.scored] == [1]
+    assert seen_queries
+    assert all("ranked>=2020-01-01" in query for query in seen_queries)
+    assert any(query.cursor for query in api.search_calls)
+
+
+def test_old_map_is_reachable_when_guest_query_parser_ignores_q(
+    storage: Storage,
+) -> None:
+    old = make_beatmapset(
+        2,
+        ranked_date="2020-05-05T00:00:00+00:00",
+        submitted_date="2018-01-01T00:00:00+00:00",
+    )
+
+    def responder(query: SearchQuery) -> SearchPage:
+        # Simulate the guest/API-client path: q is accepted but not parsed;
+        # only the cursor jump changes the page of results.
+        if query.cursor:
+            return SearchPage(beatmapsets=(old,))
+        return SearchPage(beatmapsets=())
+
+    api = StubApi(responder)
+    filters = Filters(
+        statuses=["ranked"],
+        published_after="2020-01-01",
+        published_before="2020-12-31",
+    )
+    result = DiscoveryEngine(api, storage, settings()).run(
+        filters, RankingSettings()
+    )
+    assert [item.beatmapset.id for item in result.scored] == [2]
+
+
+def test_extra_strategies_cover_every_selected_status() -> None:
+    filters = Filters(statuses=["ranked", "loved", "qualified"])
+    strategies = build_strategies(
+        filters,
+        settings(use_oldest=True, use_rating=True),
+    )
+    names = {strategy.name for strategy in strategies}
+    for status in ("ranked", "loved", "qualified"):
+        assert f"{status}:oldest" in names
+        assert f"{status}:rating" in names
+
+
+def test_strategy_budget_guarantees_a_first_page_to_each_strategy(
+    storage: Storage,
+) -> None:
+    api = StubApi(
+        lambda query: SearchPage(beatmapsets=(make_beatmapset(1),))
+    )
+    engine = DiscoveryEngine(
+        api,
+        storage,
+        settings(
+            max_requests=9,
+            max_pages_per_strategy=2,
+            use_oldest=True,
+            use_rating=True,
+        ),
+    )
+    result = engine.run(
+        Filters(statuses=["ranked", "loved", "qualified"]),
+        RankingSettings(),
+    )
+    executed = [run for run in result.strategy_runs if run.executed]
+    assert len(executed) == 9
+    assert all(run.pages == 1 for run in executed)
+    assert result.api_requests == 9
+
+
 def test_text_query_disables_seed_strategies() -> None:
     filters = Filters(statuses=["ranked"], query="crystalia")
     strategies = build_strategies(
@@ -1031,6 +1183,35 @@ def _candidate(
         skillsets=evaluate_skills(traits),
         sequence=sequence,
     )
+
+
+def test_non_standard_mode_never_enters_sequence_analyzer(storage: Storage) -> None:
+    taiko = make_beatmapset(
+        1,
+        beatmaps=(make_beatmap(11, 1, mode="taiko"),),
+    )
+    calls: list[int] = []
+
+    def loader(beatmap_id: int, allow_download: bool) -> SequenceAnalysis:
+        calls.append(beatmap_id)
+        raise AssertionError("taiko must not use the Standard sequence parser")
+
+    streams = presets.builtin_by_name("Streams")
+    assert streams is not None
+    filters = copy.deepcopy(streams.filters)
+    filters.modes = ["taiko"]
+    api = StubApi(lambda query: SearchPage(beatmapsets=(taiko,)))
+    engine = DiscoveryEngine(
+        api,
+        storage,
+        settings(fetch_sequences_limit=20),
+        sequence_loader=loader,
+    )
+    result = engine.run(filters, streams.ranking)
+    assert calls == []
+    assert result.sequence_not_analyzed == 1
+    assert result.count == 0
+    assert any("только osu!standard" in note for note in result.notes)
 
 
 def test_sequence_selection_does_not_take_only_top_general_scores(

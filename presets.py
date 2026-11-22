@@ -588,14 +588,15 @@ def _legacy_streams_config() -> PresetConfig:
 def _stamina() -> PresetConfig:
     cfg = _skill_preset(
         "Stamina",
-        "Выносливость как отдельный навык (streams/stamina на osu!): длинные "
-        "и плотные карты, finger stamina и stream stamina. Длина — мягкое "
-        "предпочтение; stream-часть требует локального .osu, остальное "
-        "остаётся явным прокси.",
+        "Выносливость как отдельный навык (streams/stamina на osu!): "
+        "длительная stream-нагрузка, а не просто плотность или одна короткая "
+        "серия. Основной гейт — stream_endurance по нескольким stream-цепочкам "
+        "и длине карты; прокси stamina остаётся вспомогательным сигналом.",
         {
-            "stamina_finger": 1.0,
-            "stream_long": 0.55,
-            "speed_stamina": 0.45,
+            "stream_endurance": 1.0,
+            "stamina_finger": 0.55,
+            "stream_long": 0.45,
+            "speed_stamina": 0.30,
         },
         comfort_stars=5.2,
         ideal_length=220,
@@ -1077,7 +1078,7 @@ _RELEVANCE_TARGETS: dict[str, tuple[str, ...]] = {
     # 5-9-note tier between doubles and continuous 10+ note streams), so the
     # curated Streams preset covers both evidence kinds.
     "Streams": ("stream_consistency", "stream_long", "burst_control"),
-    "Stamina": ("stamina_finger", "stream_long", "speed_stamina"),
+    "Stamina": ("stream_endurance", "stream_long"),
     "Finger Control": ("finger_control", "alternating", "speed_control"),
     "Reading": ("ar_challenge", "high_ar", "low_ar"),
     "Accuracy": (
@@ -1147,6 +1148,11 @@ _RELEVANCE_POLICIES: dict[str, dict[str, Any]] = {
     "Streams & Stamina": {
         "primary_targets": ["stream_consistency", "stream_long"],
         "require_features_any": ["streams"],
+    },
+    "Stamina": {
+        # Endurance must come from sustained stream structure; the generic
+        # stamina proxy and map density alone are not a strict gate.
+        "primary_targets": ["stream_endurance"],
     },
     "Streams": {
         "primary_targets": [
@@ -1234,6 +1240,23 @@ _PRE_V13_BURSTS_POLICY: dict[str, Any] = {
     "require_features_any": ["bursts"],
 }
 
+_PRE_V17_STAMINA_SKILL_WEIGHTS = {
+    "stamina_finger": 1.0,
+    "stream_long": 0.55,
+    "speed_stamina": 0.45,
+}
+_PRE_V17_STAMINA_TARGETS = (
+    "stamina_finger",
+    "stream_long",
+    "speed_stamina",
+)
+_PRE_V17_STAMINA_DESCRIPTION = (
+    "Выносливость как отдельный навык (streams/stamina на osu!): длинные "
+    "и плотные карты, finger stamina и stream stamina. Длина — мягкое "
+    "предпочтение; stream-часть требует локального .osu, остальное "
+    "остаётся явным прокси."
+)
+
 
 def _apply_relevance_defaults(cfg: PresetConfig) -> PresetConfig:
     """Attach a preset's own targets and gate policy after its builder."""
@@ -1296,7 +1319,7 @@ _PRE_V11_FINGERPRINTS = {
     ),
 }
 
-BUILTIN_PRESETS_VERSION = 16
+BUILTIN_PRESETS_VERSION = 17
 _V2_NEW_NAMES = frozenset(
     {
         "Speed",
@@ -1382,6 +1405,8 @@ def _preset_fingerprint(cfg: PresetConfig) -> str:
     for key in ("include_languages", "exclude_languages"):
         if not filters.get(key):
             filters.pop(key, None)
+    if filters.get("published_date_field") == "ranked":
+        filters.pop("published_date_field", None)
     raw = json.dumps(
         data, sort_keys=True, ensure_ascii=False, separators=(",", ":")
     ).encode("utf-8")
@@ -1737,18 +1762,45 @@ def _upgrade_v16_definitions(storage: Any) -> int:
                 changed += 1
     stamina_row = storage.get_preset_by_name("Stamina")
     stamina_modern = builtin_by_name("Stamina")
-    # A promoted legacy row must not silently lose its gate: the pre-v8
-    # stored shape has empty relevance_targets.
+    # A promoted legacy row must not silently lose its gate. Compare against
+    # the pre-v16 shape, not the current builder (which v17 changes again).
+    stamina_v16 = copy.deepcopy(_stamina())
+    stamina_v16.description = _PRE_V17_STAMINA_DESCRIPTION
+    stamina_v16.ranking.skill_weights = dict(_PRE_V17_STAMINA_SKILL_WEIGHTS)
+    stamina_v16.ranking.relevance_targets = []
+    stamina_v16.ranking.relevance_policy = {}
     if (
         stamina_row is not None
         and stamina_row.is_builtin
         and stamina_modern is not None
         and not _matches_legacy(stamina_row.config, stamina_modern)
-        and _matches_legacy(stamina_row.config, _stamina())
+        and _matches_legacy(stamina_row.config, stamina_v16)
     ):
         storage.update_preset(stamina_row.id, stamina_modern)
         changed += 1
     return changed
+
+
+def _upgrade_v17_definitions(storage: Any) -> int:
+    """Make untouched Stamina rows require sustained stream endurance."""
+
+    stamina_row = storage.get_preset_by_name("Stamina")
+    modern = builtin_by_name("Stamina")
+    if (
+        stamina_row is None
+        or not stamina_row.is_builtin
+        or modern is None
+    ):
+        return 0
+    before = copy.deepcopy(modern)
+    before.description = _PRE_V17_STAMINA_DESCRIPTION
+    before.ranking.skill_weights = dict(_PRE_V17_STAMINA_SKILL_WEIGHTS)
+    before.ranking.relevance_targets = list(_PRE_V17_STAMINA_TARGETS)
+    before.ranking.relevance_policy = {}
+    if not _matches_legacy(stamina_row.config, before):
+        return 0
+    storage.update_preset(stamina_row.id, modern)
+    return 1
 
 
 def ensure_builtin_presets(storage: Any) -> int:
@@ -1817,6 +1869,8 @@ def ensure_builtin_presets(storage: Any) -> int:
     if version < 16:
         _upgrade_v16_definitions(storage)
         new_names.update(_V16_NEW_NAMES)
+    if version < 17:
+        _upgrade_v17_definitions(storage)
 
     for preset in builtin_presets():
         if preset.name not in new_names:

@@ -403,6 +403,10 @@ class Filters:
     cs_max: float | None = None
     hp_min: float | None = None
     hp_max: float | None = None
+    # Which date the published_after/published_before range applies to.
+    # "ranked" and "submitted" are deliberately never mixed or used as
+    # fallbacks: a submitted date is not evidence of a ranking date.
+    published_date_field: str = "ranked"
     published_after: str | None = None
     published_before: str | None = None
     include_artists: list[str] = field(default_factory=list)
@@ -445,7 +449,12 @@ class Filters:
                             "duration_max", "bpm_min", "bpm_max", "ar_min", "ar_max",
                             "od_min", "od_max", "cs_min", "cs_max", "hp_min", "hp_max"}:
                 kwargs[f.name] = _opt_float(value, p)
-            elif f.name in {"star_mode", "duration_field", "query"}:
+            elif f.name in {
+                "star_mode",
+                "duration_field",
+                "query",
+                "published_date_field",
+            }:
                 if value is None:
                     kwargs[f.name] = ""
                 elif not isinstance(value, str):

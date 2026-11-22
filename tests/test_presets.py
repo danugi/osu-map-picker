@@ -127,9 +127,10 @@ def test_stamina_is_a_standalone_profile() -> None:
     preset = presets.builtin_by_name("Stamina")
     assert preset is not None
     assert preset.ranking.skill_weights == {
-        "stamina_finger": 1.0,
-        "stream_long": 0.55,
-        "speed_stamina": 0.45,
+        "stream_endurance": 1.0,
+        "stamina_finger": 0.55,
+        "stream_long": 0.45,
+        "speed_stamina": 0.30,
     }
     assert preset.filters.duration_max == 360
     assert preset.ranking.factors["length"].weight == 0.4

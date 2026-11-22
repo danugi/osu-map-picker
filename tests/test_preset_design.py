@@ -346,7 +346,7 @@ def test_v10_migration_upgrades_untouched_aim_farm(storage: Storage) -> None:
         "Sped Up",
     ]
     assert upgraded.config.ranking.relevance_targets == ["aim_classic"]
-    assert presets.BUILTIN_PRESETS_VERSION == 16
+    assert presets.BUILTIN_PRESETS_VERSION == 17
 
 
 def test_v10_migration_preserves_edited_builtin_and_user_data(
@@ -533,11 +533,11 @@ def test_v11_migration_updates_untouched_v10_aim_farm_limits(storage) -> None:
 
     updated = storage.get_preset(farm.id)
     assert updated is not None
-    assert presets.BUILTIN_PRESETS_VERSION == 16
+    assert presets.BUILTIN_PRESETS_VERSION == 17
     assert updated.config.discovery.max_requests == 56
     assert updated.config.discovery.max_pages_per_strategy == 3
     assert updated.config.discovery.fetch_attributes_limit == 40
-    assert storage.get_preference("builtins_version") == "16"
+    assert storage.get_preference("builtins_version") == "17"
 
 
 def test_v12_migration_adds_policy_to_untouched_builtins(storage) -> None:
@@ -584,7 +584,7 @@ def test_v12_migration_adds_policy_to_untouched_builtins(storage) -> None:
     assert kept is not None
     assert kept.config.filters.stars_min == 4.25
     assert kept.config.ranking.relevance_policy == {}
-    assert storage.get_preference("builtins_version") == "16"
+    assert storage.get_preference("builtins_version") == "17"
 
 
 def test_v13_migration_removes_raw_burst_feature_only_from_untouched(storage) -> None:
@@ -608,7 +608,7 @@ def test_v13_migration_removes_raw_burst_feature_only_from_untouched(storage) ->
         modern.ranking.relevance_policy
     )
     assert "require_features_any" not in updated.config.ranking.relevance_policy
-    assert storage.get_preference("builtins_version") == "16"
+    assert storage.get_preference("builtins_version") == "17"
 
     edited = copy.deepcopy(updated.config)
     edited.ranking.relevance_policy = copy.deepcopy(
@@ -661,7 +661,7 @@ def test_v14_migration_rewrites_retired_ids_in_user_presets(storage) -> None:
     policy_targets = migrated.config.ranking.relevance_policy["primary_targets"]
     assert "speed_short_bursts" not in policy_targets
     assert policy_targets.count("burst_control") == 1
-    assert storage.get_preference("builtins_version") == "16"
+    assert storage.get_preference("builtins_version") == "17"
     # Alias table stays consistent with the retirement list.
     assert set(SKILL_ALIASES) == {
         "speed_short_bursts",
@@ -719,7 +719,7 @@ def test_v15_migration_renames_untouched_mixed_aim_to_aim(storage) -> None:
         "aim_bursts",
     ]
     assert storage.get_preset_by_name("Mixed Aim") is None
-    assert storage.get_preference("builtins_version") == "16"
+    assert storage.get_preference("builtins_version") == "17"
 
 
 def test_v15_rename_keeps_edited_mixed_aim_and_seeds_aim(storage) -> None:
@@ -799,7 +799,7 @@ def test_v16_migration_merges_bursts_into_untouched_legacy_streams(storage) -> N
         "streams",
         "bursts",
     ]
-    assert storage.get_preference("builtins_version") == "16"
+    assert storage.get_preference("builtins_version") == "17"
 
 
 def test_v16_migration_upgrades_streams_row_with_legacy_targets(storage) -> None:
@@ -851,8 +851,11 @@ def test_v16_migration_restores_the_stamina_gate(storage) -> None:
     seeded = storage.get_preset_by_name("Stamina")
     assert seeded is not None
     storage.delete_preset(seeded.id)
-    legacy = presets._stamina()
-    assert legacy.ranking.relevance_targets == []
+    legacy = copy.deepcopy(presets._stamina())
+    legacy.description = presets._PRE_V17_STAMINA_DESCRIPTION
+    legacy.ranking.skill_weights = dict(presets._PRE_V17_STAMINA_SKILL_WEIGHTS)
+    legacy.ranking.relevance_targets = []
+    legacy.ranking.relevance_policy = {}
     row = storage.create_preset(copy.deepcopy(legacy), is_builtin=True)
     storage.set_preference("builtins_version", "15")
 
@@ -861,10 +864,43 @@ def test_v16_migration_restores_the_stamina_gate(storage) -> None:
     upgraded = storage.get_preset(row.id)
     assert upgraded is not None
     assert upgraded.config.ranking.relevance_targets == [
-        "stamina_finger",
+        "stream_endurance",
         "stream_long",
-        "speed_stamina",
     ]
+
+
+def test_v17_migration_adds_stream_endurance_only_to_untouched(storage) -> None:
+    stamina = storage.get_preset_by_name("Stamina")
+    assert stamina is not None
+    old = copy.deepcopy(stamina.config)
+    old.description = presets._PRE_V17_STAMINA_DESCRIPTION
+    old.ranking.skill_weights = dict(presets._PRE_V17_STAMINA_SKILL_WEIGHTS)
+    old.ranking.relevance_targets = list(presets._PRE_V17_STAMINA_TARGETS)
+    old.ranking.relevance_policy = {}
+    storage.update_preset(stamina.id, old)
+    storage.set_preference("builtins_version", "16")
+
+    presets.ensure_builtin_presets(storage)
+
+    upgraded = storage.get_preset(stamina.id)
+    assert upgraded is not None
+    assert "stream_endurance" in upgraded.config.ranking.skill_weights
+    assert upgraded.config.ranking.relevance_targets == [
+        "stream_endurance",
+        "stream_long",
+    ]
+
+    edited = copy.deepcopy(old)
+    edited.filters.duration_max = 250
+    storage.update_preset(stamina.id, edited)
+    storage.set_preference("builtins_version", "16")
+    presets.ensure_builtin_presets(storage)
+    kept = storage.get_preset(stamina.id)
+    assert kept is not None
+    assert kept.config.filters.duration_max == 250
+    assert kept.config.ranking.relevance_targets == list(
+        presets._PRE_V17_STAMINA_TARGETS
+    )
 
 
 def test_v16_retired_rows_stay_hidden_but_resolvable(storage) -> None:

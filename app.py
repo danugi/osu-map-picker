@@ -1175,6 +1175,21 @@ def page_filters(cfg: PresetConfig) -> None:
             "Признаки навыков и комфорт спроектированы для osu!standard; "
             "другие режимы не получают фиктивных skillset-оценок."
         )
+        if mode != "osu" and any(
+            target in {
+                "stream_consistency",
+                "stream_long",
+                "stream_endurance",
+                "burst_control",
+            }
+            for target in cfg.ranking.relevance_targets
+        ):
+            st.warning(
+                "Этот пресет требует sequence-доказательств из .osu, которые "
+                "поддерживаются только для osu!standard. API-поиск в другом "
+                "режиме останется доступным, но карты не получат подтверждения "
+                "паттерна."
+            )
     with top[1]:
         statuses = st.multiselect(
             "Статусы",
@@ -1308,6 +1323,17 @@ def page_filters(cfg: PresetConfig) -> None:
         )
 
     with st.expander("Даты публикации", expanded=False):
+        filters.published_date_field = st.radio(
+            "Смысл даты",
+            options=["ranked", "submitted"],
+            index=1 if filters.published_date_field == "submitted" else 0,
+            format_func=lambda value: (
+                "Дата рейтинга" if value == "ranked" else "Дата сабмита"
+            ),
+            horizontal=True,
+            key=_ck("flt_date_field"),
+            help="Рейтинг и сабмит — разные даты; одна не подменяет другую.",
+        )
         after_on = st.checkbox(
             "Не раньше даты",
             value=bool(filters.published_after),
@@ -1315,7 +1341,7 @@ def page_filters(cfg: PresetConfig) -> None:
         )
         if after_on:
             value = st.date_input(
-                "Опубликована не раньше",
+                "Дата не раньше",
                 value=_parse_date(filters.published_after) or date(2015, 1, 1),
                 key=_ck("flt_after_date"),
             )
@@ -1329,7 +1355,7 @@ def page_filters(cfg: PresetConfig) -> None:
         )
         if before_on:
             value = st.date_input(
-                "Опубликована не позже",
+                "Дата не позже",
                 value=_parse_date(filters.published_before) or date.today(),
                 key=_ck("flt_before_date"),
             )

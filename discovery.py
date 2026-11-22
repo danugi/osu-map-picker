@@ -15,6 +15,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, replace
+from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from typing import Any, Callable, Iterable
 
 import analysis as analysis_store
@@ -22,7 +23,12 @@ import config
 import evidence
 import patterns
 from feedback import VERDICT_PREFERENCE, build_taste_profile
-from filters import UserFilterData, apply_filters, validate_filters
+from filters import (
+    UserFilterData,
+    api_date_expression,
+    apply_filters,
+    validate_filters,
+)
 from features import derive_features
 from models import (
     AnalysisEvidence,
@@ -118,6 +124,44 @@ class SearchStrategy:
     sort: str
     query: str | None = None
     mode: str = "osu"
+    cursor: dict[str, Any] | None = None
+
+
+def _combine_query(*parts: str | None) -> str | None:
+    """Join search clauses without destroying quoted/operator expressions."""
+
+    cleaned = [part.strip() for part in parts if part and part.strip()]
+    return " ".join(cleaned) or None
+
+
+def _date_window_cursor(filters: Filters) -> dict[str, Any] | None:
+    """Build a ranked-date cursor for an historical upper bound.
+
+    osu!'s guest/API-client search path does not reliably parse the advanced
+    ``q`` grammar. The cursor format is part of the documented pagination
+    contract, and a ranked-desc cursor positioned at the upper boundary jumps
+    directly to maps older than that boundary without walking thousands of
+    recent pages. The local date filter still enforces both ends of the range.
+    """
+
+    if filters.published_date_field != "ranked":
+        return None
+    if not (filters.published_after or filters.published_before):
+        return None
+    upper = filters.published_before or date.today().isoformat()
+    try:
+        boundary = date.fromisoformat(upper) + timedelta(days=1)
+    except ValueError:
+        return None
+    timestamp_ms = int(
+        datetime.combine(
+            boundary,
+            datetime_time.min,
+            tzinfo=timezone.utc,
+        ).timestamp()
+        * 1000
+    )
+    return {"approved_date": timestamp_ms, "id": 0}
 
 
 def _status_priority(statuses: list[str]) -> str:
@@ -136,26 +180,61 @@ def build_strategies(
     statuses = list(dict.fromkeys(filters.statuses))
     modes = list(dict.fromkeys(filters.modes)) or ["osu"]
     primary = _status_priority(statuses)
-    base_query = filters.query.strip() or None
+    date_query = api_date_expression(filters)
+    date_cursor = _date_window_cursor(filters)
+    base_query = _combine_query(filters.query, date_query)
     strategies: list[SearchStrategy] = []
-    seen_keys: set[tuple[str, str, str, str | None]] = set()
+    seen_keys: set[tuple[Any, ...]] = set()
 
-    def add(name: str, status: str, sort: str, query: str | None, mode: str = "osu") -> None:
+    def add(
+        name: str,
+        status: str,
+        sort: str,
+        query: str | None,
+        mode: str = "osu",
+        cursor: dict[str, Any] | None = None,
+    ) -> None:
         # Two differently named strategies with the same request would spend
         # the budget twice and return the same candidates.
-        key = (mode, status, sort, query)
+        key = (
+            mode,
+            status,
+            sort,
+            query,
+            json.dumps(cursor, sort_keys=True) if cursor else None,
+        )
         if key in seen_keys:
             return
         seen_keys.add(key)
-        strategies.append(SearchStrategy(name, status, sort, query, mode))
+        strategies.append(SearchStrategy(name, status, sort, query, mode, cursor))
 
-    def add_for_mode(mode: str, name: str, status: str, sort: str, query: str | None) -> None:
+    def add_for_mode(
+        mode: str,
+        name: str,
+        status: str,
+        sort: str,
+        query: str | None,
+        cursor: dict[str, Any] | None = None,
+    ) -> None:
         # A multi-mode filter must not silently search only the first mode:
         # local filtering accepts every mode in filters.modes. Single-mode
         # runs keep the historical strategy names.
         prefix = f"{mode}:" if len(modes) > 1 else ""
-        add(f"{prefix}{name}", status, sort, query, mode)
+        add(f"{prefix}{name}", status, sort, query, mode, cursor)
 
+    if date_cursor:
+        # Run the cursor jump before broad recent passes: it is the only
+        # request that can reach an old ranked-date window without walking
+        # every newer page when the advanced q parser is unavailable.
+        for mode in modes:
+            add_for_mode(
+                mode,
+                "date:window",
+                primary,
+                "ranked_desc",
+                base_query,
+                cursor=date_cursor,
+            )
     for index, status in enumerate(statuses):
         for mode in modes:
             add_for_mode(mode, f"{status}:recent", status, "ranked_desc", base_query)
@@ -163,21 +242,59 @@ def build_strategies(
             # primary status, before secondary statuses and optional oldest/rating/
             # favourites directions. A tight page budget must not silently skip
             # them because of strategy ordering.
-            if index == 0 and settings.title_queries and not base_query:
+            if (
+                index == 0
+                and settings.title_queries
+                and not filters.query.strip()
+            ):
                 for query in list(dict.fromkeys(
                     text.strip() for text in settings.title_queries if text.strip()
                 ))[:6]:
-                    add_for_mode(mode, f"title:{query}", primary, "ranked_desc", query)
-    for mode in modes:
-        if settings.use_oldest:
-            add_for_mode(mode, f"{primary}:oldest", primary, "ranked_asc", base_query)
-        if settings.use_rating:
-            add_for_mode(mode, f"{primary}:rating", primary, "rating_desc", base_query)
-        if settings.use_popular:
-            add_for_mode(mode, f"{primary}:favourites", primary, "favourites_desc", base_query)
-    if settings.expand_seeds and not base_query:
+                    add_for_mode(
+                        mode,
+                        f"title:{query}",
+                        primary,
+                        "ranked_desc",
+                        _combine_query(query, date_query),
+                    )
+    # Historical/extra directions are useful for every selected status, not
+    # only the primary one. The scheduler gives every strategy a fair first
+    # page, so adding them does not starve the recent-status passes.
+    for status in statuses:
+        for mode in modes:
+            if settings.use_oldest:
+                add_for_mode(
+                    mode,
+                    f"{status}:oldest",
+                    status,
+                    "ranked_asc",
+                    base_query,
+                )
+            if settings.use_rating:
+                add_for_mode(
+                    mode,
+                    f"{status}:rating",
+                    status,
+                    "rating_desc",
+                    base_query,
+                )
+            if settings.use_popular:
+                add_for_mode(
+                    mode,
+                    f"{status}:favourites",
+                    status,
+                    "favourites_desc",
+                    base_query,
+                )
+    if settings.expand_seeds and not filters.query.strip():
         for seed in list(dict.fromkeys(s.strip() for s in seeds if s.strip()))[:3]:
-            add_for_mode(primary, f"seed:{seed}", primary, "ranked_desc", seed)
+            add_for_mode(
+                primary,
+                f"seed:{seed}",
+                primary,
+                "ranked_desc",
+                _combine_query(seed, date_query),
+            )
     return strategies
 
 
@@ -812,7 +929,33 @@ class DiscoveryEngine:
                 SequenceStats(required=False),
             )
 
-        fair = self._fair_sequence_order(candidates, ctx)
+        # The local analyzer is osu!standard-only. Other modes keep ordinary
+        # API search/filter/ranking, but their sequence evidence must remain
+        # explicitly unknown rather than being sent through a Standard parser.
+        sequence_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.beatmap.mode == "osu"
+        ]
+        unsupported = [
+            candidate
+            for candidate in candidates
+            if candidate.beatmap.mode != "osu"
+        ]
+        for candidate in unsupported:
+            evidence_by_id[candidate.beatmap.id] = AnalysisEvidence(
+                beatmap_id=candidate.beatmap.id,
+                status=evidence.NOT_ANALYZED,
+                scope="unsupported_mode",
+            )
+        if unsupported:
+            notes.append(
+                "Sequence-анализ .osu поддерживает только osu!standard; "
+                f"{len(unsupported)} карт(ы) других режимов остались "
+                "без sequence-доказательств."
+            )
+
+        fair = self._fair_sequence_order(sequence_candidates, ctx)
         updated: dict[int, Candidate] = {}
         attempted: set[int] = set()
         downloads = 0
@@ -836,7 +979,7 @@ class DiscoveryEngine:
         # sample. Reuse does not consume the budget for downloading/parsing new
         # .osu files; otherwise a catalog with >limit saved analyses would only
         # expose the first limit entries to relevance gating.
-        for candidate in candidates:
+        for candidate in sequence_candidates:
             cached_item = evidence_by_id.get(candidate.beatmap.id)
             if cached_item is not None and cached_item.usable:
                 store(candidate, cached_item)
@@ -1174,6 +1317,29 @@ class DiscoveryEngine:
         )
 
         strategies = build_strategies(filters, self.settings, seeds)
+        pages_per_strategy = min(
+            max(1, int(self.settings.max_pages_per_strategy)),
+            max(1, page_budget // max(1, len(strategies))),
+        )
+        if strategies and pages_per_strategy < int(
+            self.settings.max_pages_per_strategy
+        ):
+            notes.append(
+                f"Стратегий {len(strategies)}, бюджет страниц {page_budget}: "
+                f"каждой гарантируется до {pages_per_strategy} страниц(ы), "
+                "чтобы ранние направления не исчерпали бюджет."
+            )
+        strategy_page_limits = {
+            strategy.name: (
+                # The date-window cursor is the only reliable deep-historical
+                # pass; give it enough pages to expose more than one page of
+                # the selected period while the outer request cap still holds.
+                max(pages_per_strategy, min(3, int(self.settings.max_pages_per_strategy)))
+                if "date:window" in strategy.name
+                else pages_per_strategy
+            )
+            for strategy in strategies
+        }
         if strategies and strategy_offset:
             offset = int(strategy_offset) % len(strategies)
             if offset:
@@ -1201,6 +1367,7 @@ class DiscoveryEngine:
                 nsfw=not filters.exclude_nsfw,
                 genre=genre,
                 language=language,
+                cursor=strategy.cursor,
             )
 
         strategy_stats: dict[str, dict[str, Any]] = {
@@ -1308,13 +1475,16 @@ class DiscoveryEngine:
                     if strategy.name not in sources[beatmapset.id]:
                         sources[beatmapset.id].append(strategy.name)
                 pages += 1
-                if pages >= self.settings.max_pages_per_strategy:
+                page_limit = strategy_page_limits.get(
+                    strategy.name, pages_per_strategy
+                )
+                if pages >= page_limit:
                     if page.has_more:
                         mark_incomplete("page_limit")
                         stats["stop_reason"] = "page_limit"
                         notes.append(
                             f"{strategy.name}: остановлено на "
-                            f"{self.settings.max_pages_per_strategy} страницах."
+                            f"{page_limit} страницах."
                         )
                         if stats["total"]:
                             notes.append(
@@ -1355,6 +1525,17 @@ class DiscoveryEngine:
         for name, stats in strategy_stats.items():
             if not stats["executed"] and not stats["stop_reason"]:
                 stats["stop_reason"] = "not_attempted"
+        skipped_strategies = [
+            name
+            for name, stats in strategy_stats.items()
+            if not stats["executed"]
+        ]
+        if skipped_strategies:
+            notes.append(
+                "Не выполнены из-за бюджета/дедлайна: "
+                + ", ".join(skipped_strategies[:6])
+                + ("…" if len(skipped_strategies) > 6 else ".")
+            )
         strategy_runs = tuple(
             StrategyRunStats(**stats) for stats in strategy_stats.values()
         )

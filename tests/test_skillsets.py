@@ -3,8 +3,9 @@ from __future__ import annotations
 import pytest
 from conftest import make_beatmap, make_beatmapset
 
+import patterns
 from features import derive_features
-from models import BeatmapFeatures
+from models import BeatmapFeatures, PatternChain, SequenceAnalysis
 from skillsets import (
     FAMILY_ORDER,
     SKILLS,
@@ -92,8 +93,51 @@ def test_stream_and_burst_scores_are_independent() -> None:
     assert burst_only["stream_long"].score == 0.0
 
 
+def _endurance_traits(chain_count: int, chain_length: int = 24) -> BeatmapFeatures:
+    chains = tuple(
+        PatternChain(
+            kind="stream",
+            start_index=index * chain_length,
+            length=chain_length,
+            start_ms=1000 + index * 1000,
+            end_ms=1000 + index * 1000 + 1000,
+            median_gap_ms=125.0,
+            rhythm_quality=1.0,
+            compact_share=1.0,
+        )
+        for index in range(chain_count)
+    )
+    sequence = SequenceAnalysis(
+        stream_chains=chains,
+        analyzed_notes=480,
+        total_notes=480,
+    )
+    scores = patterns.sequence_features(sequence)
+    scores["length"] = 0.4
+    return BeatmapFeatures(
+        scores=scores,
+        sources={key: "osu_sequence" for key in scores},
+    )
+
+
+def test_stream_endurance_distinguishes_sustained_from_isolated_streams() -> None:
+    sustained = evaluate_skills(_endurance_traits(4))["stream_endurance"]
+    isolated = evaluate_skills(_endurance_traits(1))["stream_endurance"]
+    assert sustained.score is not None and sustained.score > 0.55
+    assert isolated.score is not None and isolated.score < 0.55
+
+
+def test_stream_endurance_requires_measured_streams() -> None:
+    generic = BeatmapFeatures(
+        scores={"density": 0.9, "length": 0.9},
+        sources={"density": "beatmap_counts", "length": "beatmap_duration"},
+    )
+    assert evaluate_skills(generic)["stream_endurance"].score is None
+    assert evaluate_skills(BeatmapFeatures())["stream_endurance"].score is None
+
+
 def test_catalog_covers_required_families_and_compact_aim_taxonomy() -> None:
-    assert len(SKILL_DEFINITIONS) == 72
+    assert len(SKILL_DEFINITIONS) == 73
     assert tuple(skills_by_family("aim")) and len(skills_by_family("aim")) == 6
     assert {item.id for item in skills_by_family("aim")} == {
         "aim_classic",

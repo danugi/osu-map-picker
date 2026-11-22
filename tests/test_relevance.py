@@ -256,7 +256,8 @@ def test_specialized_presets_use_their_own_weighted_targets() -> None:
     # osu! streams tag group: bursts are part of the curated Streams preset.
     assert "stream_consistency" in target_sets["Streams"]
     assert "burst_control" in target_sets["Streams"]
-    assert "stamina_finger" in target_sets["Stamina"]
+    assert "stream_endurance" in target_sets["Stamina"]
+    assert "stamina_finger" not in target_sets["Stamina"]
     assert "burst_control" not in target_sets["Stamina"]
     assert "finger_control" in target_sets["Finger Control"]
     assert "speed_high_bpm" in target_sets["Speed"]

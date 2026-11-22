@@ -10,10 +10,11 @@ reported as ``unknown_fields`` / in Diagnostics.
 
 from __future__ import annotations
 
+import calendar
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from functools import lru_cache
 
 from models import (
@@ -70,11 +71,16 @@ def _norm(value: str) -> str:
 
 _TEXT_FIELDS = ("artist", "creator", "mapper", "title")
 _DATE_FIELDS = ("from", "to")
+_DATE_NAME = r"(ranked|submitted|created)"
+_DATE_TEXT = r"(\d{4}-\d{2}(?:-\d{2})?)"
+_DATE_OP = re.compile(
+    rf"^{_DATE_NAME}(<=|>=|<|>|=){_DATE_TEXT}$"
+)
 _NUMERIC_FIELDS = ("stars", "ar", "od", "cs", "hp", "bpm", "length")
 _NUMERIC_OP = re.compile(
     r"^(stars|ar|od|cs|hp|bpm|length)(<=|>=|<|>|=)(\d+(?:\.\d+)?)$"
 )
-_DATE_VALUE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_DATE_VALUE = re.compile(r"^\d{4}-\d{2}(?:-\d{2})?$")
 
 
 @dataclass(frozen=True)
@@ -88,6 +94,7 @@ class ParsedQuery:
     negated_fields: tuple[tuple[str, str], ...] = ()
     numbers: tuple[tuple[str, str, float], ...] = ()
     dates: tuple[tuple[str, str], ...] = ()
+    date_conditions: tuple[tuple[str, str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -138,6 +145,7 @@ def parse_query(query: str) -> ParsedQuery:
     negated_fields: list[tuple[str, str]] = []
     numbers: list[tuple[str, str, float]] = []
     dates: list[tuple[str, str]] = []
+    date_conditions: list[tuple[str, str, str]] = []
 
     for token in _tokenize(query):
         raw = token.text
@@ -148,6 +156,12 @@ def parse_query(query: str) -> ParsedQuery:
             if not phrase:
                 continue
             (negations if token.negated else phrases).append(phrase.casefold())
+            continue
+        date_match = _DATE_OP.match(raw)
+        if date_match and not token.negated:
+            date_conditions.append(
+                (date_match.group(1), date_match.group(2), date_match.group(3))
+            )
             continue
         op_match = _NUMERIC_OP.match(raw)
         if op_match and not token.negated:
@@ -190,10 +204,28 @@ def parse_query(query: str) -> ParsedQuery:
         negated_fields=tuple(negated_fields),
         numbers=tuple(numbers),
         dates=tuple(dates),
+        date_conditions=tuple(date_conditions),
     )
 
 
-def _query_text_reason(parsed: ParsedQuery, beatmapset: Beatmapset) -> str | None:
+def _normalize_query_date(value: str, operator: str) -> str:
+    """Expand a YYYY-MM operand to the inclusive bound implied by operator."""
+
+    if len(value) != 7:
+        return value
+    year, month = (int(part) for part in value.split("-"))
+    if operator in {">=", "<"}:
+        return f"{year:04d}-{month:02d}-01"
+    last_day = calendar.monthrange(year, month)[1]
+    return f"{year:04d}-{month:02d}-{last_day:02d}"
+
+
+def _query_text_reason(
+    parsed: ParsedQuery,
+    beatmapset: Beatmapset,
+    *,
+    published_date_field: str = "ranked",
+) -> str | None:
     """Set-level query conditions (text and dates). None means it passes."""
     # Fields are joined with a character that cannot occur in the data, so a
     # phrase can never match across two different fields (e.g. the end of the
@@ -225,13 +257,36 @@ def _query_text_reason(parsed: ParsedQuery, beatmapset: Beatmapset) -> str | Non
         if value in field_hays.get(key, ""):
             return f"совпадает с исключаемым «{key}={value}»"
     for key, value in parsed.dates:
-        published = _published_date(beatmapset)
-        if published is None:
+        actual = _published_date(beatmapset, published_date_field)
+        if actual is None:
             return "дата публикации неизвестна"
-        if key == "from" and published < value:
+        bound = _normalize_query_date(
+            value, ">=" if key == "from" else "<="
+        )
+        if key == "from" and actual < bound:
             return "опубликована раньше даты запроса"
-        if key == "to" and published > value:
+        if key == "to" and actual > bound:
             return "опубликована позже даты запроса"
+    for field_name, operator, value in parsed.date_conditions:
+        value = _normalize_query_date(value, operator)
+        actual = _published_date(beatmapset, field_name)
+        if actual is None:
+            label = (
+                "сабмита"
+                if field_name in {"submitted", "created"}
+                else "рейтинга"
+            )
+            return f"дата {label} неизвестна"
+        if operator == ">=" and actual < value:
+            return "дата запроса не выполнена"
+        if operator == ">" and actual <= value:
+            return "дата запроса не выполнена"
+        if operator == "<=" and actual > value:
+            return "дата запроса не выполнена"
+        if operator == "<" and actual >= value:
+            return "дата запроса не выполнена"
+        if operator == "=" and actual != value:
+            return "дата запроса не выполнена"
     return None
 
 
@@ -350,6 +405,10 @@ def validate_filters(filters: Filters) -> None:
             minimum=0,
             maximum=11,
         )
+    if filters.published_date_field not in {"ranked", "submitted"}:
+        raise FilterConfigError(
+            "published_date_field должен быть ranked или submitted"
+        )
     _check_date(filters.published_after, "published_after")
     _check_date(filters.published_before, "published_before")
     if (
@@ -384,13 +443,44 @@ def _matches_any(value: str, needles: list[str]) -> bool:
     return any(_norm(needle) in haystack for needle in needles if _norm(needle))
 
 
-def _published_date(beatmapset: Beatmapset) -> str | None:
-    raw = beatmapset.ranked_date or beatmapset.submitted_date
+def _published_date(
+    beatmapset: Beatmapset,
+    field_name: str = "ranked",
+) -> str | None:
+    raw = (
+        beatmapset.submitted_date
+        if field_name in {"submitted", "created"}
+        else beatmapset.ranked_date
+    )
     if not raw:
         return None
-    if len(raw) >= 10:
-        return raw[:10]
-    return raw
+    return raw[:10] if len(raw) >= 10 else raw
+
+
+def api_date_expression(filters: "Filters") -> str | None:
+    """Build the osu! search date clause for the selected date meaning.
+
+    The website/API grammar compares date fields inclusively with ``>=`` and
+    exclusively with ``<``. The UI's upper bound is inclusive, so it becomes
+    ``field<next_day``.
+    """
+
+    # osu!'s advanced-search grammar names the submission timestamp
+    # ``created`` (mapped to Elasticsearch submit_date). It also accepts
+    # ``submitted`` as an alias; emit the canonical key.
+    field_name = (
+        "created" if filters.published_date_field == "submitted" else "ranked"
+    )
+    parts: list[str] = []
+    if filters.published_after:
+        parts.append(f"{field_name}>={filters.published_after}")
+    if filters.published_before:
+        try:
+            next_day = date.fromisoformat(filters.published_before) + timedelta(days=1)
+        except ValueError:
+            return None
+        parts.append(f"{field_name}<{next_day.isoformat()}")
+    return " ".join(parts) or None
 
 
 def _star_range(filters: Filters) -> tuple[float | None, float | None]:
@@ -541,18 +631,27 @@ def apply_filters(
 
     parsed_query = parse_query(filters.query) if filters.query else None
     if parsed_query is not None:
-        text_reason = _query_text_reason(parsed_query, beatmapset)
+        text_reason = _query_text_reason(
+            parsed_query,
+            beatmapset,
+            published_date_field=filters.published_date_field,
+        )
         if text_reason:
             return FilterDecision(False, text_reason)
 
     if filters.published_after or filters.published_before:
-        published = _published_date(beatmapset)
+        date_label = (
+            "сабмита"
+            if filters.published_date_field == "submitted"
+            else "рейтинга"
+        )
+        published = _published_date(beatmapset, filters.published_date_field)
         if published is None:
-            return FilterDecision(False, "дата публикации неизвестна")
+            return FilterDecision(False, f"дата {date_label} неизвестна")
         if filters.published_after and published < filters.published_after:
-            return FilterDecision(False, "опубликована раньше выбранной даты")
+            return FilterDecision(False, f"дата {date_label} раньше выбранной")
         if filters.published_before and published > filters.published_before:
-            return FilterDecision(False, "опубликована позже выбранной даты")
+            return FilterDecision(False, f"дата {date_label} позже выбранной")
 
     difficulties = [b for b in beatmapset.beatmaps if b.mode in filters.modes]
     if not difficulties:
@@ -632,8 +731,10 @@ def active_filter_summary(filters: Filters) -> list[str]:
             f"BPM: {filters.bpm_min or '—'}..{filters.bpm_max or '—'}"
         )
     if filters.published_after or filters.published_before:
+        label = "сабмита" if filters.published_date_field == "submitted" else "рейтинга"
         lines.append(
-            f"Дата: {filters.published_after or '—'}..{filters.published_before or '—'}"
+            f"Дата {label}: "
+            f"{filters.published_after or '—'}..{filters.published_before or '—'}"
         )
     if filters.include_genres:
         lines.append(

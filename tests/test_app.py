@@ -960,9 +960,10 @@ def test_sequential_preset_switching_loads_each_configuration(app_env) -> None:
 
     # The sequence ends on Stamina: the standalone endurance profile.
     assert cfg.ranking.skill_weights == {
-        "stamina_finger": 1.0,
-        "stream_long": 0.55,
-        "speed_stamina": 0.45,
+        "stream_endurance": 1.0,
+        "stamina_finger": 0.55,
+        "stream_long": 0.45,
+        "speed_stamina": 0.30,
     }
     assert cfg.filters.duration_max == 360
 

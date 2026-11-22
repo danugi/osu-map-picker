@@ -18,6 +18,17 @@ def make_filters(**overrides) -> Filters:
     return Filters.from_dict(values)
 
 
+def test_old_filters_default_to_ranked_date_and_invalid_field_is_rejected() -> None:
+    data = Filters().to_dict()
+    data.pop("published_date_field")
+    loaded = Filters.from_dict(data)
+    assert loaded.published_date_field == "ranked"
+    invalid = Filters().to_dict()
+    invalid["published_date_field"] = "updated"
+    with pytest.raises(FilterConfigError):
+        validate_filters(Filters.from_dict(invalid))
+
+
 def test_default_profile_passes_short_ranked_map() -> None:
     decision = apply_filters(make_beatmapset(1), Filters(), target_stars=5.4)
     assert decision.passed
@@ -359,6 +370,79 @@ def test_numeric_query_unknown_ar_is_reported_not_excluded() -> None:
     decision = apply_filters(beatmapset, make_filters(query="ar<8"))
     assert decision.passed
     assert "AR" in decision.unknown_fields
+
+
+def test_ranked_and_submitted_dates_are_not_interchangeable() -> None:
+    beatmapset = make_beatmapset(
+        1,
+        ranked_date="2022-03-01T00:00:00+00:00",
+        submitted_date="2020-01-01T00:00:00+00:00",
+    )
+    ranked = make_filters(
+        published_date_field="ranked",
+        published_after="2022-01-01",
+        published_before="2022-12-31",
+    )
+    submitted = make_filters(
+        published_date_field="submitted",
+        published_after="2021-01-01",
+        published_before="2021-12-31",
+    )
+    assert apply_filters(beatmapset, ranked).passed
+    assert not apply_filters(beatmapset, submitted).passed
+    assert "дата сабмита" in apply_filters(beatmapset, submitted).reason
+
+
+def test_date_filter_boundaries_are_inclusive_and_missing_dates_fail() -> None:
+    beatmapset = make_beatmapset(
+        1,
+        ranked_date="2020-05-05T00:00:00+00:00",
+        submitted_date=None,
+    )
+    filters = make_filters(
+        published_date_field="ranked",
+        published_after="2020-05-05",
+        published_before="2020-05-05",
+    )
+    assert apply_filters(beatmapset, filters).passed
+    missing = make_filters(
+        published_date_field="submitted", published_after="2020-01-01"
+    )
+    decision = apply_filters(beatmapset, missing)
+    assert not decision.passed
+    assert "дата сабмита неизвестна" in decision.reason
+
+
+def test_query_ranked_and_submitted_date_expressions() -> None:
+    beatmapset = make_beatmapset(
+        1,
+        ranked_date="2022-03-01T00:00:00+00:00",
+        submitted_date="2020-01-01T00:00:00+00:00",
+    )
+    assert apply_filters(
+        beatmapset, make_filters(query="ranked>=2022-01-01")
+    ).passed
+    assert not apply_filters(
+        beatmapset, make_filters(query="ranked<2022-01-01")
+    ).passed
+    assert apply_filters(
+        beatmapset, make_filters(query="submitted>=2020-01-01")
+    ).passed
+    assert not apply_filters(
+        beatmapset, make_filters(query="submitted>2020-01-01")
+    ).passed
+    assert apply_filters(
+        beatmapset, make_filters(query="created>=2020-01-01")
+    ).passed
+    assert apply_filters(
+        beatmapset, make_filters(query="ranked>=2022-03")
+    ).passed
+    assert apply_filters(
+        beatmapset, make_filters(query="ranked<=2022-03")
+    ).passed
+    assert not apply_filters(
+        beatmapset, make_filters(query="ranked<2022-03")
+    ).passed
 
 
 def test_query_from_to_dates() -> None:
