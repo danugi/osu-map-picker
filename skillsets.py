@@ -176,6 +176,29 @@ _add(
 )
 _add(
     _base(
+        "jump_aim",
+        "Jump Aim",
+        "aim",
+        "Jump-ориентированный aim: измеренная доля прыжков между "
+        "последовательными объектами .osu, ширина прыжков и aim-давление. "
+        "Без локального файла геометрия прыжков неизвестна.",
+        {
+            "jump_share": 0.45,
+            "wide_jump_share": 0.20,
+            "aim_pressure": 0.15,
+            "aim": 0.10,
+            "density": 0.10,
+        },
+        support="measured",
+        required=("jump_share",),
+        limitations=(
+            "Jump определяется по геометрии .osu; metadata API этого не "
+            "доказывает.",
+        ),
+    )
+)
+_add(
+    _base(
         "aim_wide",
         "Wide Aim",
         "aim",
@@ -290,6 +313,23 @@ _add(
         support="measured",
         required_any=("speed_pressure",),
         limitations=("BPM сам по себе не определяет рисунок паттерна.",),
+    )
+)
+_add(
+    _base(
+        "high_bpm",
+        "BPM-led speed",
+        "speed",
+        "Скоростной профиль, где основное доказательство — измеренный BPM "
+        "карты, а не официальный speed-атрибут. Это уже, чем общий Speed и "
+        "не заменяет burst/stream-доказательства.",
+        {"bpm": 0.65, "density": 0.20, "speed": 0.15},
+        support="measured",
+        required=("bpm",),
+        limitations=(
+            "BPM измеряется напрямую, но сам по себе не описывает рисунок "
+            "паттерна.",
+        ),
     )
 )
 _add(

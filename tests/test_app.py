@@ -100,27 +100,16 @@ def test_sidebar_seeds_all_presets(app_env) -> None:
     at = AppTest.from_file(APP, default_timeout=60)
     at.run()
     selector = at.sidebar.selectbox[0]
-    assert len(selector.options) == 12
+    assert len(selector.options) == 23
     store = Storage(app_env)
     names = {preset.name for preset in store.list_presets()}
     assert names == {
-        "Aim",
-        "Discovery",
-        "All-rounder",
-        "Aim Farm",
-        "Speed",
-        "Streams",
-        "Stamina",
-        "Finger Control",
-        "Reading",
-        "Accuracy",
-        "Tech",
-        "Flashlight",
+        preset.name for preset in presets.builtin_presets()
     }
     assert "Any Taste" not in names
     assert "Aim Farm / PP" not in names
-    assert "Streams" in selector.options
-    assert "Stamina" in selector.options
+    assert any(item.endswith("/ Streams") for item in selector.options)
+    assert any(item.endswith("/ Stamina") for item in selector.options)
     assert "Streams & Stamina" not in selector.options
     assert "Bursts" not in selector.options
 
@@ -393,6 +382,16 @@ def test_every_settings_section_renders(app_env, section: str) -> None:
     assert _versioned(at.selectbox, "settings_section").value == section
 
 
+def _select_preset(at: AppTest, name: str):
+    box = at.sidebar.selectbox[0]
+    option = next(
+        option
+        for option in box.options
+        if option == name or option.endswith(f"/ {name}")
+    )
+    return box.select(option).run()
+
+
 def _button(at: AppTest, key: str):
     return _versioned(at.button, key)
 
@@ -466,7 +465,7 @@ def test_preset_selection_loads_the_whole_configuration(app_env) -> None:
     at.run()
     assert at.session_state["active_config"].name == "Aim"
 
-    at.sidebar.selectbox[0].select("Speed").run()
+    _select_preset(at, "Speed")
     assert not at.exception
     cfg = at.session_state["active_config"]
     assert cfg.name == "Speed"
@@ -528,7 +527,7 @@ def test_dirty_preset_switch_requires_an_explicit_choice(app_env) -> None:
     _set_skills(at, ["aim_classic"])
     _number(at, "cfgskill_w_aim_classic").set_value(2.0).run()
 
-    at.sidebar.selectbox[0].select("Speed").run()
+    _select_preset(at, "Speed")
     assert not at.exception
     assert at.session_state["active_config"].name == "Aim"
     assert at.session_state["_pending_preset_id"] is not None
@@ -556,7 +555,7 @@ def test_dirty_preset_switch_can_save_before_switching(app_env) -> None:
     _go_settings_section(at, "skillsets")
     _set_skills(at, ["aim_classic"])
     _number(at, "cfgskill_w_aim_classic").set_value(2.0).run()
-    at.sidebar.selectbox[0].select("Speed").run()
+    _select_preset(at, "Speed")
     assert at.session_state["_pending_preset_id"] is not None
 
     _button(at, "pending_save_switch").click().run()
@@ -624,7 +623,7 @@ def test_star_mode_off_removes_bounds_instead_of_hiding_them(app_env) -> None:
 def test_save_and_reload_restores_skills_and_filters(app_env) -> None:
     at = AppTest.from_file(APP, default_timeout=60)
     at.run()
-    at.sidebar.selectbox[0].select("Speed").run()
+    _select_preset(at, "Speed")
     _go_settings_section(at, "skillsets")
     _number(at, "cfgskill_w_speed_high_bpm").set_value(1.75).run()
     _go(at, "search")
@@ -636,8 +635,8 @@ def test_save_and_reload_restores_skills_and_filters(app_env) -> None:
     assert saved_cfg.filters.stars_max == 6.5
     assert not _has_button(at, "status_save_active")
 
-    at.sidebar.selectbox[0].select("Aim").run()
-    at.sidebar.selectbox[0].select("Speed").run()
+    _select_preset(at, "Aim")
+    _select_preset(at, "Speed")
     reloaded = at.session_state["active_config"]
     assert reloaded.ranking.skill_weights["speed_high_bpm"] == 1.75
     assert reloaded.filters.stars_max == 6.5
@@ -673,7 +672,7 @@ def test_save_as_new_preset_keeps_the_original_unchanged(app_env) -> None:
 def test_aim_farm_settings_do_not_leak_into_other_presets(app_env) -> None:
     at = AppTest.from_file(APP, default_timeout=60)
     at.run()
-    at.sidebar.selectbox[0].select("Aim Farm").run()
+    _select_preset(at, "Aim Farm")
     farm = at.session_state["active_config"]
     assert farm.filters.duration_max == 150
     assert farm.ranking.factors["farm_nm"].enabled
@@ -685,7 +684,7 @@ def test_aim_farm_settings_do_not_leak_into_other_presets(app_env) -> None:
     _button(at, "status_discard_active").click().run()
     assert at.session_state["active_config"].filters.duration_max == 150
 
-    at.sidebar.selectbox[0].select("Speed").run()
+    _select_preset(at, "Speed")
     speed = at.session_state["active_config"]
     assert speed.name == "Speed"
     assert speed.filters.duration_max == 180
@@ -696,7 +695,7 @@ def test_aim_farm_settings_do_not_leak_into_other_presets(app_env) -> None:
 def test_custom_mode_can_combine_multiple_skillsets(app_env) -> None:
     at = AppTest.from_file(APP, default_timeout=60)
     at.run()
-    at.sidebar.selectbox[0].select("Discovery").run()
+    _select_preset(at, "Discovery")
     assert at.session_state["active_config"].ranking.skill_weights == {}
 
     _go_settings_section(at, "skillsets")
@@ -716,7 +715,7 @@ def test_selected_skills_explain_when_mapping_factor_is_disabled(app_env) -> Non
     store = Storage(app_env)
     presets.ensure_builtin_presets(store)
     legacy = store.create_preset(
-        copy.deepcopy(presets.known_builtin_by_name("Any Taste")), is_builtin=True
+        copy.deepcopy(presets.known_builtin_by_name("Any Taste")), is_builtin=False
     )
     store.set_preference("selected_preset", str(legacy.id))
 
@@ -769,8 +768,8 @@ def test_switching_presets_does_not_touch_feedback_or_favorites(app_env) -> None
 
     at = AppTest.from_file(APP, default_timeout=60)
     at.run()
-    at.sidebar.selectbox[0].select("Speed").run()
-    at.sidebar.selectbox[0].select("Aim Farm").run()
+    _select_preset(at, "Speed")
+    _select_preset(at, "Aim Farm")
 
     assert store.get_feedback(1) == ("like",)
     assert 1 in store.favorite_ids()
@@ -913,13 +912,45 @@ def test_preset_catalog_is_grouped_with_counts(app_env) -> None:
     at.session_state["nav"] = "presets"
     at.run()
     labels = [item.label for item in at.expander]
-    assert "🧭 Explore · 3" in labels
+    assert "🧭 Explore · 2" in labels
     assert "💯 Farm · 1" in labels
-    assert "🎯 Train · 8" in labels
+    assert "🎯 Train · 20" in labels
     assert "🧩 Custom · 0" in labels
+    assert "↳ Aim · 5" in labels
+    assert "↳ Speed · 3" in labels
+    assert "↳ Streams · 2" in labels
     assert "Aim Farm" in _texts(at)
+    assert "Jump Aim" in _texts(at)
     assert "Streams" in _texts(at)
     assert "Stamina" in _texts(at)
+
+
+def test_retired_presets_are_absent_from_catalog_and_selector(app_env) -> None:
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.session_state["nav"] = "presets"
+    at.run()
+    selector = at.sidebar.selectbox[0]
+    for retired in ("Flashlight", "Reading", "Accuracy", "Weird Aim", "Reading + Aim"):
+        assert retired not in selector.options
+    page_text = " ".join(_texts(at))
+    for retired in ("Flashlight", "Reading", "Accuracy", "Weird Aim", "Reading + Aim"):
+        assert retired not in page_text
+
+
+def test_catalog_search_preserves_parent_and_child_context(app_env) -> None:
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.session_state["nav"] = "presets"
+    at.run()
+    next(
+        item
+        for item in at.text_input
+        if item.key == "preset_catalog_search"
+    ).set_value("jump aim").run()
+    texts = _texts(at)
+    assert "Aim" in texts
+    assert "Jump Aim" in texts
+    # Non-matching siblings disappear, but the parent context stays.
+    assert "Flow Aim" not in texts
 
 
 def test_navigation_is_compact_and_switches_pages(app_env) -> None:
@@ -945,9 +976,9 @@ def test_sequential_preset_switching_loads_each_configuration(app_env) -> None:
     at = AppTest.from_file(APP, default_timeout=60)
     at.run()
     store = Storage(app_env)
-    sequence = ("Aim", "Reading", "Aim Farm", "Streams", "Stamina")
+    sequence = ("Aim", "Aim Control", "Aim Farm", "Streams", "Stamina")
     for name in sequence:
-        at.sidebar.selectbox[0].select(name).run()
+        _select_preset(at, name)
         assert not at.exception
         cfg = at.session_state["active_config"]
         saved = store.get_preset(at.session_state["active_preset_id"])
@@ -1028,12 +1059,12 @@ def test_local_cache_search_reranks_for_each_switched_preset(app_env) -> None:
 
     for name in (
         "Aim",
-        "Reading",
-        "Tech",
+        "All-rounder",
+        "Discovery",
         "Aim Farm",
         "Aim",
     ):
-        at.sidebar.selectbox[0].select(name).run()
+        _select_preset(at, name)
         _button(at, "run_search").click().run()
         assert not at.exception
         result = _search_result(at)
@@ -1123,7 +1154,7 @@ def test_local_streams_and_bursts_use_only_cached_osu_evidence(app_env) -> None:
     at = AppTest.from_file(APP, default_timeout=90)
     at.run()
 
-    at.sidebar.selectbox[0].select("Streams").run()
+    _select_preset(at, "Streams")
     _button(at, "run_search").click().run()
     assert not at.exception
     streams = _search_result(at)
@@ -1150,7 +1181,7 @@ def test_specialized_card_shows_target_gate_and_threshold(app_env) -> None:
     _seed_short_cached_maps(store)
     at = AppTest.from_file(APP, default_timeout=90)
     at.run()
-    at.sidebar.selectbox[0].select("Tech").run()
+    _select_preset(at, "Tech")
     _button(at, "run_search").click().run()
     assert not at.exception
     result = _search_result(at)
@@ -2065,7 +2096,7 @@ def test_library_pattern_filter_follows_active_preset(app_env) -> None:
     _seed_app_library(store, 1)
     at = AppTest.from_file(APP, default_timeout=90)
     at.run()
-    at.sidebar.selectbox[0].select("Aim Farm").run()
+    _select_preset(at, "Aim Farm")
     at.session_state["nav"] = "library"
     at.run()
     assert not at.exception, _texts(at)
@@ -2079,7 +2110,7 @@ def test_library_pattern_filter_follows_active_preset(app_env) -> None:
     )
     assert "Переменный ритм" not in other.options
 
-    at.sidebar.selectbox[0].select("Streams").run()
+    _select_preset(at, "Streams")
     at.session_state["nav"] = "library"
     at.run()
     assert not at.exception, _texts(at)
@@ -2120,7 +2151,7 @@ def test_library_preview_keeps_selection_and_library_state(app_env) -> None:
     hidden = beatmaps[-1]
     at = AppTest.from_file(APP, default_timeout=90)
     at.run()
-    at.sidebar.selectbox[0].select("Discovery").run()
+    _select_preset(at, "Discovery")
     at.session_state["nav"] = "library"
     at.run()
     query = next(
@@ -2221,13 +2252,13 @@ def test_library_preset_switch_changes_real_results(app_env) -> None:
     _seed_preset_library(app_env)
     at = AppTest.from_file(APP, default_timeout=90)
     at.run()
-    at.sidebar.selectbox[0].select("Wide UI").run()
+    _select_preset(at, "Wide UI")
     at.session_state["nav"] = "library"
     at.run()
     assert not at.exception, _texts(at)
     assert _visible_library_ids(at) == {1, 2, 3, 4}
 
-    at.sidebar.selectbox[0].select("Narrow UI").run()
+    _select_preset(at, "Narrow UI")
     assert not at.exception, _texts(at)
     assert at.session_state["library_page"] == 1
     assert _visible_library_ids(at) == {2}
@@ -2253,7 +2284,7 @@ def test_library_filter_change_resets_pagination(app_env) -> None:
     )
     at = AppTest.from_file(APP, default_timeout=90)
     at.run()
-    at.sidebar.selectbox[0].select("Wide Paging").run()
+    _select_preset(at, "Wide Paging")
     at.session_state["nav"] = "library"
     at.run()
     assert not at.exception, _texts(at)
@@ -2274,7 +2305,7 @@ def test_library_filter_change_resets_pagination(app_env) -> None:
     at.session_state["library_page"] = 2
     at.run()
     assert at.session_state["library_page"] == 2
-    at.sidebar.selectbox[0].select("Narrow Paging").run()
+    _select_preset(at, "Narrow Paging")
     assert not at.exception, _texts(at)
     assert at.session_state["library_page"] == 1
     assert len(_visible_library_ids(at)) == 6
@@ -2286,7 +2317,7 @@ def test_library_shuffle_button_is_stable_across_pages(app_env) -> None:
     _make_library_preset(store, "Wide Shuffle")
     at = AppTest.from_file(APP, default_timeout=90)
     at.run()
-    at.sidebar.selectbox[0].select("Wide Shuffle").run()
+    _select_preset(at, "Wide Shuffle")
     at.session_state["nav"] = "library"
     at.run()
     assert not at.exception, _texts(at)

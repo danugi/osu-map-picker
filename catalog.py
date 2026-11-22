@@ -22,6 +22,25 @@ class PresetGroup:
     icon: str = "◆"
 
 
+@dataclass(frozen=True, slots=True)
+class PresetNode:
+    """Stable catalog identity and parent link for one built-in preset.
+
+    ``id`` and ``parent_id`` are catalog identities, not name prefixes. The
+    ``name`` field is the persisted ``PresetConfig`` name used by the ordinary
+    SQLite/search pipeline. A parent node is itself an ordinary selectable
+    preset; children are additional independent profiles, never replacements.
+    """
+
+    id: str
+    name: str
+    category_id: str
+    order: int
+    parent_id: str | None = None
+    label: str = ""
+    description: str = ""
+
+
 PRESET_GROUPS: tuple[PresetGroup, ...] = (
     PresetGroup(
         "explore",
@@ -55,28 +74,272 @@ PRESET_GROUPS: tuple[PresetGroup, ...] = (
 
 PRESET_GROUP_BY_ID = {group.id: group for group in PRESET_GROUPS}
 
-# Curated built-ins are assigned explicitly. A new built-in without a group
-# is a programming error caught by tests, not something the UI guesses.
+# Active curated hierarchy. Parent presets are ordinary searchable profiles;
+# children add narrower evidence-based profiles. A map is never assigned a
+# single node: every profile evaluates the same candidate independently.
+PRESET_NODES: tuple[PresetNode, ...] = (
+    PresetNode(
+        "discovery",
+        "Discovery",
+        "explore",
+        10,
+        label="Discovery",
+        description="Новизна, старые и незнакомые карты.",
+    ),
+    PresetNode(
+        "allrounder",
+        "All-rounder",
+        "explore",
+        20,
+        label="All-rounder",
+        description="Сбалансированный универсальный профиль.",
+    ),
+    PresetNode(
+        "aim_farm",
+        "Aim Farm",
+        "farm",
+        10,
+        label="Aim Farm",
+        description="Короткие Ranked aim-карты для NM-фарма.",
+    ),
+    PresetNode(
+        "aim",
+        "Aim",
+        "train",
+        10,
+        label="Aim",
+        description="Широкий aim-профиль: jumps, control и bursts.",
+    ),
+    PresetNode(
+        "aim.jump",
+        "Jump Aim",
+        "train",
+        11,
+        parent_id="aim",
+        label="Jump Aim",
+        description="Jump-паттерны по измеренной геометрии .osu.",
+    ),
+    PresetNode(
+        "aim.flow",
+        "Flow Aim",
+        "train",
+        12,
+        parent_id="aim",
+        label="Flow Aim",
+        description="Связанные траектории по измеренному flow_share.",
+    ),
+    PresetNode(
+        "aim.wide",
+        "Wide Aim",
+        "train",
+        13,
+        parent_id="aim",
+        label="Wide Aim",
+        description="Широкий spacing по измеренной доле широких прыжков.",
+    ),
+    PresetNode(
+        "aim.control",
+        "Aim Control",
+        "train",
+        14,
+        parent_id="aim",
+        label="Aim Control",
+        description="Смены угла и контроль траектории.",
+    ),
+    PresetNode(
+        "aim.bursts",
+        "Aim + Bursts",
+        "train",
+        15,
+        parent_id="aim",
+        label="Aim + Bursts",
+        description="Aim вместе с измеренными burst-сериями 5–9 нот.",
+    ),
+    PresetNode(
+        "speed",
+        "Speed",
+        "train",
+        20,
+        label="Speed",
+        description="Широкий скоростной профиль.",
+    ),
+    PresetNode(
+        "speed.high_bpm",
+        "High BPM",
+        "train",
+        21,
+        parent_id="speed",
+        label="High BPM",
+        description="Высокий BPM и speed-давление.",
+    ),
+    PresetNode(
+        "speed.bursts",
+        "Speed Bursts",
+        "train",
+        22,
+        parent_id="speed",
+        label="Speed Bursts",
+        description="Burst-серии как отдельное доказательство.",
+    ),
+    PresetNode(
+        "speed.aim",
+        "Speed + Aim",
+        "train",
+        23,
+        parent_id="speed",
+        label="Speed + Aim",
+        description="Скорость, неотделимая от движения курсора.",
+    ),
+    PresetNode(
+        "streams",
+        "Streams",
+        "train",
+        30,
+        label="Streams",
+        description="Единая osu!-категория потоков и bursts.",
+    ),
+    PresetNode(
+        "streams.burst",
+        "Burst-oriented Streams",
+        "train",
+        31,
+        parent_id="streams",
+        label="Burst-oriented Streams",
+        description="Короткие 5–9-нотные серии внутри категории Streams.",
+    ),
+    PresetNode(
+        "streams.continuous",
+        "Continuous Streams",
+        "train",
+        32,
+        parent_id="streams",
+        label="Continuous Streams",
+        description="Длинные непрерывные потоковые цепочки.",
+    ),
+    PresetNode(
+        "stamina",
+        "Stamina",
+        "train",
+        40,
+        label="Stamina",
+        description="Длительная stream-выносливость.",
+    ),
+    PresetNode(
+        "finger",
+        "Finger Control",
+        "train",
+        50,
+        label="Finger Control",
+        description="Широкий профиль контроля пальцев.",
+    ),
+    PresetNode(
+        "finger.alternating",
+        "Alternating",
+        "train",
+        51,
+        parent_id="finger",
+        label="Alternating",
+        description="Alternation-профиль; часть доказательств остаётся прокси.",
+    ),
+    PresetNode(
+        "finger.double_tap",
+        "Double-tap / Burst Control",
+        "train",
+        52,
+        parent_id="finger",
+        label="Double-tap / Burst Control",
+        description="Короткие burst-группы как tapping-нагрузка.",
+    ),
+    PresetNode(
+        "tech",
+        "Tech",
+        "train",
+        60,
+        label="Tech",
+        description="Широкий технический профиль.",
+    ),
+    PresetNode(
+        "tech.slider",
+        "Slider Tech",
+        "train",
+        61,
+        parent_id="tech",
+        label="Slider Tech",
+        description="Слайдеры, SV и техничные слайдерные паттерны.",
+    ),
+    PresetNode(
+        "tech.rhythm",
+        "Rhythm Control",
+        "train",
+        62,
+        parent_id="tech",
+        label="Rhythm Control",
+        description="Измеренная ритмическая вариативность.",
+    ),
+)
+
+PRESET_NODE_BY_ID = {node.id: node for node in PRESET_NODES}
+PRESET_NODE_BY_NAME = {node.name: node for node in PRESET_NODES}
 PRESET_GROUP_BY_NAME = {
-    "Aim": "explore",
-    "Discovery": "explore",
-    "All-rounder": "explore",
-    "Aim Farm": "farm",
-    "Speed": "train",
-    "Streams": "train",
-    "Stamina": "train",
-    "Finger Control": "train",
-    "Reading": "train",
-    "Accuracy": "train",
-    "Tech": "train",
-    "Flashlight": "train",
+    node.name: node.category_id for node in PRESET_NODES
 }
 
 
-def preset_group_id(name: str, *, is_builtin: bool = True) -> str:
+def preset_node(name: str, *, is_builtin: bool = True) -> PresetNode | None:
     if not is_builtin:
+        return None
+    return PRESET_NODE_BY_NAME.get(name)
+
+
+def preset_children(
+    parent_id: str,
+) -> tuple[PresetNode, ...]:
+    return tuple(
+        sorted(
+            (
+                node
+                for node in PRESET_NODES
+                if node.parent_id == parent_id
+            ),
+            key=lambda node: (node.order, node.name),
+        )
+    )
+
+
+def preset_roots(category_id: str | None = None) -> tuple[PresetNode, ...]:
+    return tuple(
+        sorted(
+            (
+                node
+                for node in PRESET_NODES
+                if node.parent_id is None
+                and (category_id is None or node.category_id == category_id)
+            ),
+            key=lambda node: (node.order, node.name),
+        )
+    )
+
+
+def preset_path(node_id: str) -> tuple[PresetNode, ...]:
+    node = PRESET_NODE_BY_ID.get(node_id)
+    if node is None:
+        return ()
+    path = [node]
+    seen = {node.id}
+    while path[-1].parent_id is not None:
+        parent = PRESET_NODE_BY_ID.get(path[-1].parent_id or "")
+        if parent is None or parent.id in seen:
+            break
+        seen.add(parent.id)
+        path.append(parent)
+    return tuple(reversed(path))
+
+
+def preset_group_id(name: str, *, is_builtin: bool = True) -> str:
+    node = preset_node(name, is_builtin=is_builtin)
+    if node is None:
         return "custom"
-    return PRESET_GROUP_BY_NAME.get(name, "custom")
+    return node.category_id
 
 
 def preset_group(name: str, *, is_builtin: bool = True) -> PresetGroup:
@@ -85,7 +348,37 @@ def preset_group(name: str, *, is_builtin: bool = True) -> PresetGroup:
 
 def preset_display_name(name: str, *, is_builtin: bool = True) -> str:
     group = preset_group(name, is_builtin=is_builtin)
-    return f"{group.icon} {group.short_label} / {name}"
+    node = preset_node(name, is_builtin=is_builtin)
+    if node is None:
+        return f"{group.icon} {group.short_label} / {name}"
+    path = " / ".join(item.label or item.name for item in preset_path(node.id))
+    return f"{group.icon} {group.short_label} / {path}"
+
+
+def ordered_presets(items: list[object]) -> list[object]:
+    """Stable parent/child display order; custom entries stay after built-ins."""
+
+    by_catalog_id = {
+        str(getattr(getattr(item, "config", item), "catalog_id", "")): item
+        for item in items
+        if getattr(getattr(item, "config", item), "catalog_id", "")
+    }
+    by_name = {
+        str(getattr(item, "name", "")): item
+        for item in items
+    }
+    ordered = [
+        by_catalog_id.get(node.id) or by_name.get(node.name)
+        for node in PRESET_NODES
+        if by_catalog_id.get(node.id) is not None or node.name in by_name
+    ]
+    custom = [
+        item
+        for item in items
+        if not getattr(getattr(item, "config", item), "catalog_id", "")
+    ]
+    custom.sort(key=lambda item: str(getattr(item, "name", "")).casefold())
+    return ordered + custom
 
 
 def group_presets_by_category(presets: list[object]) -> dict[str, list[object]]:
@@ -101,6 +394,155 @@ def group_presets_by_category(presets: list[object]) -> dict[str, list[object]]:
     return grouped
 
 
+def validate_preset_catalog(
+    active_names: set[str] | None = None,
+    *,
+    nodes: tuple[PresetNode, ...] | None = None,
+) -> None:
+    """Fail loudly on malformed hierarchy metadata (tests call this)."""
+
+    checked = PRESET_NODES if nodes is None else nodes
+    by_id = {node.id: node for node in checked}
+    ids: set[str] = set()
+    names: set[str] = set()
+    sibling_orders: dict[tuple[str, str | None], set[int]] = {}
+    sibling_counts: dict[tuple[str, str | None], int] = {}
+    for node in checked:
+        if node.id in ids:
+            raise ValueError(f"duplicate preset node id: {node.id}")
+        if node.name in names:
+            raise ValueError(f"duplicate preset name: {node.name}")
+        ids.add(node.id)
+        names.add(node.name)
+        if node.category_id not in PRESET_GROUP_BY_ID:
+            raise ValueError(
+                f"{node.id}: unknown category {node.category_id}"
+            )
+        if node.parent_id is not None:
+            parent = by_id.get(node.parent_id)
+            if parent is None:
+                raise ValueError(
+                    f"{node.id}: unknown parent {node.parent_id}"
+                )
+            if parent.category_id != node.category_id:
+                raise ValueError(
+                    f"{node.id}: parent category mismatch"
+                )
+        sibling_key = (node.category_id, node.parent_id)
+        sibling_orders.setdefault(sibling_key, set()).add(node.order)
+        sibling_counts[sibling_key] = sibling_counts.get(sibling_key, 0) + 1
+    for sibling_key, orders in sibling_orders.items():
+        if len(orders) != sibling_counts[sibling_key]:
+            raise ValueError(
+                "duplicate display order under "
+                f"{sibling_key[1] or sibling_key[0] + ' root'}"
+            )
+    if active_names is not None:
+        missing = active_names - names
+        if missing:
+            raise ValueError(
+                "active built-ins missing from catalog: "
+                + ", ".join(sorted(missing))
+            )
+        extra = names - active_names
+        if extra:
+            raise ValueError(
+                "catalog names without active built-in: "
+                + ", ".join(sorted(extra))
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class PresetTreeEntry:
+    node: PresetNode
+    item: object | None
+    children: tuple["PresetTreeEntry", ...] = ()
+
+
+def build_preset_tree(
+    items: list[object],
+    *,
+    query: str = "",
+) -> tuple[tuple[PresetTreeEntry, ...], list[object]]:
+    """Build the active hierarchy without flattening parent/child links.
+
+    Custom presets are returned separately. Searching a child keeps its parent
+    visible as context, and searching a parent keeps matching descendants.
+    """
+
+    by_catalog_id = {
+        str(getattr(getattr(item, "config", item), "catalog_id", "")): item
+        for item in items
+        if getattr(getattr(item, "config", item), "catalog_id", "")
+    }
+    by_name = {
+        str(getattr(item, "name", "")): item
+        for item in items
+    }
+    needle = query.strip().casefold()
+
+    def matches(node: PresetNode, item: object | None) -> bool:
+        if not needle:
+            return True
+        group = PRESET_GROUP_BY_ID[node.category_id]
+        description = ""
+        if item is not None:
+            description = str(
+                getattr(getattr(item, "config", item), "description", "")
+            )
+        haystack = " ".join(
+            (
+                node.name,
+                node.label,
+                node.description,
+                description,
+                group.label,
+                group.short_label,
+                " / ".join(
+                    item.label or item.name
+                    for item in preset_path(node.id)
+                ),
+            )
+        ).casefold()
+        return needle in haystack
+
+    def build(
+        node: PresetNode, *, force: bool = False
+    ) -> PresetTreeEntry | None:
+        item = by_catalog_id.get(node.id) or by_name.get(node.name)
+        node_matches = force or matches(node, item)
+        children = tuple(
+            entry
+            for child in preset_children(node.id)
+            if (
+                entry := build(child, force=node_matches)
+            )
+            is not None
+        )
+        if item is None and not children:
+            return None
+        if not node_matches and not children:
+            return None
+        # A parent may have been deleted while its children still exist. Keep
+        # the child entries reachable; the UI renders a non-selectable context
+        # row for the missing parent instead of silently hiding the children.
+        return PresetTreeEntry(node=node, item=item, children=children)
+
+    roots = tuple(
+        entry
+        for node in PRESET_NODES
+        if node.parent_id is None
+        if (entry := build(node)) is not None
+    )
+    custom = [
+        item
+        for item in items
+        if not getattr(getattr(item, "config", item), "catalog_id", "")
+        and not bool(getattr(item, "is_builtin", False))
+    ]
+    return roots, custom
+
+
 def search_presets(presets: list[object], query: str) -> list[object]:
     needle = query.strip().casefold()
     if not needle:
@@ -111,6 +553,15 @@ def search_presets(presets: list[object], query: str) -> list[object]:
             preset.name,
             is_builtin=bool(getattr(preset, "is_builtin", True)),
         )
+        node = preset_node(
+            preset.name,
+            is_builtin=bool(getattr(preset, "is_builtin", True)),
+        )
+        path = ""
+        if node is not None:
+            path = " / ".join(
+                item.label or item.name for item in preset_path(node.id)
+            )
         haystack = " ".join(
             (
                 preset.name,
@@ -119,6 +570,8 @@ def search_presets(presets: list[object], query: str) -> list[object]:
                 ),
                 group.label,
                 group.short_label,
+                path,
+                node.description if node is not None else "",
             )
         ).casefold()
         if needle in haystack:
@@ -165,9 +618,9 @@ SKILL_CATEGORIES: tuple[SkillCategory, ...] = (
         (
             SkillSubcategory(
                 "aim_classic",
-                "Classic / wide / flow",
+                "Classic / jump / wide / flow",
                 "Основные aim-паттерны и геометрия движения.",
-                ("aim_classic", "aim_wide", "aim_flow"),
+                ("aim_classic", "jump_aim", "aim_wide", "aim_flow"),
             ),
             SkillSubcategory(
                 "aim_control",
@@ -189,6 +642,7 @@ SKILL_CATEGORIES: tuple[SkillCategory, ...] = (
                 "Плотность, BPM, стабильность и скорость с aim.",
                 (
                     "speed_high_bpm",
+                    "high_bpm",
                     "speed_density",
                     "speed_consistency",
                     "speed_aim",

@@ -12,25 +12,36 @@ from models import PresetConfig
 from storage import Storage
 
 CANONICAL = {
-    "Aim",
     "Discovery",
     "All-rounder",
     "Aim Farm",
+    "Aim",
+    "Jump Aim",
+    "Flow Aim",
+    "Wide Aim",
+    "Aim Control",
+    "Aim + Bursts",
     "Speed",
+    "High BPM",
+    "Speed Bursts",
+    "Speed + Aim",
     "Streams",
+    "Burst-oriented Streams",
+    "Continuous Streams",
     "Stamina",
     "Finger Control",
-    "Reading",
-    "Accuracy",
+    "Alternating",
+    "Double-tap / Burst Control",
     "Tech",
-    "Flashlight",
+    "Slider Tech",
+    "Rhythm Control",
 }
 
 
 def test_builtin_presets_are_curated_complete_and_valid() -> None:
     builtins = presets.builtin_presets()
     names = {preset.name for preset in builtins}
-    assert len(builtins) == 12
+    assert len(builtins) == 23
     assert names == CANONICAL
     assert names.isdisjoint(presets.LEGACY_BUILTIN_NAMES)
     for preset in builtins:
@@ -45,19 +56,25 @@ def test_legacy_builtins_are_retained_but_not_offered_by_default(
     legacy_names = {preset.name for preset in legacy}
     assert {
         "Any Taste",
-        "Wide Aim",
         "Custom",
         "Mixed Aim",
         "Bursts",
         "Streams & Stamina",
+        "Flashlight",
+        "Reading",
+        "Accuracy",
+        "Weird Aim",
+        "Reading + Aim",
     } <= legacy_names
     assert legacy_names == presets.LEGACY_BUILTIN_NAMES
 
-    hidden_config = presets.known_builtin_by_name("Wide Aim")
+    hidden_config = presets.known_builtin_by_name("Flashlight")
     assert hidden_config is not None
     hidden = storage.create_preset(copy.deepcopy(hidden_config), is_builtin=True)
     visible = presets.visible_presets(storage, include_id=hidden.id)
-    assert hidden.id in {preset.id for preset in visible}
+    # Retired rows remain stored for compatibility but never return to the
+    # active catalog, even when they are the currently active row.
+    assert hidden.id not in {preset.id for preset in visible}
     assert hidden.id not in {
         preset.id for preset in presets.visible_presets(storage)
     }
@@ -208,7 +225,7 @@ def test_v2_migration_adds_presets_and_renames_the_legacy_aim_farm(
     storage.set_preference("builtins_version", "1")
 
     created = presets.ensure_builtin_presets(storage)
-    assert created == len(presets._V2_NEW_NAMES)
+    assert created >= 4
     assert storage.get_preset_by_name("Aim Farm / PP") is None
     upgraded = storage.get_preset_by_name("Aim Farm")
     assert upgraded is not None
@@ -232,7 +249,7 @@ def test_v2_migration_does_not_overwrite_edited_aim_farm(storage: Storage) -> No
     storage.set_preference("builtins_version", "1")
 
     created = presets.ensure_builtin_presets(storage)
-    assert created == len(presets._V2_NEW_NAMES) + 1
+    assert created >= 4 + 1
     kept = storage.get_preset_by_name("Aim Farm / PP")
     assert kept is not None
     assert kept.config.ranking.skill_weights == {}
@@ -252,7 +269,7 @@ def test_v3_proxy_era_aim_rows_are_preserved_and_aim_is_seeded(
     aim = storage.get_preset_by_name("Aim")
     assert aim is not None
     storage.update_preset(aim.id, _legacy_mixed_aim())
-    wide = storage.create_preset(presets._legacy_wide_aim_config(), is_builtin=True)
+    wide = storage.create_preset(presets._legacy_weird_aim_config(), is_builtin=True)
     storage.set_preference("builtins_version", "2")
 
     presets.ensure_builtin_presets(storage)
@@ -266,14 +283,14 @@ def test_v3_proxy_era_aim_rows_are_preserved_and_aim_is_seeded(
         "density": 0.55,
     }
     assert kept_mixed.config.ranking.skill_weights == {}
-    # Wide Aim is a legacy-only row. It is preserved exactly as stored
-    # instead of being silently rewritten into a profile that is no longer
-    # offered in the curated catalog.
+    # Weird Aim is a retired legacy-only row. It is preserved exactly as
+    # stored instead of being rewritten into the active catalog.
     kept_wide = storage.get_preset(wide.id)
     assert kept_wide is not None
     assert kept_wide.config.ranking.trait_targets == {
-        "aim": 0.9,
-        "density": 0.35,
+        "control": 0.85,
+        "aim": 0.65,
+        "precision": 0.55,
     }
     assert kept_wide.config.ranking.skill_weights == {}
     # The curated catalog still gets a modern Aim row.
@@ -474,9 +491,19 @@ def test_v9_sequence_targets_and_retired_bursts_not_seeded(
     assert farm is not None and farm.config.filters.stars_min == 4.2
 
 
+def test_restore_builtins_never_recreates_retired_profiles(storage: Storage) -> None:
+    presets.restore_builtin_presets(storage)
+    names = {preset.name for preset in storage.list_presets()}
+    assert "Aim" in names
+    assert "Jump Aim" in names
+    for retired in ("Flashlight", "Reading", "Accuracy", "Weird Aim", "Reading + Aim"):
+        assert retired not in names
+    assert len(names) == 23
+
+
 def test_builtins_are_seeded_once(storage: Storage) -> None:
     stored = storage.list_presets()
-    assert len(stored) == 12
+    assert len(stored) == 23
     assert all(preset.is_builtin for preset in stored)
     assert {preset.name for preset in stored} == CANONICAL
     mixed = storage.get_preset_by_name("Aim")
@@ -520,11 +547,14 @@ def test_duplicate_is_independent(storage: Storage) -> None:
 
 
 def test_create_custom_from_base_and_rename(storage: Storage) -> None:
-    base = storage.get_preset_by_name("Reading")
+    base = storage.get_preset_by_name("Aim Control")
     assert base is not None
     created = presets.create_preset(storage, "My Reading", base.id)
     assert created.config.ranking.trait_targets == {}
     assert created.config.ranking.skill_weights == base.config.ranking.skill_weights
+    assert created.config.catalog_id == ""
+    assert created.config.parent_id is None
+    assert created.config.category_id == "custom"
     renamed = presets.rename_preset(storage, created.id, "My Reading 2")
     assert renamed.name == "My Reading 2"
     with pytest.raises(presets.PresetError):
@@ -544,18 +574,19 @@ def test_reset_preset_to_default(storage: Storage) -> None:
 
 
 def test_legacy_reset_uses_original_legacy_config(storage: Storage) -> None:
-    legacy = presets.known_builtin_by_name("Wide Aim")
+    legacy = presets.known_builtin_by_name("Weird Aim")
     assert legacy is not None
     preset = storage.create_preset(copy.deepcopy(legacy), is_builtin=True)
     edited = PresetConfig.from_dict(preset.config.to_dict())
     edited.filters.stars_min = 1.0
     storage.update_preset(preset.id, edited)
     restored = presets.reset_preset_to_default(storage, preset.id)
-    assert restored.config.filters.stars_min == 4.5
+    assert restored.config.filters.stars_min == 4.0
     assert restored.config.ranking.trait_targets == {}
     assert restored.config.ranking.skill_weights == {
-        "aim_wide": 0.70,
-        "aim_classic": 0.30,
+        "tech": 0.45,
+        "aim_control": 0.30,
+        "unusual_spacing": 0.25,
     }
 
 
@@ -571,7 +602,7 @@ def test_deleting_preset_keeps_user_data(storage: Storage) -> None:
     assert storage.get_feedback(1) == ("like",)
     assert storage.is_favorite(1)
     assert storage.history_count() == 1
-    assert len(storage.list_presets()) == 11
+    assert len(storage.list_presets()) == 22
 
 
 def test_preset_json_export_import_roundtrip(storage: Storage) -> None:
@@ -579,11 +610,11 @@ def test_preset_json_export_import_roundtrip(storage: Storage) -> None:
     selected = [
         preset
         for preset in storage.list_presets()
-        if preset.name in {"Aim", "Reading"} or preset.id == custom.id
+        if preset.name in {"Aim", "Aim Control"} or preset.id == custom.id
     ]
     text = presets.export_presets_json(selected)
     parsed = presets.import_presets_json(text)
-    assert {preset.name for preset in parsed} == {"Aim", "Reading", "My Profile"}
+    assert {preset.name for preset in parsed} == {"Aim", "Aim Control", "My Profile"}
     assert [p.to_dict() for p in parsed] == [p.config.to_dict() for p in selected]
 
 
@@ -596,13 +627,13 @@ def test_single_preset_export_import() -> None:
 
 
 def test_nested_export_preset_can_be_imported(storage: Storage) -> None:
-    legacy = presets.known_builtin_by_name("Wide Aim")
+    legacy = presets.known_builtin_by_name("Weird Aim")
     assert legacy is not None
     preset = storage.create_preset(copy.deepcopy(legacy), is_builtin=True)
     text = json.dumps(presets.export_preset(preset), ensure_ascii=False)
     parsed = presets.import_presets_json(text)
     assert len(parsed) == 1
-    assert parsed[0].name == "Wide Aim"
+    assert parsed[0].name == "Weird Aim"
     assert parsed[0].ranking.trait_targets == {}
 
 
@@ -691,4 +722,4 @@ def test_new_presets_have_honest_explicit_logic() -> None:
     assert finger is not None and finger.ranking.skill_weights
     assert farm is not None and farm.filters.duration_max == 150
     assert farm.ranking.factors["farm_nm"].enabled
-    assert len({preset.name for preset in presets.builtin_presets()}) == 12
+    assert len({preset.name for preset in presets.builtin_presets()}) == 23

@@ -445,18 +445,29 @@ def _choose_preset(store: Storage) -> int:
     if not presets_list:
         presets.ensure_builtin_presets(store)
         presets_list = store.list_presets()
+    # Retired built-ins may remain in SQLite for compatibility, but they are
+    # not valid active selections. Never resurrect one merely because it was
+    # the last selected row.
+    selectable = presets.visible_presets(store)
+    if not selectable:
+        # An old database may contain only retired rows. Restore the active
+        # catalog rather than silently selecting a hidden legacy profile.
+        presets.restore_builtin_presets(store)
+        selectable = presets.visible_presets(store)
+    if not selectable:
+        return presets_list[0].id
     preference = store.get_preference("selected_preset")
     if preference:
         try:
             pid = int(preference)
         except ValueError:
             pid = -1
-        if any(item.id == pid for item in presets_list):
+        if any(item.id == pid for item in selectable):
             return pid
-    for item in presets_list:
+    for item in selectable:
         if item.name == "Aim":
             return item.id
-    return presets_list[0].id
+    return selectable[0].id
 
 
 def _load_active(store: Storage, preset_id: int) -> PresetConfig:
@@ -549,7 +560,17 @@ def _sidebar(store: Storage) -> str:
     if not any(item.id == active_id for item in all_presets):
         active_id = _choose_preset(store)
         _apply_preset(store, active_id)
-    catalog_presets = presets.visible_presets(store, include_id=active_id)
+    catalog_presets = catalog.ordered_presets(
+        presets.visible_presets(store)
+    )
+    if not any(item.id == active_id for item in catalog_presets):
+        # The stored selection is a retired legacy row. Move the session to a
+        # currently active profile instead of showing a hidden preset.
+        active_id = _choose_preset(store)
+        _apply_preset(store, active_id)
+        catalog_presets = catalog.ordered_presets(
+            presets.visible_presets(store)
+        )
     if not catalog_presets:
         catalog_presets = all_presets
 
@@ -561,11 +582,12 @@ def _sidebar(store: Storage) -> str:
     elif st.session_state.get("preset_selector") != active_id:
         st.session_state["preset_selector"] = active_id
 
-    names = {item.id: item.name for item in all_presets}
-    for item in catalog_presets:
-        item_name = item.name
-        if presets.is_legacy_builtin(item):
-            names[item.id] = f"{item_name} · legacy"
+    names = {
+        item.id: catalog.preset_display_name(
+            item.name, is_builtin=item.is_builtin
+        )
+        for item in all_presets
+    }
 
     def on_preset_change() -> None:
         pid = int(st.session_state["preset_selector"])
@@ -606,7 +628,18 @@ def _sidebar(store: Storage) -> str:
         role = "пользовательский" if not active_item.is_builtin else (
             "legacy" if presets.is_legacy_builtin(active_item) else "встроенный"
         )
-        st.sidebar.caption(f"{group.icon} {group.label} · {role}")
+        node = catalog.preset_node(
+            active_item.name, is_builtin=active_item.is_builtin
+        )
+        path = (
+            " / ".join(
+                item.label or item.name
+                for item in catalog.preset_path(node.id)
+            )
+            if node is not None
+            else active_item.name
+        )
+        st.sidebar.caption(f"{group.icon} {group.label} / {path} · {role}")
     st.sidebar.caption(
         "Ручные изменения сохраняются отдельно от пресета."
     )
@@ -4984,6 +5017,83 @@ def page_analysis(store: Storage, cfg: PresetConfig) -> None:
     )
 
 
+def _preset_catalog_row(
+    store: Storage,
+    cfg: PresetConfig,
+    item,
+    active_id: int,
+    *,
+    key_prefix: str,
+) -> None:
+    row = st.columns([4.3, 1.05])
+    active_mark = " · **активный**" if item.id == active_id else ""
+    builtin_mark = "встроенный" if item.is_builtin else "пользовательский"
+    with row[0]:
+        st.markdown(f"**{item.name}**{active_mark}")
+        description = " ".join(item.config.description.split())
+        if len(description) > 190:
+            description = description[:187].rstrip() + "…"
+        st.caption(f"{builtin_mark} · {description}")
+    with row[1]:
+        if item.id == active_id:
+            st.caption("Выбран")
+        elif st.button(
+            "Активировать",
+            key=f"{key_prefix}_{item.id}",
+            use_container_width=True,
+        ):
+            try:
+                if _config_is_dirty(store, cfg):
+                    st.session_state["_pending_preset_id"] = item.id
+                    st.rerun()
+                _apply_preset(store, item.id)
+                st.rerun()
+            except StorageError as exc:
+                st.error(str(exc))
+
+
+def _render_preset_tree_entries(
+    store: Storage,
+    cfg: PresetConfig,
+    active_id: int,
+    entries,
+    *,
+    query: str,
+) -> None:
+    for entry in entries:
+        if entry.item is not None:
+            _preset_catalog_row(
+                store,
+                cfg,
+                entry.item,
+                active_id,
+                key_prefix=f"preset_tree_{entry.node.id}",
+            )
+        else:
+            st.markdown(
+                f"**{entry.node.label or entry.node.name}** · "
+                "родительский пресет удалён; дочерние профили сохранены"
+            )
+        if not entry.children:
+            continue
+        active_descendant = any(
+            child.item is not None and child.item.id == active_id
+            for child in entry.children
+        )
+        with st.expander(
+            f"↳ {entry.node.label or entry.node.name} · "
+            f"{len(entry.children)}",
+            expanded=active_descendant or bool(query.strip()),
+        ):
+            _render_preset_tree_entries(
+                store,
+                cfg,
+                active_id,
+                entry.children,
+                query=query,
+            )
+
+
 def page_presets(store: Storage, cfg: PresetConfig) -> None:
     st.header("📦 Пресеты")
     st.caption(
@@ -4993,21 +5103,22 @@ def page_presets(store: Storage, cfg: PresetConfig) -> None:
     )
     all_items = store.list_presets()
     active_id = st.session_state["active_preset_id"]
-    items = presets.visible_presets(store, include_id=active_id)
+    items = catalog.ordered_presets(presets.visible_presets(store))
 
-    st.subheader("Каталог по группам")
+    st.subheader("Иерархический каталог")
     st.caption(
         "Explore — открывать, Farm — короткие NM-aim-карты, Train — "
-        "конкретный навык, Custom — ваши профили. Поиск ищет по имени, "
-        "описанию и названию группы."
+        "конкретный навык. Внутри Train родительские профили (Aim, Speed, "
+        "Streams, Stamina, Finger Control, Tech) раскрываются в дочерние "
+        "направления. Родитель и каждый ребёнок — самостоятельные пресеты; "
+        "карта может подходить сразу нескольким из них."
     )
     search_cols = st.columns([3.2, 1.0])
     preset_query = search_cols[0].text_input(
         "Поиск пресета",
         key="preset_catalog_search",
-        placeholder="Aim, streams, reading, farm, custom…",
+        placeholder="Aim, jump, streams, stamina, tech, custom…",
     )
-    visible_items = catalog.search_presets(items, preset_query)
     if search_cols[1].button(
         "Сбросить поиск",
         key="preset_catalog_clear",
@@ -5016,11 +5127,26 @@ def page_presets(store: Storage, cfg: PresetConfig) -> None:
     ):
         st.session_state["preset_catalog_search"] = ""
         st.rerun()
-    grouped = catalog.group_presets_by_category(visible_items)
-    if not visible_items:
+    roots, custom_items = catalog.build_preset_tree(
+        items, query=preset_query
+    )
+    if not roots and not custom_items:
         st.warning("По этому запросу пресетов нет.")
     for group in catalog.PRESET_GROUPS:
-        group_items = grouped.get(group.id, [])
+        group_roots = tuple(
+            entry for entry in roots if entry.node.category_id == group.id
+        )
+        if group.id == "custom":
+            group_items = custom_items
+        else:
+            group_items = [
+                item
+                for entry in group_roots
+                for item in (
+                    *((entry.item,) if entry.item is not None else ()),
+                    *(child.item for child in entry.children if child.item is not None),
+                )
+            ]
         if not group_items and group.id != "custom":
             continue
         has_active = any(item.id == active_id for item in group_items)
@@ -5029,76 +5155,28 @@ def page_presets(store: Storage, cfg: PresetConfig) -> None:
             expanded=has_active or bool(preset_query.strip()),
         ):
             st.caption(group.description)
-            if not group_items:
-                st.info(
-                    "Пользовательских пресетов пока нет. Создайте профиль из "
-                    "любого готового набора ниже."
+            if group.id == "custom":
+                if not group_items:
+                    st.info(
+                        "Пользовательских пресетов пока нет. Создайте профиль "
+                        "из любого готового набора ниже."
+                    )
+                for item in group_items:
+                    _preset_catalog_row(
+                        store,
+                        cfg,
+                        item,
+                        active_id,
+                        key_prefix="preset_custom",
+                    )
+            else:
+                _render_preset_tree_entries(
+                    store,
+                    cfg,
+                    active_id,
+                    group_roots,
+                    query=preset_query,
                 )
-            for item in group_items:
-                row = st.columns([4.3, 1.05])
-                active_mark = " · **активный**" if item.id == active_id else ""
-                builtin_mark = (
-                    "встроенный" if item.is_builtin else "пользовательский"
-                )
-                with row[0]:
-                    st.markdown(f"**{item.name}**{active_mark}")
-                    description = " ".join(item.config.description.split())
-                    if len(description) > 190:
-                        description = description[:187].rstrip() + "…"
-                    st.caption(f"{builtin_mark} · {description}")
-                with row[1]:
-                    if item.id == active_id:
-                        st.caption("Выбран")
-                    elif st.button(
-                        "Активировать",
-                        key=f"preset_group_activate_{item.id}",
-                        use_container_width=True,
-                    ):
-                        try:
-                            if _config_is_dirty(store, cfg):
-                                st.session_state["_pending_preset_id"] = item.id
-                                st.rerun()
-                            _apply_preset(store, item.id)
-                            st.rerun()
-                        except StorageError as exc:
-                            st.error(str(exc))
-
-    legacy_items = presets.legacy_presets(store)
-    if legacy_items:
-        with st.expander(
-            f"🗄 Legacy built-ins · {len(legacy_items)} сохранено", expanded=False
-        ):
-            st.caption(
-                "Старые встроенные профили скрыты из основного каталога, но "
-                "не удалены и не перезаписаны. Их можно открыть, "
-                "дублировать или использовать как основу для Custom."
-            )
-            for item in legacy_items:
-                legacy_row = st.columns([4.3, 1.05])
-                with legacy_row[0]:
-                    st.markdown(f"**{item.name}**")
-                    legacy_description = " ".join(item.config.description.split())
-                    if len(legacy_description) > 180:
-                        legacy_description = (
-                            legacy_description[:177].rstrip() + "…"
-                        )
-                    st.caption(legacy_description)
-                with legacy_row[1]:
-                    if item.id == active_id:
-                        st.caption("Выбран")
-                    elif st.button(
-                        "Открыть",
-                        key=f"preset_legacy_activate_{item.id}",
-                        use_container_width=True,
-                    ):
-                        try:
-                            if _config_is_dirty(store, cfg):
-                                st.session_state["_pending_preset_id"] = item.id
-                                st.rerun()
-                            _apply_preset(store, item.id)
-                            st.rerun()
-                        except StorageError as exc:
-                            st.error(str(exc))
 
     st.subheader("Текущий пресет")
     with st.form("preset_rename_form"):
@@ -5127,6 +5205,7 @@ def page_presets(store: Storage, cfg: PresetConfig) -> None:
                 copy_cfg = copy.deepcopy(cfg)
                 copy_cfg.name = f"{cfg.name} copy"
                 copy_cfg.description = cfg.description
+                presets._with_catalog_metadata(copy_cfg)
                 presets.validate_preset_config(copy_cfg)
                 created = store.create_preset(copy_cfg, is_builtin=False)
             else:
@@ -5196,6 +5275,7 @@ def page_presets(store: Storage, cfg: PresetConfig) -> None:
                 new_config.description = (
                     "Создан из текущих несохранённых настроек."
                 )
+                presets._with_catalog_metadata(new_config)
                 presets.validate_preset_config(new_config)
                 created = store.create_preset(new_config, is_builtin=False)
             else:

@@ -199,6 +199,7 @@ def validate_ranking(settings: RankingSettings) -> None:
         "primary_targets",
         "min_primary",
         "require_features_any",
+        "feature_minimums",
     }
     if unknown_policy:
         raise RankingConfigError(
@@ -248,6 +249,28 @@ def validate_ranking(settings: RankingSettings) -> None:
         raise RankingConfigError(
             "relevance_policy.require_features_any требует relevance_targets"
         )
+    feature_minimums = policy.get("feature_minimums", {})
+    if not isinstance(feature_minimums, dict):
+        raise RankingConfigError(
+            "relevance_policy.feature_minimums: ожидался объект"
+        )
+    unknown_minimums = set(feature_minimums) - set(features_any)
+    if unknown_minimums:
+        raise RankingConfigError(
+            "relevance_policy.feature_minimums: признаки должны входить в "
+            "require_features_any: "
+            + ", ".join(sorted(unknown_minimums))
+        )
+    for key, value in feature_minimums.items():
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or not 0.0 <= float(value) <= 1.0
+        ):
+            raise RankingConfigError(
+                f"relevance_policy.feature_minimums.{key}: ожидалось 0..1"
+            )
     threshold = settings.relevance_threshold
     if (
         not math.isfinite(threshold)

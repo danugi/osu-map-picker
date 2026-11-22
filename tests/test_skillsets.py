@@ -137,10 +137,11 @@ def test_stream_endurance_requires_measured_streams() -> None:
 
 
 def test_catalog_covers_required_families_and_compact_aim_taxonomy() -> None:
-    assert len(SKILL_DEFINITIONS) == 73
-    assert tuple(skills_by_family("aim")) and len(skills_by_family("aim")) == 6
+    assert len(SKILL_DEFINITIONS) == 75
+    assert tuple(skills_by_family("aim")) and len(skills_by_family("aim")) == 7
     assert {item.id for item in skills_by_family("aim")} == {
         "aim_classic",
+        "jump_aim",
         "aim_wide",
         "aim_flow",
         "aim_control",
@@ -281,6 +282,24 @@ def test_speed_high_bpm_requires_official_speed_pressure() -> None:
     skill = evaluate_skills(features)["speed_high_bpm"]
     assert skill.score is None
     assert "speed_pressure" in skill.missing
+
+
+def test_high_bpm_child_requires_direct_bpm_and_is_not_speed_parent() -> None:
+    features = BeatmapFeatures(
+        scores={"bpm": 0.9, "density": 0.7, "speed": 0.8},
+        sources={
+            "bpm": "beatmap_bpm",
+            "density": "beatmap_counts",
+            "speed": "tags",
+        },
+        confidence="low",
+    )
+    assert evaluate_skills(features)["high_bpm"].score is not None
+    missing = BeatmapFeatures(
+        scores={"density": 0.9, "speed": 0.9},
+        sources={"density": "beatmap_counts", "speed": "tags"},
+    )
+    assert evaluate_skills(missing)["high_bpm"].score is None
 
 
 def test_required_any_accepts_one_reliable_feature() -> None:

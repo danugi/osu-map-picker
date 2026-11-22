@@ -237,7 +237,9 @@ def _legacy_reason(
     )
 
 
-def _policy(settings: RankingSettings) -> tuple[list[str], int, list[str]]:
+def _policy(
+    settings: RankingSettings,
+) -> tuple[list[str], int, list[str], dict[str, float]]:
     policy = settings.relevance_policy or {}
     targets = [str(item) for item in settings.relevance_targets if str(item)]
     primary = [
@@ -245,6 +247,13 @@ def _policy(settings: RankingSettings) -> tuple[list[str], int, list[str]]:
         for item in policy.get("primary_targets", targets)
         if str(item)
     ]
+    minimums_raw = policy.get("feature_minimums", {}) or {}
+    minimums: dict[str, float] = {}
+    if isinstance(minimums_raw, dict):
+        minimums = {
+            str(key): float(value)
+            for key, value in minimums_raw.items()
+        }
     return (
         primary,
         int(policy.get("min_primary", 1)),
@@ -253,6 +262,7 @@ def _policy(settings: RankingSettings) -> tuple[list[str], int, list[str]]:
             for item in policy.get("require_features_any", [])
             if str(item)
         ],
+        minimums,
     )
 
 
@@ -260,6 +270,7 @@ def _feature_state(
     candidate: Candidate,
     feature_ids: list[str],
     threshold: float,
+    minimums: dict[str, float],
 ) -> tuple[bool, str]:
     if not feature_ids:
         return True, ""
@@ -281,7 +292,10 @@ def _feature_state(
         if value is None:
             continue
         present.append(f"{label} {round(value * 100)}%")
-        if value > threshold:
+        # A raw note-share is not a 0..1 evidence score. Policies can require
+        # "measured and non-zero" for such a feature while the primary target
+        # score still has to clear the normal relevance threshold.
+        if value > minimums.get(feature, threshold):
             matched.append(label)
     if matched:
         return True, "обязательные признаки: " + ", ".join(matched)
@@ -339,13 +353,13 @@ def evaluate_relevance(
             reason=_legacy_reason(targets, threshold, available, matched),
         )
 
-    primary_ids, min_primary, feature_ids = _policy(settings)
+    primary_ids, min_primary, feature_ids, feature_minimums = _policy(settings)
     primary_set = set(primary_ids)
     primary = [item for item in targets if item.target_id in primary_set]
     primary_available = [item for item in primary if item.score is not None]
     primary_matched = [item for item in primary_available if item.matched]
     feature_pass, feature_reason = _feature_state(
-        candidate, feature_ids, threshold
+        candidate, feature_ids, threshold, feature_minimums
     )
     passed = len(primary_matched) >= min_primary and feature_pass
     if primary_matched:

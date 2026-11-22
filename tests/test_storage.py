@@ -406,7 +406,7 @@ def test_database_info(storage: Storage) -> None:
     info = storage.database_info()
     assert info["schema_version"] == config.DB_SCHEMA_VERSION
     assert info["beatmapsets"] == 1
-    assert info["presets"] == 12
+    assert info["presets"] == 23
     assert info["path"].endswith(".db")
 
 

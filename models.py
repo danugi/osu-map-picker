@@ -681,6 +681,13 @@ class DiscoverySettings:
 class PresetConfig:
     name: str
     description: str = ""
+    # First-class catalog hierarchy metadata. Custom presets leave these
+    # empty. Active built-ins carry stable node identity, parent link,
+    # category and display order in the persisted JSON itself.
+    catalog_id: str = ""
+    parent_id: str | None = None
+    category_id: str = "custom"
+    display_order: int = 0
     filters: Filters = field(default_factory=Filters)
     ranking: RankingSettings = field(default_factory=RankingSettings)
     discovery: DiscoverySettings = field(default_factory=DiscoverySettings)
@@ -691,6 +698,10 @@ class PresetConfig:
             "schema_version": self.schema_version,
             "name": self.name,
             "description": self.description,
+            "catalog_id": self.catalog_id,
+            "parent_id": self.parent_id,
+            "category_id": self.category_id,
+            "display_order": self.display_order,
             "filters": self.filters.to_dict(),
             "ranking": self.ranking.to_dict(),
             "discovery": self.discovery.to_dict(),
@@ -713,9 +724,26 @@ class PresetConfig:
         description = data.get("description", "")
         if not isinstance(description, str):
             raise ModelError(f"{path}.description: ожидалась строка")
+        catalog_id = data.get("catalog_id", "")
+        parent_id = data.get("parent_id")
+        category_id = data.get("category_id", "custom")
+        if not isinstance(catalog_id, str):
+            raise ModelError(f"{path}.catalog_id: ожидалась строка")
+        if parent_id is not None and not isinstance(parent_id, str):
+            raise ModelError(f"{path}.parent_id: ожидалась строка или null")
+        if not isinstance(category_id, str):
+            raise ModelError(f"{path}.category_id: ожидалась строка")
+        try:
+            display_order = int(data.get("display_order", 0))
+        except (TypeError, ValueError) as exc:
+            raise ModelError(f"{path}.display_order: ожидалось целое") from exc
         return cls(
             name=name.strip(),
             description=description,
+            catalog_id=catalog_id,
+            parent_id=parent_id,
+            category_id=category_id,
+            display_order=display_order,
             filters=Filters.from_dict(data.get("filters", {}) or {}, f"{path}.filters"),
             ranking=RankingSettings.from_dict(
                 data.get("ranking", {}) or {}, f"{path}.ranking"

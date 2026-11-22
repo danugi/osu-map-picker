@@ -228,16 +228,9 @@ def test_discovery_and_allrounder_have_no_target_gate() -> None:
 
 def test_specialized_presets_use_their_own_weighted_targets() -> None:
     expected = {
-        "Aim",
-        "Aim Farm",
-        "Speed",
-        "Streams",
-        "Stamina",
-        "Finger Control",
-        "Reading",
-        "Accuracy",
-        "Tech",
-        "Flashlight",
+        preset.name
+        for preset in presets.builtin_presets()
+        if preset.ranking.relevance_targets
     }
     target_sets: dict[str, tuple[str, ...]] = {}
     for name in expected:
@@ -251,7 +244,7 @@ def test_specialized_presets_use_their_own_weighted_targets() -> None:
         assert set(targets) <= set(preset.ranking.skill_weights), name
         target_sets[name] = targets
 
-    assert target_sets["Tech"] != target_sets["Reading"]
+    assert target_sets["Tech"] != target_sets["Aim"]
     assert "tech" in target_sets["Tech"]
     # osu! streams tag group: bursts are part of the curated Streams preset.
     assert "stream_consistency" in target_sets["Streams"]
@@ -280,6 +273,73 @@ def test_specialized_presets_use_their_own_weighted_targets() -> None:
         "burst" not in target
         for target in legacy_streams.ranking.relevance_targets
     )
+
+
+def test_streams_accepts_small_measured_stream_share_when_target_passes() -> None:
+    preset = presets.builtin_by_name("Streams")
+    assert preset is not None
+    candidate = score_candidate(
+        1,
+        {"stream_consistency": 0.80},
+        features={"streams": 0.08, "bursts": 0.02, "stream_longest": 1.0},
+        feature_statuses={
+            "streams": evidence.MEASURED,
+            "bursts": evidence.MEASURED,
+            "stream_longest": evidence.MEASURED,
+        },
+    )
+    check = evaluate_relevance(candidate, preset.ranking)
+    assert check.passed is True
+    assert "обязательные признаки" in check.reason
+
+
+def test_streams_rejects_unmeasured_or_zero_share_even_with_metadata() -> None:
+    preset = presets.builtin_by_name("Streams")
+    assert preset is not None
+    missing = score_candidate(
+        2,
+        {"stream_consistency": 0.80},
+        features={"stream_consistency": 0.80},
+    )
+    assert evaluate_relevance(missing, preset.ranking).passed is False
+    zero = score_candidate(
+        3,
+        {"stream_consistency": 0.80},
+        features={"streams": 0.0, "bursts": 0.0},
+        feature_statuses={
+            "streams": evidence.NOT_DETECTED,
+            "bursts": evidence.NOT_DETECTED,
+        },
+    )
+    assert evaluate_relevance(zero, preset.ranking).passed is False
+
+
+def test_continuous_and_burst_stream_children_are_distinct() -> None:
+    continuous = presets.builtin_by_name("Continuous Streams")
+    bursts = presets.builtin_by_name("Burst-oriented Streams")
+    assert continuous is not None and bursts is not None
+    stream_candidate = score_candidate(
+        4,
+        {"stream_long": 0.80},
+        features={"streams": 0.20, "bursts": 0.0},
+        feature_statuses={
+            "streams": evidence.MEASURED,
+            "bursts": evidence.NOT_DETECTED,
+        },
+    )
+    burst_candidate = score_candidate(
+        5,
+        {"burst_control": 0.80},
+        features={"streams": 0.0, "bursts": 0.20},
+        feature_statuses={
+            "streams": evidence.NOT_DETECTED,
+            "bursts": evidence.MEASURED,
+        },
+    )
+    assert evaluate_relevance(stream_candidate, continuous.ranking).passed is True
+    assert evaluate_relevance(stream_candidate, bursts.ranking).passed is False
+    assert evaluate_relevance(burst_candidate, bursts.ranking).passed is True
+    assert evaluate_relevance(burst_candidate, continuous.ranking).passed is False
 
 
 @pytest.mark.parametrize(
@@ -326,7 +386,7 @@ def test_switching_preset_changes_the_target_criteria() -> None:
         features={"tag_tech": 1.0, "slider_ratio": 0.9},
     )
     tech = presets.builtin_by_name("Tech")
-    reading = presets.builtin_by_name("Reading")
+    reading = presets.known_builtin_by_name("Reading")
     assert tech is not None and reading is not None
     assert evaluate_relevance(candidate, tech.ranking).passed is True
     assert evaluate_relevance(candidate, reading.ranking).passed is False
@@ -632,7 +692,7 @@ def test_mixed_aim_requires_an_aim_target() -> None:
 
 
 def test_reading_secondary_ar_targets_do_not_replace_ar_challenge() -> None:
-    preset = presets.builtin_by_name("Reading")
+    preset = presets.known_builtin_by_name("Reading")
     assert preset is not None
     check = evaluate_relevance(
         score_candidate(
@@ -653,7 +713,7 @@ def test_reading_secondary_ar_targets_do_not_replace_ar_challenge() -> None:
 
 
 def test_accuracy_high_od_without_precision_evidence_fails() -> None:
-    preset = presets.builtin_by_name("Accuracy")
+    preset = presets.known_builtin_by_name("Accuracy")
     assert preset is not None
     scores = {
         "accuracy_focused": 0.80,
@@ -750,7 +810,7 @@ def test_finger_control_requires_measured_evidence() -> None:
 
 
 def test_flashlight_requires_its_tag_and_primary_target() -> None:
-    preset = presets.builtin_by_name("Flashlight")
+    preset = presets.known_builtin_by_name("Flashlight")
     assert preset is not None
     scores = {"fl_friendly": 0.80, "fl_reading": 0.10, "fl_aim": 0.10}
     assert evaluate_relevance(score_candidate(1, scores), preset.ranking).passed is False
@@ -826,7 +886,7 @@ def test_sequence_policy_reports_missing_partial_and_failed_analysis() -> None:
 
 
 def test_accuracy_missing_precision_features_is_not_a_match() -> None:
-    preset = presets.builtin_by_name("Accuracy")
+    preset = presets.known_builtin_by_name("Accuracy")
     assert preset is not None
     check = evaluate_relevance(
         score_candidate(1, {"accuracy_focused": 0.80}),

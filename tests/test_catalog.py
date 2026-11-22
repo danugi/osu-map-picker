@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 import catalog
 import presets
 from skillsets import SKILL_IDS, SKILLS
@@ -13,7 +15,7 @@ def test_every_skill_appears_exactly_once_in_the_hierarchy() -> None:
         for category in catalog.SKILL_CATEGORIES
         for skill_id in category.skill_ids
     ]
-    assert len(flattened) == len(set(flattened)) == len(SKILL_IDS) == 73
+    assert len(flattened) == len(set(flattened)) == len(SKILL_IDS) == 75
     assert set(flattened) == set(SKILL_IDS)
     assert all(category.subcategories for category in catalog.SKILL_CATEGORIES)
     assert all(
@@ -67,10 +69,13 @@ def test_selected_count_uses_positive_weights_only() -> None:
     ) == 2
 
 
-def test_all_builtin_presets_have_a_real_group() -> None:
+def test_all_builtin_presets_have_a_real_hierarchy_node() -> None:
     builtins = presets.builtin_presets()
-    assert len(builtins) == 12
-    assert {preset.name for preset in builtins} == set(catalog.PRESET_GROUP_BY_NAME)
+    assert len(builtins) == 23
+    active_names = {preset.name for preset in builtins}
+    assert active_names == set(catalog.PRESET_GROUP_BY_NAME)
+    assert active_names == set(catalog.PRESET_NODE_BY_NAME)
+    catalog.validate_preset_catalog(active_names)
     assert [group.label for group in catalog.PRESET_GROUPS] == [
         "Explore",
         "Farm",
@@ -81,14 +86,137 @@ def test_all_builtin_presets_have_a_real_group() -> None:
         group = catalog.preset_group(preset.name, is_builtin=True)
         assert group.id in catalog.PRESET_GROUP_BY_ID
         assert catalog.preset_display_name(preset.name).startswith(group.icon)
+        assert preset.catalog_id
+        assert preset.category_id == group.id
+        node = catalog.PRESET_NODE_BY_ID[preset.catalog_id]
+        assert node.name == preset.name
+        assert preset.parent_id == node.parent_id
+        assert preset.display_order == node.order
 
     grouped = catalog.group_presets_by_category(builtins)
     assert set(grouped) == {group.id for group in catalog.PRESET_GROUPS}
     assert sum(len(items) for items in grouped.values()) == len(builtins)
-    assert len(grouped["explore"]) == 3
+    assert len(grouped["explore"]) == 2
     assert len(grouped["farm"]) == 1
-    assert len(grouped["train"]) == 8
+    assert len(grouped["train"]) == 20
     assert grouped["custom"] == []
+
+    # Parents are ordinary selectable presets and children are independent.
+    assert {node.name for node in catalog.preset_roots("train")} == {
+        "Aim",
+        "Speed",
+        "Streams",
+        "Stamina",
+        "Finger Control",
+        "Tech",
+    }
+    assert {node.name for node in catalog.preset_children("aim")} == {
+        "Jump Aim",
+        "Flow Aim",
+        "Wide Aim",
+        "Aim Control",
+        "Aim + Bursts",
+    }
+    assert catalog.preset_path("aim.jump")[-1].name == "Jump Aim"
+    assert [node.name for node in catalog.preset_path("aim.jump")] == [
+        "Aim",
+        "Jump Aim",
+    ]
+
+
+def test_retired_presets_have_no_active_hierarchy_node() -> None:
+    active_names = {preset.name for preset in presets.builtin_presets()}
+    for retired in (
+        "Flashlight",
+        "Reading",
+        "Accuracy",
+        "Weird Aim",
+        "Reading + Aim",
+    ):
+        assert retired not in active_names
+        assert catalog.preset_node(retired) is None
+        assert retired in presets.LEGACY_BUILTIN_NAMES
+
+
+def test_hierarchy_tree_keeps_parent_context_when_child_matches() -> None:
+    items = [
+        SimpleNamespace(
+            id=index,
+            name=preset.name,
+            is_builtin=True,
+            config=SimpleNamespace(description=preset.description),
+        )
+        for index, preset in enumerate(presets.builtin_presets(), start=1)
+    ]
+    roots, custom = catalog.build_preset_tree(items, query="jump aim")
+    assert custom == []
+    aim = next(entry for entry in roots if entry.node.name == "Aim")
+    assert [child.node.name for child in aim.children] == ["Jump Aim"]
+
+
+def test_hierarchy_tree_keeps_children_when_parent_matches() -> None:
+    items = [
+        SimpleNamespace(
+            id=index,
+            name=preset.name,
+            is_builtin=True,
+            config=SimpleNamespace(description=preset.description),
+        )
+        for index, preset in enumerate(presets.builtin_presets(), start=1)
+    ]
+    roots, _ = catalog.build_preset_tree(items, query="Aim")
+    aim = next(entry for entry in roots if entry.node.name == "Aim")
+    assert {child.node.name for child in aim.children} == {
+        "Jump Aim",
+        "Flow Aim",
+        "Wide Aim",
+        "Aim Control",
+        "Aim + Bursts",
+    }
+
+
+def test_deleted_parent_does_not_hide_its_children() -> None:
+    items = [
+        SimpleNamespace(
+            id=index,
+            name=preset.name,
+            is_builtin=True,
+            config=SimpleNamespace(description=preset.description),
+        )
+        for index, preset in enumerate(presets.builtin_presets(), start=1)
+        if preset.name != "Aim"
+    ]
+    roots, _ = catalog.build_preset_tree(items)
+    aim = next(entry for entry in roots if entry.node.name == "Aim")
+    assert aim.item is None
+    assert {child.node.name for child in aim.children} == {
+        "Jump Aim",
+        "Flow Aim",
+        "Wide Aim",
+        "Aim Control",
+        "Aim + Bursts",
+    }
+
+
+def test_invalid_hierarchy_metadata_is_rejected() -> None:
+    duplicate = (
+        catalog.PresetNode("one", "One", "train", 1, label="One"),
+        catalog.PresetNode("one", "Two", "train", 2, label="Two"),
+    )
+    with pytest.raises(ValueError, match="duplicate preset node id"):
+        catalog.validate_preset_catalog(nodes=duplicate)
+    unknown_parent = (
+        catalog.PresetNode(
+            "orphan",
+            "Orphan",
+            "train",
+            1,
+            parent_id="missing",
+            label="Orphan",
+        ),
+    )
+    with pytest.raises(ValueError, match="unknown parent"):
+        catalog.validate_preset_catalog(nodes=unknown_parent)
 
 
 def test_user_presets_fall_back_to_custom_group() -> None:

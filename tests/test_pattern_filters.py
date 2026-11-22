@@ -58,7 +58,7 @@ def test_builtin_presets_map_to_measurable_patterns() -> None:
 
 def test_unsupported_goals_do_not_invent_patterns() -> None:
     by_name = {cfg.name: cfg for cfg in presets.builtin_presets()}
-    for name in ("Finger Control", "Reading", "Accuracy", "Flashlight"):
+    for name in ("Finger Control",):
         cfg = by_name[name]
         assert pattern_filters.relevant_patterns(
             cfg.ranking.skill_weights

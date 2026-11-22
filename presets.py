@@ -12,6 +12,7 @@ import hashlib
 import json
 from typing import Any
 
+import catalog
 import config
 from filters import FilterConfigError, validate_filters
 from models import (
@@ -53,6 +54,25 @@ def validate_preset_config(preset: PresetConfig) -> None:
     if preset.schema_version != config.SETTINGS_SCHEMA_VERSION:
         raise PresetError(
             f"Версия схемы пресета {preset.schema_version} не поддерживается"
+        )
+    if preset.catalog_id:
+        node = catalog.PRESET_NODE_BY_ID.get(preset.catalog_id)
+        if node is None:
+            raise PresetError(
+                f"catalog_id: неизвестный узел {preset.catalog_id}"
+            )
+        if (
+            node.name != name
+            or preset.parent_id != node.parent_id
+            or preset.category_id != node.category_id
+            or preset.display_order != node.order
+        ):
+            raise PresetError(
+                "catalog_id: метаданные иерархии не совпадают с каталогом"
+            )
+    elif preset.parent_id is not None or preset.category_id != "custom":
+        raise PresetError(
+            "parent_id/category_id без catalog_id недопустимы"
         )
     try:
         validate_filters(preset.filters)
@@ -158,6 +178,26 @@ def _aim() -> PresetConfig:
         mapping_weight=1.3,
     )
     return cfg
+
+
+def _jump_aim() -> PresetConfig:
+    return _skill_preset(
+        "Jump Aim",
+        "Jump-aim: движения строятся на измеренной доле прыжков и ширине "
+        "прыжков из .osu, а не только на высоком aim-атрибуте. Без "
+        "sequence-анализа профиль не подтверждает jump-паттерн.",
+        {
+            "jump_aim": 1.0,
+            "aim_classic": 0.20,
+        },
+        comfort_stars=5.5,
+        comfort_width=0.9,
+        ideal_length=150,
+        length_tolerance=90,
+        duration_max=240,
+        diversity=0.45,
+        mapping_weight=1.45,
+    )
 
 
 def _legacy_mixed_aim_skillset() -> PresetConfig:
@@ -537,6 +577,42 @@ def _speed() -> PresetConfig:
     return cfg
 
 
+def _high_bpm() -> PresetConfig:
+    return _skill_preset(
+        "High BPM",
+        "Высокий BPM без обязательного burst-рисунка. Основное доказательство "
+        "— измеренный BPM карты; speed-атрибут остаётся дополнительным "
+        "сигналом, если он доступен. Высокий BPM сам по себе не доказывает "
+        "рисунок паттерна.",
+        {
+            "high_bpm": 1.0,
+            "speed_density": 0.20,
+        },
+        comfort_stars=5.5,
+        ideal_length=130,
+        mapping_weight=1.4,
+    )
+
+
+def _speed_bursts() -> PresetConfig:
+    return _skill_preset(
+        "Speed Bursts",
+        "Скоростные burst-серии 5–9 нот: доля, количество и ровность "
+        "интервалов из .osu. Длинные stream-цепочки не считаются burst "
+        "доказательством.",
+        {
+            "speed_bursts": 1.0,
+            "burst_control": 0.35,
+        },
+        comfort_stars=5.4,
+        ideal_length=145,
+        length_tolerance=85,
+        duration_max=240,
+        diversity=0.4,
+        mapping_weight=1.45,
+    )
+
+
 def _streams() -> PresetConfig:
     cfg = _skill_preset(
         "Streams",
@@ -560,6 +636,46 @@ def _streams() -> PresetConfig:
     )
     cfg.ranking.factors["length"].weight = 0.5
     return cfg
+
+
+def _burst_streams() -> PresetConfig:
+    return _skill_preset(
+        "Burst-oriented Streams",
+        "Burst-ориентированная ветка единой Streams-категории: короткие "
+        "серии 5–9 нот из .osu. Это не отдельный top-level Bursts-профиль и "
+        "не Stamina; длинные цепочки сами по себе здесь не подтверждают "
+        "burst-рисунок.",
+        {
+            "burst_control": 1.0,
+            "speed_bursts": 0.55,
+            "stream_burst": 0.30,
+        },
+        comfort_stars=5.2,
+        ideal_length=160,
+        length_tolerance=95,
+        duration_max=270,
+        diversity=0.45,
+        mapping_weight=1.4,
+    )
+
+
+def _continuous_streams() -> PresetConfig:
+    return _skill_preset(
+        "Continuous Streams",
+        "Непрерывные stream-цепочки 10+ нот: длина цепочки, доля потока и "
+        "ровность интервалов. Burst-серии не заменяют длинную цепочку, а "
+        "выносливость остаётся отдельным профилем Stamina.",
+        {
+            "stream_long": 1.0,
+            "stream_consistency": 0.55,
+        },
+        comfort_stars=5.2,
+        ideal_length=190,
+        length_tolerance=105,
+        duration_max=300,
+        diversity=0.4,
+        mapping_weight=1.4,
+    )
 
 
 def _legacy_streams_config() -> PresetConfig:
@@ -663,6 +779,41 @@ def _finger_control() -> PresetConfig:
         },
         comfort_stars=5.0,
         diversity=0.4,
+    )
+
+
+def _alternating() -> PresetConfig:
+    return _skill_preset(
+        "Alternating",
+        "Alternation-профиль: speed, плотность, низкий aim-вклад и тег alt. "
+        "Прямого измерения распределения пальцев в .osu нет, поэтому это "
+        "ограниченный прокси, а не доказанный hand-alternation.",
+        {
+            "alternating": 1.0,
+            "finger_control": 0.35,
+        },
+        comfort_stars=5.1,
+        diversity=0.45,
+        mapping_weight=1.3,
+    )
+
+
+def _double_tap() -> PresetConfig:
+    return _skill_preset(
+        "Double-tap / Burst Control",
+        "Короткие burst-группы как tapping-нагрузка: измеренная burst-доля, "
+        "медианная длина и ровность. Профиль отличается от Alternating "
+        "наличием реальных burst-цепочек из .osu.",
+        {
+            "double_tap_control": 1.0,
+            "burst_control": 0.35,
+        },
+        comfort_stars=5.2,
+        ideal_length=160,
+        length_tolerance=90,
+        duration_max=270,
+        diversity=0.4,
+        mapping_weight=1.4,
     )
 
 
@@ -855,8 +1006,9 @@ def _aim_bursts() -> PresetConfig:
 def _speed_aim() -> PresetConfig:
     return _skill_preset(
         "Speed + Aim",
-        "Скорость с прицелом: High-BPM, Speed + aim и немного классического "
-        "aim. Подходит для карт, где скорость неотделима от движения курсора.",
+        "Скорость с прицелом: Speed + Aim, High-BPM и классический aim. "
+        "Требует difficulty attributes для обоих компонентов; если локальный "
+        "каталог их не содержит, профиль честно не подтверждает совпадение.",
         {
             "speed_aim": 0.45,
             "speed_high_bpm": 0.20,
@@ -1096,12 +1248,21 @@ _RELEVANCE_TARGETS: dict[str, tuple[str, ...]] = {
         "burst_control",
         "speed_bursts",
     ),
-    "Wide Aim": ("aim_wide", "aim_classic"),
-    "Flow Aim": ("aim_flow", "aim_classic"),
-    "Aim Control": ("aim_control", "aim_precision", "aim_classic"),
+    "Jump Aim": ("jump_aim",),
+    "Wide Aim": ("aim_wide",),
+    "Flow Aim": ("aim_flow",),
+    "Aim Control": ("aim_control",),
     "Aim + Alt": ("aim_classic", "finger_control", "alternating"),
-    "Aim + Bursts": ("aim_bursts", "speed_bursts"),
-    "Speed + Aim": ("speed_aim", "speed_high_bpm", "aim_classic"),
+    "Aim + Bursts": ("aim_bursts",),
+    "High BPM": ("high_bpm",),
+    "Speed Bursts": ("speed_bursts",),
+    "Burst-oriented Streams": ("burst_control", "speed_bursts"),
+    "Continuous Streams": ("stream_long", "stream_consistency"),
+    "Alternating": ("alternating",),
+    "Double-tap / Burst Control": ("double_tap_control",),
+    "Speed + Aim": ("speed_aim",),
+    "Slider Tech": ("slider_heavy",),
+    "Rhythm Control": ("variable_rhythm",),
     "Speed + Stamina": (
         "speed_high_bpm",
         "stamina_alt",
@@ -1121,12 +1282,6 @@ _RELEVANCE_TARGETS: dict[str, tuple[str, ...]] = {
         "speed_aim",
         "stream_burst",
     ),
-    "Slider Tech": ("slider_heavy", "tech", "angular_control"),
-    "Rhythm Control": (
-        "variable_rhythm",
-        "rhythm_complexity",
-        "finger_control",
-    ),
     "Weird Aim": ("tech", "aim_control", "unusual_spacing"),
 }
 
@@ -1137,6 +1292,29 @@ _RELEVANCE_POLICIES: dict[str, dict[str, Any]] = {
     "Aim": {
         "primary_targets": ["aim_classic", "aim_control", "aim_bursts"],
     },
+    "Jump Aim": {
+        "primary_targets": ["jump_aim"],
+    },
+    "Wide Aim": {
+        "primary_targets": ["aim_wide"],
+        "require_features_any": ["wide_jump_share"],
+        "feature_minimums": {"wide_jump_share": 0.0},
+    },
+    "Flow Aim": {
+        "primary_targets": ["aim_flow"],
+        "require_features_any": ["flow_share"],
+        "feature_minimums": {"flow_share": 0.0},
+    },
+    "Aim Control": {
+        "primary_targets": ["aim_control"],
+        "require_features_any": ["angle_change_share"],
+        "feature_minimums": {"angle_change_share": 0.0},
+    },
+    "Aim + Bursts": {
+        "primary_targets": ["aim_bursts"],
+        "require_features_any": ["bursts"],
+        "feature_minimums": {"bursts": 0.0},
+    },
     "Speed": {
         "primary_targets": [
             "speed_high_bpm",
@@ -1144,6 +1322,17 @@ _RELEVANCE_POLICIES: dict[str, dict[str, Any]] = {
             "speed_density",
         ],
         "require_features_any": ["speed_pressure", "bursts"],
+    },
+    "High BPM": {
+        "primary_targets": ["high_bpm"],
+    },
+    "Speed Bursts": {
+        "primary_targets": ["speed_bursts"],
+        "require_features_any": ["bursts"],
+        "feature_minimums": {"bursts": 0.0},
+    },
+    "Speed + Aim": {
+        "primary_targets": ["speed_aim"],
     },
     "Streams & Stamina": {
         "primary_targets": ["stream_consistency", "stream_long"],
@@ -1161,8 +1350,22 @@ _RELEVANCE_POLICIES: dict[str, dict[str, Any]] = {
             "burst_control",
         ],
         # Measured evidence only: continuous streams or 5-9 note bursts must
-        # come from the local .osu analysis, never from a mapper tag.
+        # come from the local .osu analysis, never from a mapper tag. These are
+        # raw note shares, not target scores: one measured chain is evidence
+        # even when it covers less than 55% of a long map. The primary target
+        # must still clear the normal relevance threshold.
         "require_features_any": ["streams", "bursts"],
+        "feature_minimums": {"streams": 0.0, "bursts": 0.0},
+    },
+    "Burst-oriented Streams": {
+        "primary_targets": ["burst_control", "speed_bursts"],
+        "require_features_any": ["bursts"],
+        "feature_minimums": {"bursts": 0.0},
+    },
+    "Continuous Streams": {
+        "primary_targets": ["stream_long"],
+        "require_features_any": ["streams"],
+        "feature_minimums": {"streams": 0.0},
     },
     "Bursts": {
         # Both targets require burst evidence and must exceed the relevance
@@ -1181,6 +1384,14 @@ _RELEVANCE_POLICIES: dict[str, dict[str, Any]] = {
         # Tags still lift the skill scores via their weights.
         "require_features_any": ["density", "speed_pressure"],
     },
+    "Alternating": {
+        "primary_targets": ["alternating"],
+    },
+    "Double-tap / Burst Control": {
+        "primary_targets": ["double_tap_control"],
+        "require_features_any": ["bursts"],
+        "feature_minimums": {"bursts": 0.0},
+    },
     "Reading": {
         "primary_targets": ["ar_challenge"],
     },
@@ -1195,6 +1406,16 @@ _RELEVANCE_POLICIES: dict[str, dict[str, Any]] = {
             "slider_ratio",
             "density",
         ],
+    },
+    "Slider Tech": {
+        "primary_targets": ["slider_heavy"],
+        "require_features_any": ["slider_ratio", "slider_share"],
+        "feature_minimums": {"slider_ratio": 0.0, "slider_share": 0.0},
+    },
+    "Rhythm Control": {
+        "primary_targets": ["variable_rhythm"],
+        "require_features_any": ["rhythm_variability"],
+        "feature_minimums": {"rhythm_variability": 0.0},
     },
     "Flashlight": {
         "primary_targets": ["fl_friendly"],
@@ -1257,6 +1478,27 @@ _PRE_V17_STAMINA_DESCRIPTION = (
     "остаётся явным прокси."
 )
 
+# v17 definitions that become narrower/clearer active children in v18.
+# Fingerprints let the migration update only untouched built-ins.
+_PRE_V18_FINGERPRINTS = {
+    "Streams": "f57851d985fb50cae47241690d9119f49252bf1513a792b2e4acc3a4f991d71a",
+    "Wide Aim": "d1780ff3de70bfeaaf6ebd388bf773259bf8380b9ac0702435b0a28fb0f49aa1",
+    "Flow Aim": "40b2aa8984a703aafbcdbc98f762320023d13f3e26e7d1cc9a3ce44891ccec30",
+    "Aim Control": "ad4ed0d556db0982f3449d3c77ffbd07674d2eb37f9e1b32466152e45f1e84dd",
+    "Aim + Bursts": "759d37b2266449113c525571db3a889ae5813a25315c560b2d03c3ccfed57d2d",
+    "Speed + Aim": "e957e942f28ceefc19bc11725871832a669483cbf5c11ed9635826efedef1ab0",
+    "Slider Tech": "8c51e90ab84b173c695eecc1a7b31fe054c6df09faaa6deadf01816cf95a255b",
+    "Rhythm Control": "438bc0085bc779d9a54c972ca20540a49f1d8eea404ebf8e7b63865004ce8c36",
+}
+_PRE_V18_STREAMS_POLICY = {
+    "primary_targets": [
+        "stream_consistency",
+        "stream_long",
+        "burst_control",
+    ],
+    "require_features_any": ["streams", "bursts"],
+}
+
 
 def _apply_relevance_defaults(cfg: PresetConfig) -> PresetConfig:
     """Attach a preset's own targets and gate policy after its builder."""
@@ -1272,18 +1514,29 @@ def _apply_relevance_defaults(cfg: PresetConfig) -> PresetConfig:
 # overlapping experiments from earlier versions stays available as legacy
 # rows, but is no longer offered as a ready-made preset.
 _BUILDERS = (
-    _aim,
     _discovery,
     _allrounder,
     _aim_farm,
+    _aim,
+    _jump_aim,
+    _flow_aim,
+    _wide_aim,
+    _aim_control,
+    _aim_bursts,
     _speed,
+    _high_bpm,
+    _speed_bursts,
+    _speed_aim,
     _streams,
+    _burst_streams,
+    _continuous_streams,
     _stamina,
     _finger_control,
-    _reading,
-    _accuracy,
+    _alternating,
+    _double_tap,
     _tech,
-    _flashlight,
+    _slider_tech,
+    _rhythm_control,
 )
 
 _LEGACY_BUILDERS = (
@@ -1292,12 +1545,7 @@ _LEGACY_BUILDERS = (
     _streams_stamina,
     _bursts,
     _weird_aim,
-    _wide_aim,
-    _flow_aim,
-    _aim_control,
     _aim_alt,
-    _aim_bursts,
-    _speed_aim,
     _speed_stamina,
     _low_ar_reading,
     _high_ar_reading,
@@ -1305,10 +1553,14 @@ _LEGACY_BUILDERS = (
     _reading_aim,
     _reading_streams,
     _jump_streams,
-    _slider_tech,
-    _rhythm_control,
     _custom,
     _legacy_aim_farm_pp_config,
+    # Retired standalone active presets. Their stored rows remain readable as
+    # legacy data, but they are no longer seeded, offered or reset as active
+    # built-ins.
+    _reading,
+    _accuracy,
+    _flashlight,
 )
 
 # Exact v10 Aim Farm fingerprint. v10 already had title queries and the
@@ -1319,7 +1571,25 @@ _PRE_V11_FINGERPRINTS = {
     ),
 }
 
-BUILTIN_PRESETS_VERSION = 17
+BUILTIN_PRESETS_VERSION = 18
+_V18_NEW_NAMES = frozenset(
+    {
+        "Jump Aim",
+        "Flow Aim",
+        "Wide Aim",
+        "Aim Control",
+        "Aim + Bursts",
+        "High BPM",
+        "Speed Bursts",
+        "Speed + Aim",
+        "Burst-oriented Streams",
+        "Continuous Streams",
+        "Alternating",
+        "Double-tap / Burst Control",
+        "Slider Tech",
+        "Rhythm Control",
+    }
+)
 _V2_NEW_NAMES = frozenset(
     {
         "Speed",
@@ -1393,6 +1663,10 @@ def _canonical_config_value(value: Any) -> Any:
 
 def _preset_fingerprint(cfg: PresetConfig) -> str:
     data = _canonical_config_value(_normalized_config_dict(cfg))
+    # Hierarchy metadata was added later and is not search-affecting; strip it
+    # so old built-in fingerprints remain stable.
+    for key in ("catalog_id", "parent_id", "category_id", "display_order"):
+        data.pop(key, None)
     # Fields introduced by v10 are absent from every old row. Strip them so
     # an old untouched definition keeps a stable fingerprint after parsing.
     data.get("ranking", {}).pop("farm_tolerance_seconds", None)
@@ -1437,10 +1711,27 @@ LEGACY_BUILTIN_NAMES = frozenset(
 ) - _BUILTIN_NAMES
 
 
+def _with_catalog_metadata(cfg: PresetConfig) -> PresetConfig:
+    node = catalog.PRESET_NODE_BY_NAME.get(cfg.name)
+    if node is None:
+        cfg.catalog_id = ""
+        cfg.parent_id = None
+        cfg.category_id = "custom"
+        cfg.display_order = 0
+    else:
+        cfg.catalog_id = node.id
+        cfg.parent_id = node.parent_id
+        cfg.category_id = node.category_id
+        cfg.display_order = node.order
+    return cfg
+
+
 def builtin_presets() -> list[PresetConfig]:
-    """Fresh copies of the curated built-in presets."""
+    """Fresh copies of the curated built-in presets with hierarchy metadata."""
     return [
-        copy.deepcopy(_apply_relevance_defaults(builder()))
+        _with_catalog_metadata(
+            copy.deepcopy(_apply_relevance_defaults(builder()))
+        )
         for builder in _BUILDERS
     ]
 
@@ -1458,17 +1749,19 @@ def is_legacy_builtin(preset: Preset) -> bool:
 
 
 def visible_presets(storage: Any, *, include_id: int | None = None) -> list[Preset]:
-    """Curated built-ins, user presets and the currently active legacy row.
+    """Curated active built-ins and user presets.
 
-    Hiding a legacy built-in never deletes or rewrites it.  Keeping the active
-    one visible lets an existing installation continue from exactly where it
-    was, while new users see only the curated catalog.
+    Legacy/retired rows remain in SQLite so old links and user data resolve,
+    but they are deliberately absent from every active selection surface.
+    ``include_id`` is retained as a compatibility argument for callers that
+    used to re-show the active row; it no longer overrides retirement.
     """
 
+    del include_id
     return [
         preset
         for preset in storage.list_presets()
-        if not is_legacy_builtin(preset) or preset.id == include_id
+        if not is_legacy_builtin(preset)
     ]
 
 
@@ -1803,6 +2096,56 @@ def _upgrade_v17_definitions(storage: Any) -> int:
     return 1
 
 
+def _apply_catalog_metadata(storage: Any) -> int:
+    """Attach stable hierarchy metadata without touching search settings."""
+
+    changed = 0
+    active = {
+        preset.name.casefold(): preset for preset in builtin_presets()
+    }
+    for row in storage.list_presets():
+        if not row.is_builtin:
+            continue
+        desired = active.get(row.name.casefold())
+        if desired is None:
+            continue
+        current = row.config
+        if (
+            current.catalog_id == desired.catalog_id
+            and current.parent_id == desired.parent_id
+            and current.category_id == desired.category_id
+            and current.display_order == desired.display_order
+        ):
+            continue
+        updated = PresetConfig.from_dict(current.to_dict())
+        updated.catalog_id = desired.catalog_id
+        updated.parent_id = desired.parent_id
+        updated.category_id = desired.category_id
+        updated.display_order = desired.display_order
+        storage.update_preset(row.id, updated)
+        changed += 1
+    return changed
+
+
+def _upgrade_v18_definitions(storage: Any) -> int:
+    """Promote the hierarchical catalog and refresh untouched v17 definitions."""
+
+    changed = 0
+    for name, fingerprint in _PRE_V18_FINGERPRINTS.items():
+        row = storage.get_preset_by_name(name)
+        modern = builtin_by_name(name)
+        if row is None or not row.is_builtin or modern is None:
+            continue
+        if _preset_fingerprint(row.config) != fingerprint:
+            continue
+        if name == "Streams":
+            if row.config.ranking.relevance_policy != _PRE_V18_STREAMS_POLICY:
+                continue
+        storage.update_preset(row.id, modern)
+        changed += 1
+    return changed
+
+
 def ensure_builtin_presets(storage: Any) -> int:
     """Seed built-ins and add newer profiles without destroying user edits.
 
@@ -1826,6 +2169,7 @@ def ensure_builtin_presets(storage: Any) -> int:
     except ValueError:
         version = 1
     if version >= BUILTIN_PRESETS_VERSION:
+        _apply_catalog_metadata(storage)
         return 0
 
     created = 0
@@ -1871,6 +2215,9 @@ def ensure_builtin_presets(storage: Any) -> int:
         new_names.update(_V16_NEW_NAMES)
     if version < 17:
         _upgrade_v17_definitions(storage)
+    if version < 18:
+        _upgrade_v18_definitions(storage)
+        new_names.update(_V18_NEW_NAMES)
 
     for preset in builtin_presets():
         if preset.name not in new_names:
@@ -1900,6 +2247,7 @@ def ensure_builtin_presets(storage: Any) -> int:
     if version < 14:
         _upgrade_v14_definitions(storage)
 
+    _apply_catalog_metadata(storage)
     storage.set_preference("builtins_version", str(BUILTIN_PRESETS_VERSION))
     return created
 
@@ -1940,6 +2288,7 @@ def duplicate_preset(storage: Any, preset_id: int, new_name: str | None = None) 
     config_copy = PresetConfig.from_dict(source.config.to_dict())
     config_copy.name = name
     config_copy.description = source.config.description
+    _with_catalog_metadata(config_copy)
     validate_preset_config(config_copy)
     return storage.create_preset(config_copy, is_builtin=False)
 
@@ -1959,6 +2308,7 @@ def create_preset(
         cfg = PresetConfig.from_dict(base.config.to_dict())
         cfg.name = name
         cfg.schema_version = config.SETTINGS_SCHEMA_VERSION
+        _with_catalog_metadata(cfg)
     else:
         cfg = default_config(name)
     validate_preset_config(cfg)
@@ -1975,6 +2325,7 @@ def rename_preset(storage: Any, preset_id: int, new_name: str) -> Preset:
         raise PresetError(f"Пресет с именем «{name}» уже существует")
     cfg = PresetConfig.from_dict(current.config.to_dict())
     cfg.name = name
+    _with_catalog_metadata(cfg)
     validate_preset_config(cfg)
     return storage.update_preset(preset_id, cfg)
 
