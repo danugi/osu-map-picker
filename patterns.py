@@ -21,7 +21,7 @@ from typing import Callable
 import gameplay
 from models import PatternChain, PatternSection, SequenceAnalysis
 
-ANALYZER_VERSION = 5
+ANALYZER_VERSION = 6
 
 # Canonical labels the analyzer can actually persist from measured geometry.
 # Keep this in sync with ``_combined_labels``; tests assert the generated
@@ -53,10 +53,11 @@ WIDE_JUMP_DIAMETERS = 2.0
 FLOW_MIN_DIAMETERS = 0.50
 FLOW_MAX_DIAMETERS = 6.00
 FLOW_MAX_GAP_BEATS = 1.5
-# Four consecutive links (five notes) can be a local pattern, but map-level
-# evidence requires a longer passage; the gate uses the normalized longest
-# passage independently.
+# A local passage must occupy enough real time to represent continuous play.
+# The note count is variable; duration and map-level coverage do most of the
+# work, so short high-spaced coincidences cannot accumulate into evidence.
 FLOW_MIN_NOTES = 8
+FLOW_MIN_DURATION_MS = 1500
 ANGLE_CHANGE_DEGREES = 90.0
 SLIDER_HEAVY_SHARE = 0.35
 HIGH_DENSITY_NOTES_PER_SECOND = 5.0
@@ -267,6 +268,8 @@ def _flow_metrics(
             if end < len(playable)
             else playable[-1].start - playable[begin].start
         )
+        if duration < FLOW_MIN_DURATION_MS:
+            continue
         passages.append(
             (
                 note_count,
@@ -441,7 +444,7 @@ def _labels_from_metrics(metrics: dict[str, float]) -> tuple[str, ...]:
         labels.append("wide_aim")
     if (
         metrics.get("flow_share", 0.0) >= 0.20
-        and metrics.get("flow_longest", 0) >= 14
+        and metrics.get("flow_longest", 0) >= 8
     ):
         labels.append("flow_aim")
     if metrics.get("angle_change_share", 0.0) >= 0.60:

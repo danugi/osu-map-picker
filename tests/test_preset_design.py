@@ -995,7 +995,7 @@ def test_v19_migration_updates_only_untouched_flow_aim(storage) -> None:
     assert updated is not None
     assert updated.config.ranking.relevance_policy["feature_minimums"][
         "flow_share"
-    ] == 0.15
+    ] == 0.12
     assert updated.config.ranking.skill_weights["aim_flow"] == 0.70
     assert storage.get_preference("builtins_version") == "21"
 

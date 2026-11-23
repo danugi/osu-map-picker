@@ -1310,8 +1310,8 @@ _RELEVANCE_POLICIES: dict[str, dict[str, Any]] = {
             "flow_longest",
         ],
         "feature_minimums": {
-            "flow_share": 0.15,
-            "flow_coverage": 0.12,
+            "flow_share": 0.12,
+            "flow_coverage": 0.10,
             "flow_longest": 0.58,
         },
     },
