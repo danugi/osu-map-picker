@@ -1072,6 +1072,33 @@ class StrategyRunStats:
 
 
 @dataclass(frozen=True, slots=True)
+class StrategyContinuation:
+    """Resumable cursor state for one bounded search strategy."""
+
+    name: str
+    cursor: dict[str, Any] | None = None
+    cursor_string: str | None = None
+    pages: int = 0
+    exhausted: bool = False
+    next_available: bool = False
+    stop_reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveryContinuation:
+    """Persistent continuation state for one filter/preset session."""
+
+    strategies: tuple[StrategyContinuation, ...] = ()
+    seen_ids: tuple[int, ...] = field(default=(), repr=False, compare=False)
+
+    def strategy(self, name: str) -> StrategyContinuation | None:
+        return next(
+            (item for item in self.strategies if item.name == name),
+            None,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class DiscoveryResult:
     scored: tuple[ScoredCandidate, ...] = ()
     total_fetched: int = 0
@@ -1115,6 +1142,7 @@ class DiscoveryResult:
     attributes_cached: int = 0
     candidate_limit_hit: bool = False
     strategy_runs: tuple[StrategyRunStats, ...] = ()
+    continuation: DiscoveryContinuation | None = None
     started_at: str = field(default_factory=now_iso)
     finished_at: str = field(default_factory=now_iso)
     filters_used: Filters | None = None

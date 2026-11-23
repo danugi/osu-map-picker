@@ -13,6 +13,7 @@ from streamlit.testing.v1 import AppTest
 
 import analysis
 import analysis_worker
+import config
 import app as app_module
 import appearance
 import discovery
@@ -24,13 +25,16 @@ import presets
 from models import (
     Candidate,
     DifficultyAttributes,
+    DiscoveryContinuation,
     DiscoveryResult,
+    StrategyContinuation,
     RankingSettings,
     ScoredCandidate,
     SearchPage,
     SequenceAnalysis,
     StrategyRunStats,
 )
+from osu_api import OsuApiClient
 from randomizer import RandomSelection
 from storage import Storage
 from skillsets import SKILL_IDS
@@ -220,13 +224,33 @@ def test_search_result_short_list_explains_that_all_are_shown(app_env) -> None:
     )
 
 
-def _install_fake_expansion(monkeypatch, new_ids: list[int]) -> None:
+def _install_fake_expansion(
+    monkeypatch, new_ids: list[int], calls: list | None = None
+) -> None:
     monkeypatch.setenv("OSU_CLIENT_ID", "test-client")
     monkeypatch.setenv("OSU_CLIENT_SECRET", "test-secret")
 
     def fake_run(
-        self, filters, ranking, *, record=True, strategy_offset=0, fresh=False
+        self,
+        filters,
+        ranking,
+        *,
+        record=True,
+        strategy_offset=0,
+        fresh=False,
+        continuation=None,
+        extra_beatmapsets=(),
     ):
+        if calls is not None:
+            calls.append(
+                {
+                    "max_requests": self.settings.max_requests,
+                    "max_pages": self.settings.max_pages_per_strategy,
+                    "fetch_attributes": self.settings.fetch_attributes_limit,
+                    "continuation": continuation,
+                    "extra": tuple(extra_beatmapsets),
+                }
+            )
         result = _result_with_set_ids(new_ids)
         self.storage.save_beatmapsets(
             [item.beatmapset for item in result.scored]
@@ -250,6 +274,9 @@ def test_expanded_search_keeps_old_results_and_visible_count(
     at.session_state["result_sort_mode"] = "★ по убыванию"
     at.run()
     assert not at.exception, _texts(at)
+    previous_order = [
+        item.beatmapset.id for item in at.session_state["result"].scored
+    ]
     preset_before = at.session_state["active_preset_id"]
     config_before = at.session_state["active_config"].to_dict()
 
@@ -264,13 +291,16 @@ def test_expanded_search_keeps_old_results_and_visible_count(
     assert len(set(ids)) == 33
     assert set(range(1, 22)) <= set(ids)
     assert set(range(101, 113)) <= set(ids)
+    assert ids[: len(previous_order)] == previous_order
     assert at.session_state["result_visible"] == 30
     assert at.session_state["result_only_new"] is False
     assert at.session_state["result_sort_mode"] == "★ по убыванию"
     assert at.session_state["active_preset_id"] == preset_before
     assert at.session_state["active_config"].to_dict() == config_before
     captions = [str(item.value) for item in at.caption]
+    notices = [str(item.value) for item in at.info]
     assert any("Показано 30 из 33" in item for item in captions)
+    assert any("Новых страниц API:" in item for item in notices)
     assert any("Новых: 12" in item for item in captions)
     assert _button(at, "toggle_new_results") is not None
 
@@ -289,6 +319,97 @@ def test_expanded_search_keeps_old_results_and_visible_count(
     assert not at.exception, _texts(at)
     assert at.session_state["result_only_new"] is False
     assert len(_visible_result_ids(at)) == 30
+
+
+def test_optional_player_score_source_adds_bounded_seed_sets(
+    app_env, monkeypatch
+) -> None:
+    calls: list[dict] = []
+    _install_fake_expansion(monkeypatch, [1, 2, 3], calls)
+    monkeypatch.setattr(config, "reference_players", lambda: ("42",))
+    monkeypatch.setattr(config, "player_score_discovery_enabled", lambda: True)
+    seeded = make_beatmapset(9001)
+    monkeypatch.setattr(
+        OsuApiClient,
+        "get_user_best_scores",
+        lambda self, user_id, *, limit=50, offset=0: [seeded],
+    )
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.run()
+    _button(at, "run_search").click().run()
+    assert not at.exception
+    assert calls
+    assert any(item.id == 9001 for item in calls[0]["extra"])
+    assert any("Игрок 42" in note for note in at.session_state["result"].notes)
+
+
+def test_search_more_passes_saved_continuation_to_engine(
+    app_env, monkeypatch
+) -> None:
+    monkeypatch.setenv("OSU_CLIENT_ID", "test-client")
+    monkeypatch.setenv("OSU_CLIENT_SECRET", "test-secret")
+    calls: list[DiscoveryContinuation | None] = []
+    state = DiscoveryContinuation(
+        strategies=(
+            StrategyContinuation(
+                name="ranked:recent",
+                cursor_string="saved-cursor",
+                pages=2,
+                next_available=True,
+            ),
+        )
+    )
+
+    def fake_run(
+        self,
+        filters,
+        ranking,
+        *,
+        record=True,
+        strategy_offset=0,
+        fresh=False,
+        continuation=None,
+        extra_beatmapsets=(),
+    ):
+        calls.append(continuation)
+        result = _result_with_set_ids([1])
+        self.storage.save_beatmapsets(
+            [item.beatmapset for item in result.scored]
+        )
+        return replace(result, continuation=state)
+
+    monkeypatch.setattr(discovery.DiscoveryEngine, "run", fake_run)
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.run()
+    _button(at, "run_search").click().run()
+    assert not at.exception
+    _button(at, "expand_search_limits").click().run()
+    assert not at.exception
+    assert calls[0] is None
+    assert calls[1] is not None
+    assert calls[1].strategy("ranked:recent").cursor_string == "saved-cursor"
+
+
+def test_expanded_search_increases_discovery_pages_not_attribute_reserve(
+    app_env, monkeypatch
+) -> None:
+    calls: list[dict] = []
+    _install_fake_expansion(monkeypatch, [1, 2, 3], calls)
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.run()
+    _button(at, "run_search").click().run()
+    assert not at.exception
+    _button(at, "expand_search_limits").click().run()
+    assert not at.exception
+    normal, expanded = calls[0], calls[1]
+    normal_pages = normal["max_requests"] - min(
+        normal["fetch_attributes"], normal["max_requests"] - 1
+    )
+    expanded_pages = expanded["max_requests"] - min(
+        expanded["fetch_attributes"], expanded["max_requests"] - 1
+    )
+    assert expanded_pages > normal_pages
+    assert expanded["fetch_attributes"] == normal["fetch_attributes"]
 
 
 def test_expanded_search_with_zero_new_keeps_old_result(

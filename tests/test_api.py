@@ -503,3 +503,42 @@ def test_attributes_body_uses_the_requested_ruleset() -> None:
     api.get_beatmap_attributes(124)
     assert bodies[0]["ruleset"] == "taiko"
     assert bodies[1]["ruleset"] == "osu"
+
+
+def test_user_best_scores_parses_nested_beatmapsets_and_is_bounded() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path == "/oauth/token":
+            return token_response()
+        assert request.url.path == "/api/v2/users/42/scores/best"
+        first = search_payload([101])["beatmapsets"][0]
+        second = search_payload([102])["beatmapsets"][0]
+        return httpx.Response(
+            200,
+            json=[
+                {"beatmapset": first, "score": 100},
+                {"beatmapset": first, "score": 90},
+                {"beatmapset": second, "score": 80},
+                {"beatmap": {"beatmapset": first}},
+                {"beatmap": {"id": 3}},
+            ],
+        )
+
+    api, _ = client_with(handler)
+    sets = api.get_user_best_scores(42, limit=500)
+    assert [item.id for item in sets] == [101, 102]
+    assert seen[-1].url.params["limit"] == "50"
+    assert seen[-1].url.params["mode"] == "osu"
+
+
+def test_user_best_scores_rejects_non_array_response() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth/token":
+            return token_response()
+        return httpx.Response(200, json={"error": "nope"})
+
+    api, _ = client_with(handler)
+    with pytest.raises(OsuSchemaError):
+        api.get_user_best_scores(42)

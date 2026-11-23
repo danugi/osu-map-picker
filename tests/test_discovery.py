@@ -1663,3 +1663,61 @@ def test_enrich_attributes_preserves_uncached_api_order(storage):
     assert budget["attributes_succeeded"] == 2
     assert budget.get("attributes_cached", 0) == 0
 
+
+
+def test_search_more_continuation_advances_cursors_instead_of_restarting(
+    storage: Storage,
+) -> None:
+    def responder(query: SearchQuery) -> SearchPage:
+        keys = {
+            None: ("a", 1),
+            "a": ("b", 2),
+            "b": ("c", 3),
+            "c": (None, 4),
+        }
+        cursor, set_id = keys[query.cursor_string]
+        return SearchPage(
+            beatmapsets=(make_beatmapset(set_id),),
+            cursor_string=cursor,
+        )
+
+    api = StubApi(responder)
+    engine = DiscoveryEngine(
+        api,
+        storage,
+        settings(max_requests=1, max_pages_per_strategy=1),
+    )
+    filters = Filters(statuses=["ranked"])
+    first = engine.run(filters, RankingSettings())
+    assert first.continuation is not None
+    assert first.continuation.strategy("ranked:recent").cursor_string == "a"
+    second = engine.run(
+        filters,
+        RankingSettings(),
+        continuation=first.continuation,
+    )
+    assert second.scored[0].beatmapset.id == 2
+    assert second.continuation.strategy("ranked:recent").cursor_string == "b"
+    assert api.search_calls[-1].cursor_string == "a"
+    third = engine.run(
+        filters,
+        RankingSettings(),
+        continuation=second.continuation,
+    )
+    assert third.scored[0].beatmapset.id == 3
+    assert api.search_calls[-1].cursor_string == "b"
+    fourth = engine.run(
+        filters,
+        RankingSettings(),
+        continuation=third.continuation,
+    )
+    assert fourth.scored[0].beatmapset.id == 4
+    assert fourth.continuation.strategy("ranked:recent").exhausted is True
+    calls = len(api.search_calls)
+    exhausted = engine.run(
+        filters,
+        RankingSettings(),
+        continuation=fourth.continuation,
+    )
+    assert len(api.search_calls) == calls
+    assert exhausted.scored == ()

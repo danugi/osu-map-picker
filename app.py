@@ -61,6 +61,9 @@ from models import (
     FactorScore,
     PresetConfig,
     ScoredCandidate,
+    SearchPage,
+    search_page_from_dict,
+    search_page_to_dict,
 )
 from osu_api import OsuApiClient, OsuApiError
 from presets import PresetError
@@ -2458,14 +2461,17 @@ def _remember_result(
     result: DiscoveryResult,
     *,
     surface: str = "search",
+    reset_display: bool = True,
 ) -> None:
-    _clear_result_display()
+    if reset_display:
+        _clear_result_display()
     st.session_state["result"] = result
     st.session_state["result_config"] = cfg.to_dict()
-    st.session_state["result_visible"] = 15
-    st.session_state["result_shuffle_seed"] = secrets.randbits(64)
-    st.session_state["result_pick_id"] = None
-    st.session_state["result_display_order"] = None
+    if reset_display:
+        st.session_state["result_visible"] = 15
+        st.session_state["result_shuffle_seed"] = secrets.randbits(64)
+        st.session_state["result_pick_id"] = None
+        st.session_state["result_display_order"] = None
     if result.scored:
         try:
             store.record_history(
@@ -2545,37 +2551,25 @@ def _merge_expanded_result(
     previous: DiscoveryResult | None,
     expanded: DiscoveryResult,
 ) -> DiscoveryResult:
-    """Merge an expanded run with the earlier visible collection.
-
-    The discovery engine normally returns a superset, but a bounded/cached run
-    can omit a previous page. Keep the expanded candidate for overlapping sets
-    and append only old sets that are genuinely absent.
-    """
+    """Append genuinely new maps while preserving the previous display order."""
 
     if not isinstance(previous, DiscoveryResult) or not previous.scored:
         return expanded
-    expanded_ids = {item.beatmapset.id for item in expanded.scored}
-    old_only = [
-        item
+    previous_ids = {item.beatmapset.id for item in previous.scored}
+    expanded_by_set = {
+        item.beatmapset.id: item for item in expanded.scored
+    }
+    merged = [
+        expanded_by_set.get(item.beatmapset.id, item)
         for item in previous.scored
-        if item.beatmapset.id not in expanded_ids
     ]
-    if not old_only:
-        return expanded
-    merged = list(expanded.scored)
     seen = {item.beatmapset.id for item in merged}
-    for item in old_only:
+    for item in expanded.scored:
         if item.beatmapset.id in seen:
             continue
         seen.add(item.beatmapset.id)
         merged.append(item)
-    merged.sort(
-        key=lambda item: (
-            -item.score,
-            item.beatmapset.id,
-            item.beatmap.id,
-        )
-    )
+    added = len([item for item in merged if item.beatmapset.id not in previous_ids])
     return replace(
         expanded,
         scored=tuple(merged),
@@ -2585,16 +2579,15 @@ def _merge_expanded_result(
             expanded.passed_relevance, previous.passed_relevance
         ),
         notes=(
-            f"Объединено с предыдущей выдачей: добавлено "
-            f"{len(merged) - len(expanded.scored)} старых карт, не попавших "
-            "в расширенный срез.",
+            "Расширенный поиск сохранил прежний порядок выдачи и добавил "
+            f"{added} новых карт.",
             *expanded.notes,
         )[:12],
     )
 
 
 def _mark_search_expansion(previous_set_ids: set[int]) -> None:
-    """Remember which maps are genuinely new after an expanded API search."""
+    """Remember genuinely new maps and explain the expanded funnel."""
 
     result = st.session_state.get("result")
     if not isinstance(result, DiscoveryResult):
@@ -2603,22 +2596,45 @@ def _mark_search_expansion(previous_set_ids: set[int]) -> None:
     added = [
         set_id for set_id in current_ids if set_id not in previous_set_ids
     ]
+    raw = max(0, int(result.raw_rows))
+    unique = max(0, int(result.unique_raw))
+    overlap = len(previous_set_ids & set(current_ids))
+    duplicates = max(0, raw - unique) + overlap
+    funnel = (
+        f"Новых страниц API: {int(result.pages_attempted)}; "
+        f"сырых beatmapsets: {raw}; "
+        f"новых уникальных: {unique}; "
+        f"прошли строгие фильтры: {int(result.passed_filters)}; "
+        f"прошли relevance: {int(result.passed_relevance)}; "
+        f"новых в выдаче: {len(added)}; "
+        f"дубликатов: {duplicates}."
+    )
     if added:
         st.session_state["result_new_ids"] = added
         # Filtering is opt-in. The default stays the full cumulative result.
         st.session_state["result_only_new"] = False
         st.session_state["result_expand_notice"] = (
-            f"Расширенный поиск добавил {len(added)} новых карт. "
-            "Они сохранены в SQLite; при необходимости включите "
-            "«Только новые карты»."
+            f"{funnel} Прежний порядок сохранён; новые карты добавлены в конец."
         )
     else:
         st.session_state.pop("result_new_ids", None)
         st.session_state.pop("result_only_new", None)
+        reason = (
+            "Новых уникальных карт API не вернул."
+            if raw == 0
+            else (
+                "Карты вернулись, но не прошли строгие фильтры."
+                if result.passed_filters == 0
+                else (
+                    "Фильтры прошли, но relevance-гейт отклонил кандидатов."
+                    if result.passed_relevance == 0
+                    else "Новые карты не попали в итоговую выдачу."
+                )
+            )
+        )
         st.session_state["result_expand_notice"] = (
-            "Расширенный поиск не нашёл новых карт: API вернул те же "
-            "совпадения после текущих фильтров и целевого гейта. "
-            "Предыдущая выдача сохранена."
+            f"{funnel} Расширенный поиск не нашёл новых карт. "
+            f"{reason} Предыдущая выдача сохранена."
         )
 
 
@@ -2630,7 +2646,6 @@ def _run_expanded_search(store: Storage, cfg: PresetConfig) -> None:
         else set()
     )
     previous_visible = int(st.session_state.get("result_visible", 15))
-    previous_sort = st.session_state.get("result_sort_mode")
     if _execute_search(store, cfg, expand_limits=True):
         expanded = st.session_state.get("result")
         if isinstance(expanded, DiscoveryResult):
@@ -2640,10 +2655,82 @@ def _run_expanded_search(store: Storage, cfg: PresetConfig) -> None:
             st.session_state["result_visible"] = min(
                 max(1, previous_visible), max(1, total)
             )
-            if isinstance(previous_sort, str):
-                st.session_state["result_sort_mode"] = previous_sort
         _mark_search_expansion(previous_ids)
         st.rerun()
+
+
+def _discovery_fingerprint(cfg: PresetConfig) -> str:
+    payload = {
+        "active_preset_id": int(st.session_state.get("active_preset_id", 0)),
+        "config": cfg.to_dict(),
+    }
+    raw = json.dumps(
+        payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _discovery_session(store: Storage, cfg: PresetConfig) -> dict[str, Any] | None:
+    session = st.session_state.get("discovery_session")
+    if not isinstance(session, dict):
+        return None
+    if session.get("fingerprint") != _discovery_fingerprint(cfg):
+        return None
+    return session
+
+
+def _player_score_seed_sets(
+    store: Storage,
+    client: OsuApiClient,
+    cfg: PresetConfig,
+    notes: list[str],
+) -> tuple[object, ...]:
+    """Bounded optional discovery from configured reference players."""
+
+    if not config.player_score_discovery_enabled():
+        return ()
+    players = config.reference_players()
+    ttl = max(0, int(cfg.discovery.cache_ttl_minutes))
+    found: dict[int, object] = {}
+    for player in players[: config.MAX_REFERENCE_PLAYERS]:
+        key = f"player_best:{player}:50:0"
+        cached = None if ttl <= 0 else store.cache_get(key)
+        sets: tuple[object, ...] = ()
+        if cached is not None:
+            try:
+                sets = search_page_from_dict(cached).beatmapsets
+            except Exception:  # noqa: BLE001 - corrupted optional cache
+                sets = ()
+        if not sets:
+            try:
+                sets = tuple(
+                    client.get_user_best_scores(
+                        player,
+                        limit=config.MAX_SCORES_PER_PLAYER,
+                    )
+                )
+            except OsuApiError as exc:
+                notes.append(
+                    f"Игрок {player}: score-источник пропущен "
+                    f"({exc.user_message()})."
+                )
+                continue
+            if ttl > 0 and sets:
+                try:
+                    store.cache_set(
+                        key,
+                        search_page_to_dict(SearchPage(beatmapsets=sets)),
+                        ttl,
+                    )
+                except StorageError as exc:
+                    notes.append(f"Score-кеш не записан: {exc}")
+        for beatmapset in sets:
+            found[int(beatmapset.id)] = beatmapset
+        notes.append(
+            f"Игрок {player}: получено {len(sets)} score-карт "
+            f"({'кэш' if cached else 'API'})."
+        )
+    return tuple(found.values())
 
 
 def _execute_search(
@@ -2726,37 +2813,102 @@ def _execute_search(
             discovery_settings.max_candidates = min(
                 2000, int(discovery_settings.max_candidates) + 200
             )
-            discovery_settings.fetch_attributes_limit = min(
-                50, int(discovery_settings.fetch_attributes_limit) + 8
-            )
+            # Attribute reserve stays unchanged: Search More is about deeper
+            # discovery pages, not about claiming more attribute requests.
         # A successful API search still uses the local catalog as a bounded
         # shortfall filler. This makes no API requests and keeps the same
         # filters, evidence gate and ranking settings.
+        player_notes: list[str] = []
+        try:
+            player_sets = _player_score_seed_sets(
+                store, client, cfg, player_notes
+            )
+        except Exception:  # noqa: BLE001 - optional source must not block
+            logger.warning("optional player-score discovery failed")
+            player_sets = ()
+            player_notes.append("Score-источник недоступен; обычный поиск продолжен.")
         engine = DiscoveryEngine(
             client,
             store,
             discovery_settings,
             local_catalog_supplement=True,
         )
+        fingerprint = _discovery_fingerprint(cfg)
+        session = None if fresh else _discovery_session(store, cfg)
+        continuation = (
+            session.get("continuation")
+            if expand_limits and isinstance(session, dict)
+            else None
+        )
+        previous_seen = tuple(
+            int(item)
+            for item in (
+                session.get("seen_ids", ())
+                if isinstance(session, dict)
+                else ()
+            )
+        )
         with st.spinner(
             "Ищу карты в osu! API: несколько стратегий и страниц…"
             if not expand_limits
-            else "Ищу больше карт: увеличены страницы и бюджет запросов…"
+            else "Продолжаю поиск с сохранённых курсоров…"
         ):
             result = engine.run(
                 cfg.filters,
                 cfg.ranking,
                 record=True,
-                fresh=fresh,
+                fresh=fresh and continuation is None,
+                continuation=continuation,
+                extra_beatmapsets=player_sets,
+            )
+        if player_notes:
+            result = replace(
+                result,
+                notes=tuple([*player_notes, *result.notes])[:12],
+            )
+        next_state = result.continuation
+        if next_state is not None:
+            seen_ids = tuple(
+                dict.fromkeys(
+                    (
+                        *previous_seen,
+                        *next_state.seen_ids,
+                        *(item.beatmapset.id for item in result.scored),
+                    )
+                )
+            )
+            next_state = replace(next_state, seen_ids=seen_ids)
+            result = replace(result, continuation=next_state)
+            st.session_state["discovery_session"] = {
+                "fingerprint": fingerprint,
+                "continuation": next_state,
+                "seen_ids": seen_ids,
+            }
+        if next_state is not None:
+            ready = sum(
+                1 for item in next_state.strategies if item.next_available
+            )
+            exhausted = sum(
+                1 for item in next_state.strategies if item.exhausted
+            )
+            result = replace(
+                result,
+                notes=tuple(
+                    [
+                        f"Discovery-сессия: {len(next_state.strategies)} "
+                        f"стратегий, {ready} готовы к продолжению, "
+                        f"{exhausted} исчерпаны.",
+                        *result.notes,
+                    ]
+                )[:12],
             )
         if expand_limits:
             result = replace(
                 result,
                 notes=tuple(
                     [
-                        "Поиск повторён с увеличенными лимитами страниц и "
-                        "запросов (только для этого запуска; настройки пресета "
-                        "не изменены).",
+                        "Поиск продолжен с сохранённых курсоров; повторно "
+                        "обработанные страницы исключены из нового пула.",
                         *result.notes,
                     ]
                 )[:12],
@@ -2781,7 +2933,13 @@ def _execute_search(
         )
         return False
 
-    _remember_result(store, cfg, result, surface="search")
+    _remember_result(
+        store,
+        cfg,
+        result,
+        surface="search",
+        reset_display=not expand_limits,
+    )
     _reveal_search_in_library()
     return True
 

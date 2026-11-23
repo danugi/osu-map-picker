@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import time
+from urllib.parse import quote
 from typing import Any, Callable, Iterable
 
 import httpx
@@ -530,6 +531,53 @@ class OsuApiClient:
         if not isinstance(payload, dict):
             raise OsuSchemaError("beatmapset: ожидался объект")
         return parse_beatmapset(payload)
+
+    def get_user_best_scores(
+        self,
+        user_id: int | str,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[Beatmapset]:
+        """Bounded public best-score sample for one reference player."""
+
+        payload = self._request(
+            "GET",
+            f"/users/{quote(str(user_id), safe='@')}/scores/best",
+            params={
+                "mode": "osu",
+                "limit": max(1, min(int(limit), 50)),
+                "offset": max(0, int(offset)),
+            },
+        )
+        if not isinstance(payload, list):
+            raise OsuSchemaError(
+                "scores/best: ожидался массив score-объектов"
+            )
+        seen: set[int] = set()
+        result: list[Beatmapset] = []
+        for score in payload:
+            if not isinstance(score, dict):
+                continue
+            raw_set = score.get("beatmapset")
+            if not isinstance(raw_set, dict):
+                raw_beatmap = score.get("beatmap")
+                raw_set = (
+                    raw_beatmap.get("beatmapset")
+                    if isinstance(raw_beatmap, dict)
+                    else None
+                )
+            if not isinstance(raw_set, dict):
+                continue
+            try:
+                beatmapset = parse_beatmapset(raw_set)
+            except OsuSchemaError:
+                continue
+            if beatmapset.id in seen:
+                continue
+            seen.add(beatmapset.id)
+            result.append(beatmapset)
+        return result
 
     def get_beatmap_attributes(
         self,

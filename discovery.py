@@ -35,6 +35,7 @@ from models import (
     Beatmapset,
     Candidate,
     DifficultyAttributes,
+    DiscoveryContinuation,
     DiscoveryResult,
     DiscoverySettings,
     Exclusion,
@@ -44,6 +45,7 @@ from models import (
     SearchPage,
     SearchQuery,
     SequenceAnalysis,
+    StrategyContinuation,
     StrategyRunStats,
     now_iso,
     search_page_from_dict,
@@ -1224,6 +1226,8 @@ class DiscoveryEngine:
         record: bool = True,
         strategy_offset: int = 0,
         fresh: bool = False,
+        continuation: DiscoveryContinuation | None = None,
+        extra_beatmapsets: Iterable[Beatmapset] = (),
     ) -> DiscoveryResult:
         validate_filters(filters)
         validate_ranking(ranking_settings)
@@ -1395,6 +1399,19 @@ class DiscoveryEngine:
         }
         known: dict[int, Beatmapset] = {}
         sources: dict[int, list[str]] = {}
+        for extra in extra_beatmapsets:
+            if extra.id not in known:
+                known[extra.id] = extra
+                sources[extra.id] = ["player_scores"]
+                total_fetched += 1
+        previous_strategies = {}
+        if continuation is not None and not fresh:
+            previous_strategies = {
+                item.name: item for item in continuation.strategies
+            }
+        next_continuation: dict[str, StrategyContinuation] = dict(
+            previous_strategies
+        )
 
         for strategy in strategies:
             if budget.get("fatal") or deadline_hit():
@@ -1407,14 +1424,40 @@ class DiscoveryEngine:
                     "Остальные запросы зарезервированы под difficulty attributes."
                 )
                 break
+            prior = previous_strategies.get(strategy.name)
+            if prior is not None and prior.exhausted:
+                stats = strategy_stats[strategy.name]
+                stats["stop_reason"] = "exhausted"
+                continue
             strategies_used.append(strategy.name)
             stats = strategy_stats[strategy.name]
             stats["executed"] = True
             stats["mode"] = strategy.mode
             stats["params"] = base_query(strategy).to_params()
             query = base_query(strategy)
+            if prior is not None and (
+                prior.cursor is not None or prior.cursor_string is not None
+            ):
+                query = replace(
+                    query,
+                    cursor=prior.cursor,
+                    cursor_string=prior.cursor_string,
+                )
             seen_cursors: set[str] = set()
-            pages = 0
+            pages_this_run = 0
+            total_pages = int(prior.pages) if prior is not None else 0
+            run_page_limit = strategy_page_limits.get(
+                strategy.name, pages_per_strategy
+            )
+            current_cont = StrategyContinuation(
+                name=strategy.name,
+                cursor=query.cursor,
+                cursor_string=query.cursor_string,
+                pages=total_pages,
+                exhausted=False,
+                next_available=True,
+            )
+            next_continuation[strategy.name] = current_cont
             while True:
                 if budget.get("fatal") or deadline_hit():
                     break
@@ -1474,30 +1517,54 @@ class DiscoveryEngine:
                         sources[beatmapset.id] = []
                     if strategy.name not in sources[beatmapset.id]:
                         sources[beatmapset.id].append(strategy.name)
-                pages += 1
-                page_limit = strategy_page_limits.get(
-                    strategy.name, pages_per_strategy
-                )
-                if pages >= page_limit:
-                    if page.has_more:
-                        mark_incomplete("page_limit")
-                        stats["stop_reason"] = "page_limit"
-                        notes.append(
-                            f"{strategy.name}: остановлено на "
-                            f"{page_limit} страницах."
-                        )
-                        if stats["total"]:
-                            notes.append(
-                                f"{strategy.name}: всего доступно около "
-                                f"{stats['total']} наборов, получено "
-                                f"{stats['raw_rows']}."
-                            )
-                    else:
-                        stats["exhausted"] = True
-                    break
+                pages_this_run += 1
+                total_pages += 1
                 next_query = self._next_query(page, query)
-                if next_query is None:
+                next_available = bool(page.has_more and next_query is not None)
+                if next_available and next_query is not None:
+                    current_cont = replace(
+                        current_cont,
+                        cursor=next_query.cursor,
+                        cursor_string=next_query.cursor_string,
+                        pages=total_pages,
+                        next_available=True,
+                    )
+                else:
                     stats["exhausted"] = True
+                    current_cont = replace(
+                        current_cont,
+                        cursor=None,
+                        cursor_string=None,
+                        pages=total_pages,
+                        exhausted=True,
+                        next_available=False,
+                        stop_reason=stats["stop_reason"],
+                    )
+                next_continuation[strategy.name] = current_cont
+                if not page.has_more:
+                    break
+                if next_query is None:
+                    mark_incomplete("repeated_cursor")
+                    stats["stop_reason"] = "repeated_cursor"
+                    notes.append(
+                        f"{strategy.name}: API не вернул следующий курсор; "
+                        "пагинация остановлена."
+                    )
+                    break
+                if pages_this_run >= run_page_limit:
+                    mark_incomplete("page_limit")
+                    stats["stop_reason"] = "page_limit"
+                    notes.append(
+                        f"{strategy.name}: остановлено на "
+                        f"{pages_this_run} новых страницах за запуск "
+                        f"(всего {total_pages})."
+                    )
+                    if stats["total"]:
+                        notes.append(
+                            f"{strategy.name}: всего доступно около "
+                            f"{stats['total']} наборов, получено "
+                            f"{stats['raw_rows']} за запуск."
+                        )
                     break
                 cursor_token = json.dumps(
                     {
@@ -1518,10 +1585,6 @@ class DiscoveryEngine:
                 stats["cursor_advances"] += 1
                 stats["last_has_more"] = True
                 query = next_query
-                if not page.beatmapsets and not page.has_more:
-                    stats["exhausted"] = True
-                    break
-
         for name, stats in strategy_stats.items():
             if not stats["executed"] and not stats["stop_reason"]:
                 stats["stop_reason"] = "not_attempted"
@@ -1538,6 +1601,26 @@ class DiscoveryEngine:
             )
         strategy_runs = tuple(
             StrategyRunStats(**stats) for stats in strategy_stats.values()
+        )
+        for strategy in strategies:
+            if strategy.name not in next_continuation:
+                next_continuation[strategy.name] = StrategyContinuation(
+                    name=strategy.name,
+                    pages=0,
+                    next_available=True,
+                )
+        prior_seen = (
+            continuation.seen_ids
+            if continuation is not None and not fresh
+            else ()
+        )
+        continuation_state = DiscoveryContinuation(
+            strategies=tuple(
+                next_continuation[strategy.name] for strategy in strategies
+            ),
+            seen_ids=tuple(
+                dict.fromkeys((*prior_seen, *known.keys()))
+            ),
         )
 
         if known:
@@ -1850,6 +1933,7 @@ class DiscoveryEngine:
             attributes_cached=int(budget.get("attributes_cached", 0)),
             candidate_limit_hit=bool(truncated),
             strategy_runs=strategy_runs,
+            continuation=continuation_state,
             excluded=dict(
                 sorted(excluded.items(), key=lambda item: (-item[1], item[0]))
             ),

@@ -291,6 +291,39 @@ def logs_dir() -> Path:
     return data_dir() / "logs"
 
 
+MAX_REFERENCE_PLAYERS = 3
+MAX_SCORES_PER_PLAYER = 50
+
+
+def reference_players() -> tuple[str, ...]:
+    """Controlled optional player-score seeds from an environment variable.
+
+    Accepts numeric IDs and usernames (with or without ``@``), deduplicated
+    and bounded to a small sample. The endpoint is not called unless this is
+    explicitly configured.
+    """
+
+    raw = os.getenv("OSU_PICKER_REFERENCE_PLAYERS", "").strip()
+    if not raw:
+        return ()
+    result: list[str] = []
+    for part in raw.split(","):
+        value = part.strip()
+        if not value:
+            continue
+        value = value if value.startswith("@") else value
+        if value not in result:
+            result.append(value)
+        if len(result) >= MAX_REFERENCE_PLAYERS:
+            break
+    return tuple(result)
+
+
+def player_score_discovery_enabled() -> bool:
+    raw = os.getenv("OSU_PICKER_PLAYER_SCORES", "1").strip().lower()
+    return raw not in {"0", "false", "off", "no"} and bool(reference_players())
+
+
 @dataclass(frozen=True)
 class ApiConfig:
     """OAuth client-credentials configuration. Never log `client_secret`."""

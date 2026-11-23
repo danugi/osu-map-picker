@@ -1259,7 +1259,7 @@ _RELEVANCE_TARGETS: dict[str, tuple[str, ...]] = {
     "Burst-oriented Streams": ("burst_control", "speed_bursts"),
     "Continuous Streams": ("stream_long", "stream_consistency"),
     "Alternating": ("alternating",),
-    "Double-tap / Burst Control": ("double_tap_control",),
+    "Double-tap / Burst Control": ("burst_control",),
     "Speed + Aim": ("speed_aim",),
     "Slider Tech": ("slider_heavy",),
     "Rhythm Control": ("variable_rhythm",),
@@ -1321,7 +1321,10 @@ _RELEVANCE_POLICIES: dict[str, dict[str, Any]] = {
             "speed_bursts",
             "speed_density",
         ],
-        "require_features_any": ["speed_pressure", "bursts"],
+        # Speed is broader than High BPM: measured bursts or a genuinely high
+        # BPM count as corroboration when official speed attributes are absent.
+        "require_features_any": ["speed_pressure", "bursts", "bpm"],
+        "feature_minimums": {"bursts": 0.0, "bpm": 0.55},
     },
     "High BPM": {
         "primary_targets": ["high_bpm"],
@@ -1388,7 +1391,7 @@ _RELEVANCE_POLICIES: dict[str, dict[str, Any]] = {
         "primary_targets": ["alternating"],
     },
     "Double-tap / Burst Control": {
-        "primary_targets": ["double_tap_control"],
+        "primary_targets": ["burst_control"],
         "require_features_any": ["bursts"],
         "feature_minimums": {"bursts": 0.0},
     },
