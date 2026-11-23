@@ -28,7 +28,7 @@ def _features(analysis):
         "flow_longest_share",
         "flow_run_count",
         "flow_quality",
-        "flow_shape",
+        "flow_spatial_demand",
     )
     raw = patterns.sequence_features(analysis)
     scores = {key: raw[key] for key in keys}
@@ -60,6 +60,20 @@ def test_real_sendan_life_flow_evidence_and_gate() -> None:
     features = _features(analysis)
     skill = evaluate_skills(features)["aim_flow"]
     assert skill.score is not None and skill.score > 0.55
+    candidate = Candidate(beatmapset=None, beatmap=None, traits=features)
+    preset = presets.builtin_by_name("Flow Aim")
+    result = evaluate_relevance(candidate, preset.ranking)
+    assert result.passed, result.reason
+
+
+def test_real_primary_rubiks_cube_2288047_difficulty() -> None:
+    preview, analysis = _analyze(4881930)
+    assert preview.version == "Adinda's Cube Extra"
+    assert preview.artist == "Nanahoshi Kangengakudan"
+    assert preview.title == "Rubik's Cube"
+    assert preview.creator == "Heilia"
+    assert analysis.flow_longest >= 20
+    features = _features(analysis)
     candidate = Candidate(beatmapset=None, beatmap=None, traits=features)
     preset = presets.builtin_by_name("Flow Aim")
     result = evaluate_relevance(candidate, preset.ranking)

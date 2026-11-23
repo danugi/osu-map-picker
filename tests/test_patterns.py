@@ -194,7 +194,7 @@ def test_geometry_detects_flow_and_wide_jumps_separately() -> None:
                 80 + index * 65,
                 256 + int(110 * math.sin(index * 0.30)),
             )
-            for index in range(10)
+            for index in range(20)
         ]
     )
     wide = analyze(
@@ -221,13 +221,10 @@ def test_mixed_sections_are_reported() -> None:
         for index in range(24)
     ]
     analysis = analyze(notes)
-    assert "mixed_patterns" in analysis.labels
+    assert "flow_aim" in analysis.labels
+    assert "wide_aim" in analysis.labels
     assert len(analysis.sections) >= 2
     assert any("wide_aim" in section.labels for section in analysis.sections)
-    assert any(
-        "flow_aim" in section.labels or not section.labels
-        for section in analysis.sections
-    )
 
 
 def test_analyzed_slow_map_is_not_a_stream() -> None:
@@ -282,14 +279,16 @@ def test_tiny_cursor_movements_do_not_create_flow_evidence() -> None:
     assert "flow_aim" not in analysis.labels
 
 
-def test_reversing_zigzag_is_not_sustained_flow() -> None:
+def test_reversing_zigzag_is_valid_continuous_flow() -> None:
     notes = [
         (1000 + index * 250, 100 if index % 2 else 400, 100)
         for index in range(20)
     ]
     analysis = analyze(notes, beat_length=500)
-    assert analysis.flow_share < 0.20
-    assert "flow_aim" not in analysis.labels
+    assert analysis.flow_share > 0.80
+    assert analysis.flow_longest >= 14
+    assert "flow_aim" in analysis.labels
+    assert _flow_gate(analysis).passed
 
 
 def test_gradual_curve_is_flow_not_only_a_straight_line() -> None:
@@ -317,7 +316,7 @@ def _flow_gate(analysis):
         "flow_longest_share",
         "flow_run_count",
         "flow_quality",
-        "flow_shape",
+        "flow_spatial_demand",
     )
     raw = patterns.sequence_features(analysis)
     features = BeatmapFeatures(
@@ -352,21 +351,19 @@ def test_separated_high_spaced_stream_sections_are_not_flow() -> None:
             for index in range(3)
         )
     analysis = analyze(notes)
-    assert analysis.flow_share == 0.0
-    assert analysis.flow_longest == 0
+    assert analysis.flow_longest < 14
     assert "streams" in analysis.labels
     assert not _flow_gate(analysis).passed
 
 
-def test_fast_regular_high_spacing_is_not_flow() -> None:
+def test_long_straight_note_flow_qualifies_without_a_shape_requirement() -> None:
     notes = [
         (1000 + index * 90, 80 + index * 240, 100)
         for index in range(40)
     ]
     analysis = analyze(notes, beat_length=300)
-    assert analysis.flow_share == 0.0
-    assert analysis.flow_longest == 0
-    assert not _flow_gate(analysis).passed
+    assert analysis.flow_longest >= 30
+    assert _flow_gate(analysis).passed
 
 
 def test_multiple_short_flow_coincidences_do_not_pass() -> None:
@@ -383,20 +380,19 @@ def test_multiple_short_flow_coincidences_do_not_pass() -> None:
         )
         notes.append((base + 1200, 470, 470))
     analysis = analyze(notes)
-    assert analysis.flow_longest == 4
-    assert analysis.flow_run_count >= 3
+    assert analysis.flow_longest == 0
+    assert analysis.flow_run_count == 0
     assert not _flow_gate(analysis).passed
 
 
-def test_long_reversing_stream_is_not_flow() -> None:
+def test_long_angular_zigzag_is_valid_flow() -> None:
     notes = [
         (1000 + index * 180, 100 if index % 2 else 480, 100)
         for index in range(30)
     ]
     analysis = analyze(notes)
-    assert analysis.flow_share == 0.0
-    assert analysis.flow_longest == 0
-    assert not _flow_gate(analysis).passed
+    assert analysis.flow_longest >= 20
+    assert _flow_gate(analysis).passed
 
 
 def test_flow_with_an_ordinary_stream_still_qualifies() -> None:
@@ -437,4 +433,86 @@ def test_multiple_genuine_flow_passages_qualify() -> None:
     analysis = analyze(notes)
     assert analysis.flow_longest >= 15
     assert analysis.flow_run_count >= 2
+    assert _flow_gate(analysis).passed
+
+
+def test_triangular_flow_trajectory_qualifies() -> None:
+    notes = [
+        (1000 + index * 220, 100 if index % 2 else 450, 100)
+        for index in range(20)
+    ]
+    analysis = analyze(notes)
+    assert analysis.flow_longest >= 18
+    assert _flow_gate(analysis).passed
+
+
+def test_half_heart_like_curved_flow_qualifies() -> None:
+    import math
+
+    notes = [
+        (
+            1000 + index * 220,
+            256 + int(400 * math.cos(math.pi * index / 23)),
+            300 - int(300 * math.sin(math.pi * index / 23)),
+        )
+        for index in range(24)
+    ]
+    analysis = analyze(notes)
+    assert analysis.flow_longest >= 20
+    assert _flow_gate(analysis).passed
+
+
+def test_mixed_shapes_with_sharp_turns_form_one_flow_passage() -> None:
+    notes = [
+        (1000 + index * 200, 100 if index % 2 else 450, 100)
+        for index in range(14)
+    ]
+    notes += [
+        (
+            4000 + index * 200,
+            100 + index * 70,
+            450 - index * 40,
+        )
+        for index in range(14)
+    ]
+    analysis = analyze(notes)
+    assert analysis.flow_longest >= 20
+    assert _flow_gate(analysis).passed
+
+
+def test_sparse_shaped_path_does_not_qualify() -> None:
+    notes = [
+        (1000 + index * 900, 100 if index % 2 else 450, 100)
+        for index in range(10)
+    ]
+    analysis = analyze(notes, beat_length=500)
+    assert analysis.flow_share == 0.0
+    assert not _flow_gate(analysis).passed
+
+
+def test_conventional_aim_with_isolated_jumps_does_not_qualify() -> None:
+    notes = [
+        (1000 + index * 500, 80 + (index % 2) * 380, 80 + (index % 3) * 150)
+        for index in range(16)
+    ]
+    analysis = analyze(notes, beat_length=400)
+    assert analysis.flow_share == 0.0
+    assert not _flow_gate(analysis).passed
+
+
+def test_flow_with_irregular_tapping_stays_eligible_without_finger_control() -> None:
+    notes = []
+    for index in range(24):
+        gap = 150 if index % 3 else 260
+        notes.append(
+            (
+                1000 + sum(
+                    (150 if part % 3 else 260) for part in range(index)
+                ),
+                80 + index * 65,
+                256 + int(110 * math.sin(index * 0.30)),
+            )
+        )
+    analysis = analyze(notes)
+    assert analysis.flow_longest >= 20
     assert _flow_gate(analysis).passed

@@ -82,6 +82,7 @@ FEATURE_LABELS = {
     "flow_intensity": "Интенсивность устойчивого flow",
     "flow_coverage": "Покрытие карты flow-переходами",
     "flow_shape": "Изменчивость траектории flow",
+    "flow_spatial_demand": "Пространственная нагрузка flow",
     "flow_longest_share": "Доля сильнейшего flow-прохода",
     "flow_longest": "Самая длинная flow-цепочка",
     "flow_run_count": "Количество flow-цепочек",

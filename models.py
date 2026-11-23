@@ -837,6 +837,7 @@ class PatternSection:
     flow_quality: float = 0.0
     flow_coverage: float = 0.0
     flow_shape: float = 0.0
+    flow_spatial_demand: float = 0.0
     flow_longest_share: float = 0.0
     angle_change_share: float = 0.0
 
@@ -865,6 +866,7 @@ class SequenceAnalysis:
     flow_quality: float = 0.0
     flow_coverage: float = 0.0
     flow_shape: float = 0.0
+    flow_spatial_demand: float = 0.0
     flow_longest_share: float = 0.0
     angle_change_share: float = 0.0
     slider_share: float = 0.0

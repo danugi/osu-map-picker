@@ -61,6 +61,9 @@ def _section_from(data: dict) -> PatternSection:
         flow_quality=float(data.get("flow_quality", 0.0)),
         flow_coverage=float(data.get("flow_coverage", 0.0)),
         flow_shape=float(data.get("flow_shape", 0.0)),
+        flow_spatial_demand=float(
+            data.get("flow_spatial_demand", 0.0)
+        ),
         flow_longest_share=float(data.get("flow_longest_share", 0.0)),
         angle_change_share=float(data.get("angle_change_share", 0.0)),
     )
@@ -94,6 +97,9 @@ def sequence_from_json(raw: str | None) -> SequenceAnalysis | None:
             flow_quality=float(data.get("flow_quality", 0.0)),
             flow_coverage=float(data.get("flow_coverage", 0.0)),
             flow_shape=float(data.get("flow_shape", 0.0)),
+            flow_spatial_demand=float(
+                data.get("flow_spatial_demand", 0.0)
+            ),
             flow_longest_share=float(data.get("flow_longest_share", 0.0)),
             angle_change_share=float(data.get("angle_change_share", 0.0)),
             slider_share=float(data.get("slider_share", 0.0)),

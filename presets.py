@@ -940,9 +940,10 @@ def _wide_aim() -> PresetConfig:
 def _flow_aim() -> PresetConfig:
     cfg = _skill_preset(
         "Flow Aim",
-        "Связный aim: устойчивые flow-цепочки из реальных .osu-переходов. "
-        "Classic Aim дополняет ранжирование, но не заменяет flow-доказательство.",
-        {"aim_flow": 0.75, "aim_classic": 0.25},
+        "Непрерывный note-flow aim: длинные связанные последовательности нот, "
+        "которые игрок ведёт курсором и откликивает вместе. Форма траектории "
+        "и finger control не являются обязательными.",
+        {"aim_flow": 0.70, "aim_classic": 0.20, "finger_control": 0.10},
         comfort_stars=5.5,
         diversity=0.50,
         mapping_weight=1.3,
@@ -1309,9 +1310,9 @@ _RELEVANCE_POLICIES: dict[str, dict[str, Any]] = {
             "flow_longest",
         ],
         "feature_minimums": {
-            "flow_share": 0.20,
-            "flow_coverage": 0.20,
-            "flow_longest": 0.75,
+            "flow_share": 0.15,
+            "flow_coverage": 0.12,
+            "flow_longest": 0.58,
         },
     },
     "Aim Control": {
@@ -1583,7 +1584,7 @@ _PRE_V11_FINGERPRINTS = {
     ),
 }
 
-BUILTIN_PRESETS_VERSION = 20
+BUILTIN_PRESETS_VERSION = 21
 _V18_NEW_NAMES = frozenset(
     {
         "Jump Aim",
@@ -2195,6 +2196,22 @@ def _upgrade_v20_definitions(storage: Any) -> int:
     return 1
 
 
+def _upgrade_v21_definitions(storage: Any) -> int:
+    """Refresh the untouched v20 Flow Aim definition for continuous notes."""
+
+    old_fingerprint = (
+        "b5e21e0ee982f08de45e2587b3ccf988341c8abf495f80694ba39c5114c30294"
+    )
+    row = storage.get_preset_by_name("Flow Aim")
+    modern = builtin_by_name("Flow Aim")
+    if row is None or not row.is_builtin or modern is None:
+        return 0
+    if _preset_fingerprint(row.config) != old_fingerprint:
+        return 0
+    storage.update_preset(row.id, modern)
+    return 1
+
+
 def ensure_builtin_presets(storage: Any) -> int:
     """Seed built-ins and add newer profiles without destroying user edits.
 
@@ -2271,6 +2288,8 @@ def ensure_builtin_presets(storage: Any) -> int:
         _upgrade_v19_definitions(storage)
     if version < 20:
         _upgrade_v20_definitions(storage)
+    if version < 21:
+        _upgrade_v21_definitions(storage)
 
     for preset in builtin_presets():
         if preset.name not in new_names:

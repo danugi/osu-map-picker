@@ -21,7 +21,7 @@ from typing import Callable
 import gameplay
 from models import PatternChain, PatternSection, SequenceAnalysis
 
-ANALYZER_VERSION = 4
+ANALYZER_VERSION = 5
 
 # Canonical labels the analyzer can actually persist from measured geometry.
 # Keep this in sync with ``_combined_labels``; tests assert the generated
@@ -46,22 +46,17 @@ BURST_MAX_NOTES = 9
 # diameters so CS changes the physical spacing rather than the label.
 JUMP_DIAMETERS = 1.2
 WIDE_JUMP_DIAMETERS = 2.0
-# A sustained flow run permits gradual and even moderately sharp direction
-# changes, but not reversals. 115 degrees is the boundary between a connected
-# turn and a snap back toward the previous object.
-FLOW_ANGLE_DEGREES = 115.0
-# Tiny cursor corrections are not meaningful flow evidence.
-FLOW_MIN_DIAMETERS = 0.35
-# At least four consecutive meaningful transitions are required; one isolated
-# coincidence is ignored.
-FLOW_MIN_RUN = 4
-# A run must also show trajectory shape variation. Perfectly straight,
-# rhythmically regular high-spaced streams have angle and spacing variation
-# near zero and are not Flow Aim evidence.
-FLOW_MIN_SHAPE = 0.20
-# Flow aim is usually 1/2 or slower; this also prevents unrelated dense tapping
-# from becoming flow evidence.
+# Flow is about continuous note-linked cursor movement, not trajectory shape.
+# A link is meaningful when the cursor must travel at least half a circle
+# diameter and the next click arrives within 1.5 beats. Very large teleports
+# are treated as a break rather than a continuous hand movement.
+FLOW_MIN_DIAMETERS = 0.50
+FLOW_MAX_DIAMETERS = 6.00
 FLOW_MAX_GAP_BEATS = 1.5
+# Four consecutive links (five notes) can be a local pattern, but map-level
+# evidence requires a longer passage; the gate uses the normalized longest
+# passage independently.
+FLOW_MIN_NOTES = 8
 ANGLE_CHANGE_DEGREES = 90.0
 SLIDER_HEAVY_SHARE = 0.35
 HIGH_DENSITY_NOTES_PER_SECOND = 5.0
@@ -105,6 +100,7 @@ SEQUENCE_FEATURE_KEYS = frozenset(
         "flow_run_count",
         "flow_quality",
         "flow_shape",
+        "flow_spatial_demand",
         "angle_change_share",
         "slider_share",
         "notes_per_second",
@@ -194,16 +190,14 @@ def _angle_degrees(
 def _flow_metrics(
     notes: list[gameplay.PreviewObject], cs: float
 ) -> dict[str, float | int]:
-    """Measure coherent flow runs from meaningful cursor movement.
+    """Measure continuous note-linked movement, independent of shape.
 
-    A transition is meaningful when both movement segments are at least 0.35
-    circle diameters and the timing is at most 1.5 beats. Slider exits are used
-    so a slider's path is not silently reduced to its start position.
-
-    A qualifying run must additionally have trajectory shape variation: either
-    direction changes or spacing changes. This rejects perfectly straight,
-    rhythmically regular high-spaced stream sections. Several disconnected
-    short runs are kept in diagnostics but do not gain extra confidence.
+    A link exists when the cursor must move at least 0.5 circle diameters and
+    the next object arrives within 1.5 beats. Direction changes are deliberately
+    not tested: sharp turns, triangles, zigzags and loops are all valid Flow Aim
+    shapes. Links form maximal passages; passages shorter than eight notes are
+    ignored. The map-level score then uses note coverage, duration coverage,
+    the longest passage and timing continuity.
     """
 
     empty: dict[str, float | int] = {
@@ -214,108 +208,99 @@ def _flow_metrics(
         "flow_longest_share": 0.0,
         "flow_quality": 0.0,
         "flow_shape": 0.0,
+        "flow_spatial_demand": 0.0,
         "flow_total": 0,
     }
-    if len(notes) < 4:
+    if len(notes) < FLOW_MIN_NOTES:
         return empty
     diameter = _circle_diameter(cs)
-    entries = [(note.x, note.y) for note in notes]
+    playable = [note for note in notes if note.kind != "spinner"]
+    if len(playable) < FLOW_MIN_NOTES:
+        return empty
+    entries = [(note.x, note.y) for note in playable]
     exits = [
         note.points[-1]
         if note.kind == "slider" and note.points
         else (note.x, note.y)
-        for note in notes
+        for note in playable
     ]
-    rows: list[tuple[float, float, float] | None] = []
-    for index in range(1, len(notes) - 1):
-        previous = notes[index - 1]
-        current = notes[index]
-        ax = entries[index][0] - exits[index - 1][0]
-        ay = entries[index][1] - exits[index - 1][1]
-        bx = entries[index + 1][0] - exits[index][0]
-        by = entries[index + 1][1] - exits[index][1]
-        norm_a = math.hypot(ax, ay)
-        norm_b = math.hypot(bx, by)
-        gap = float(current.start - previous.start)
-        beat = max(1.0, float(current.beat_length))
-        if (
-            norm_a / diameter < FLOW_MIN_DIAMETERS
-            or norm_b / diameter < FLOW_MIN_DIAMETERS
-            or not (MIN_GAP_MS <= gap <= beat * FLOW_MAX_GAP_BEATS)
-        ):
-            rows.append(None)
-            continue
-        cosine = (ax * bx + ay * by) / (norm_a * norm_b)
-        angle = math.degrees(math.acos(max(-1.0, min(1.0, cosine))))
-        rows.append((angle, norm_a / diameter, gap))
-    total_transitions = len(rows)
-    flags = [
-        row is not None and row[0] <= FLOW_ANGLE_DEGREES for row in rows
-    ]
+    links: list[tuple[bool, float, float]] = []
+    for index in range(1, len(playable)):
+        distance = (
+            math.hypot(
+                entries[index][0] - exits[index - 1][0],
+                entries[index][1] - exits[index - 1][1],
+            )
+            / diameter
+        )
+        gap = float(playable[index].start - playable[index - 1].start)
+        beat = max(1.0, float(playable[index].beat_length))
+        linked = (
+            FLOW_MIN_DIAMETERS <= distance <= FLOW_MAX_DIAMETERS
+            and MIN_GAP_MS <= gap <= beat * FLOW_MAX_GAP_BEATS
+        )
+        links.append((linked, distance, gap))
     runs: list[tuple[int, int]] = []
-    start: int | None = None
-    for index, flag in enumerate((*flags, False)):
-        if flag and start is None:
-            start = index
-        elif not flag and start is not None:
-            runs.append((start, index))
-            start = None
-    accepted: list[tuple[int, int, float, float]] = []
+    start_index: int | None = None
+    for index, (linked, _, _) in enumerate((*links, (False, 0.0, 0.0))):
+        if linked and start_index is None:
+            start_index = index
+        elif not linked and start_index is not None:
+            runs.append((start_index, index))
+            start_index = None
+    passages: list[tuple[int, float, float, float]] = []
     for begin, end in runs:
-        if end - begin < FLOW_MIN_RUN:
+        note_count = end - begin + 1
+        if note_count < FLOW_MIN_NOTES:
             continue
-        values = [row for row in rows[begin:end] if row is not None]
-        if len(values) < FLOW_MIN_RUN:
-            continue
-        angles = [value[0] for value in values]
-        spacings = [value[1] for value in values]
-        angle_std = pstdev(angles) if len(angles) > 1 else 0.0
-        mean_angle = sum(angles) / len(angles)
-        spacing_cv = (
-            pstdev(spacings) / max(1e-9, sum(spacings) / len(spacings))
-            if len(spacings) > 1
-            else 0.0
+        distances = [links[index][1] for index in range(begin, end)]
+        gaps = [links[index][2] for index in range(begin, end)]
+        mean_spacing = sum(distances) / len(distances)
+        mean_gap = sum(gaps) / len(gaps)
+        if len(gaps) > 1 and mean_gap > 0:
+            cv = pstdev(gaps) / mean_gap
+            timing = _clamp(1.0 - cv / 0.75)
+        else:
+            timing = 1.0
+        duration = float(
+            playable[end].start - playable[begin].start
+            if end < len(playable)
+            else playable[-1].start - playable[begin].start
         )
-        # Gradual curvature can have low angular variance; mean turn activity
-        # distinguishes it from a straight high-spaced stream.
-        shape = max(
-            min(1.0, angle_std / 30.0),
-            min(1.0, spacing_cv / 0.30),
-            min(1.0, mean_angle / 20.0),
+        passages.append(
+            (
+                note_count,
+                duration,
+                mean_spacing,
+                timing,
+            )
         )
-        if shape < FLOW_MIN_SHAPE:
-            continue
-        smoothness = sum(
-            _clamp(1.0 - angle / FLOW_ANGLE_DEGREES) for angle in angles
-        ) / len(angles)
-        # Quality combines turn smoothness with the same shape evidence that
-        # admitted the run, so a nearly straight pass cannot score excellent
-        # flow merely by being straight.
-        quality = smoothness * (0.5 + 0.5 * shape)
-        accepted.append((begin, end, shape, quality))
-    flow_transitions = sum(end - begin for begin, end, _, _ in accepted)
-    meaningful = sum(1 for row in rows if row is not None)
-    longest = max((end - begin for begin, end, _, _ in accepted), default=0)
-    if not flow_transitions:
-        empty["flow_total"] = total_transitions
+    total_notes = len(playable)
+    flow_notes = sum(note_count for note_count, _, _, _ in passages)
+    if not flow_notes:
+        empty["flow_total"] = len(links)
         return empty
-    quality = (
-        sum((end - begin) * run_quality for begin, end, _, run_quality in accepted)
-        / flow_transitions
+    longest = max(note_count for note_count, _, _, _ in passages)
+    spatial = (
+        sum(note_count * spacing for note_count, _, spacing, _ in passages)
+        / flow_notes
     )
-    shape = (
-        sum((end - begin) * run_shape for begin, end, run_shape, _ in accepted)
-        / flow_transitions
+    timing = (
+        sum(note_count * quality for note_count, _, _, quality in passages)
+        / flow_notes
     )
+    flow_duration = sum(duration for _, duration, _, _ in passages)
+    span = max(1.0, float(playable[-1].start - playable[0].start))
     return {
-        "flow_share": _clamp(flow_transitions / max(1, meaningful)),
-        "flow_coverage": _clamp(flow_transitions / max(1, total_transitions)),
+        "flow_share": _clamp(flow_notes / total_notes),
+        "flow_coverage": _clamp(flow_duration / span),
         "flow_longest": longest,
-        "flow_run_count": len(accepted),
-        "flow_longest_share": _clamp(longest / flow_transitions),
-        "flow_quality": _clamp(quality),
-        "flow_shape": _clamp(shape),
-        "flow_total": total_transitions,
+        "flow_run_count": len(passages),
+        "flow_longest_share": _clamp(longest / flow_notes),
+        "flow_quality": _clamp(timing),
+        "flow_shape": 0.0,
+        "flow_spatial_demand": spatial,
+        "flow_total": len(links),
     }
 
 
@@ -388,6 +373,7 @@ def _geometry(
         "flow_longest_share": float(flow["flow_longest_share"]),
         "flow_quality": float(flow["flow_quality"]),
         "flow_shape": float(flow["flow_shape"]),
+        "flow_spatial_demand": float(flow["flow_spatial_demand"]),
         "flow_total": int(flow["flow_total"]),
         "angle_change_share": _clamp(angle_share),
         "slider_share": _clamp(slider_share),
@@ -433,6 +419,9 @@ def _section_labels(
                 flow_quality=float(metrics.get("flow_quality", 0.0)),
                 flow_coverage=float(metrics.get("flow_coverage", 0.0)),
                 flow_shape=float(metrics.get("flow_shape", 0.0)),
+                flow_spatial_demand=float(
+                    metrics.get("flow_spatial_demand", 0.0)
+                ),
                 flow_longest_share=float(
                     metrics.get("flow_longest_share", 0.0)
                 ),
@@ -451,8 +440,8 @@ def _labels_from_metrics(metrics: dict[str, float]) -> tuple[str, ...]:
     if metrics.get("wide_jump_share", 0.0) >= 0.50:
         labels.append("wide_aim")
     if (
-        metrics.get("flow_share", 0.0) >= 0.30
-        and metrics.get("flow_longest", 0) >= 6
+        metrics.get("flow_share", 0.0) >= 0.20
+        and metrics.get("flow_longest", 0) >= 14
     ):
         labels.append("flow_aim")
     if metrics.get("angle_change_share", 0.0) >= 0.60:
@@ -524,6 +513,9 @@ def analyze_sequences(preview: gameplay.BeatmapPreview) -> SequenceAnalysis:
             flow_quality=float(metrics.get("flow_quality", 0.0)),
             flow_coverage=float(metrics.get("flow_coverage", 0.0)),
             flow_shape=float(metrics.get("flow_shape", 0.0)),
+            flow_spatial_demand=float(
+                metrics.get("flow_spatial_demand", 0.0)
+            ),
             flow_longest_share=float(
                 metrics.get("flow_longest_share", 0.0)
             ),
@@ -602,6 +594,9 @@ def analyze_sequences(preview: gameplay.BeatmapPreview) -> SequenceAnalysis:
         flow_quality=float(metrics.get("flow_quality", 0.0)),
         flow_coverage=float(metrics.get("flow_coverage", 0.0)),
         flow_shape=float(metrics.get("flow_shape", 0.0)),
+        flow_spatial_demand=float(
+            metrics.get("flow_spatial_demand", 0.0)
+        ),
         flow_longest_share=float(metrics.get("flow_longest_share", 0.0)),
         angle_change_share=metrics.get("angle_change_share", 0.0),
         slider_share=metrics.get("slider_share", 0.0),
@@ -654,11 +649,14 @@ def sequence_features(analysis: SequenceAnalysis) -> dict[str, float]:
         # movements. 25% of the whole map is already a substantial passage.
         "flow_coverage": _clamp(analysis.flow_coverage / 0.25),
         "flow_intensity": _clamp(analysis.flow_share / 0.50),
-        "flow_longest": _clamp(analysis.flow_longest / 8.0),
+        "flow_longest": _clamp(analysis.flow_longest / 24.0),
         "flow_longest_share": _clamp(analysis.flow_longest_share),
         "flow_run_count": _clamp(analysis.flow_run_count / 8.0),
         "flow_quality": _clamp(analysis.flow_quality),
         "flow_shape": _clamp(analysis.flow_shape),
+        "flow_spatial_demand": _clamp(
+            analysis.flow_spatial_demand / 4.0
+        ),
         "angle_change_share": _clamp(analysis.angle_change_share),
         "slider_share": _clamp(analysis.slider_share),
         "notes_per_second": _clamp(
