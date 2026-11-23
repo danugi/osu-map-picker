@@ -229,12 +229,11 @@ _add(
         "используется доля нот в устойчивых flow-цепочках; aim-давление, "
         "плотность и слайдеры только ранжируют уже подтверждённый flow.",
         {
-            "flow_share": 0.35,
-            "flow_coverage": 0.10,
-            "flow_longest": 0.25,
-            "flow_shape": 0.15,
+            "flow_share": 0.30,
+            "flow_intensity": 0.30,
+            "flow_longest": 0.20,
+            "flow_shape": 0.10,
             "flow_quality": 0.10,
-            "flow_longest_share": 0.05,
         },
         support="measured",
         required=("flow_share",),
