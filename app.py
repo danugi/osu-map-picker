@@ -737,6 +737,324 @@ def _render_preset_tree(
         st.divider()
 
 
+_PRESET_FAMILY_ICONS = {
+    "explore": "🧭",
+    "farm": "🌾",
+    "train": "🎯",
+    "aim": "🎯",
+    "speed": "⚡",
+    "streams": "🌊",
+    "stamina": "🫁",
+    "finger": "👆",
+    "tech": "🧩",
+    "custom": "✳️",
+}
+
+
+def _preset_item_map(items: list[Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for item in items:
+        node = _preset_item_node(item)
+        if node is not None:
+            result[node.id] = item
+    return result
+
+
+def _preset_browser_defaults(
+    active_item: Any,
+) -> tuple[str, str | None]:
+    node = _preset_item_node(active_item) if active_item is not None else None
+    if node is None:
+        return "custom", None
+    category = node.category_id
+    if category != "train":
+        return category, None
+    family = node.parent_id or node.id
+    return "train", family
+
+
+def _preset_browser_card(
+    store: Storage,
+    cfg: PresetConfig,
+    item: Any,
+    active_id: int,
+    *,
+    prefix: str,
+    custom: bool = False,
+    context: str = "",
+) -> None:
+    with st.container(border=True):
+        st.markdown(f"**{item.name}**")
+        description = " ".join(str(item.config.description).split())
+        if description:
+            if len(description) > 150:
+                description = description[:147].rsplit(" ", 1)[0].rstrip() + "…"
+            st.caption(description)
+        if context:
+            st.caption(context)
+        if item.id == active_id:
+            st.caption("● Активен")
+        elif st.button(
+            "Выбрать",
+            key=(
+                f"{prefix}_custom_select_{item.name}"
+                if custom
+                else f"{prefix}_select_{item.name}"
+            ),
+            width="content",
+        ):
+            _request_preset_switch(
+                store, cfg, item.id, close_picker=prefix == "picker"
+            )
+
+
+def _preset_browser_grid(
+    store: Storage,
+    cfg: PresetConfig,
+    items: list[Any],
+    active_id: int,
+    *,
+    prefix: str,
+    custom: bool = False,
+) -> None:
+    if not items:
+        return
+    for start in range(0, len(items), 2):
+        columns = st.columns(2, gap="small")
+        for column, item in zip(columns, items[start:start + 2]):
+            with column:
+                _preset_browser_card(
+                    store,
+                    cfg,
+                    item,
+                    active_id,
+                    prefix=prefix,
+                    custom=custom,
+                )
+
+
+def _preset_search_results(
+    store: Storage,
+    cfg: PresetConfig,
+    active_id: int,
+    roots: tuple[Any, ...],
+    custom_items: list[Any],
+    *,
+    prefix: str,
+    query: str,
+) -> None:
+    found = False
+
+    def walk(entry: Any, path: tuple[str, ...]) -> None:
+        nonlocal found
+        labels = (*path, entry.node.label or entry.node.name)
+        if entry.item is not None:
+            found = True
+            _preset_browser_card(
+                store,
+                cfg,
+                entry.item,
+                active_id,
+                prefix=prefix,
+                context=" / ".join(labels[:-1]),
+            )
+        for child in entry.children:
+            walk(child, labels)
+
+    for entry in roots:
+        walk(entry, (entry.node.category_id.title(),))
+    if custom_items:
+        found = True
+        st.markdown("**✳️ Custom**")
+        _preset_browser_grid(
+            store, cfg, custom_items, active_id, prefix=prefix, custom=True
+        )
+    if not found:
+        st.info(f"По запросу «{query}» пресетов нет.")
+
+
+def _preset_browser(
+    store: Storage,
+    cfg: PresetConfig,
+    active_id: int,
+    items: list[Any],
+    *,
+    prefix: str,
+    query: str,
+    compact: bool,
+) -> None:
+    """Two-pane skill browser shared by the dialog and the Presets page.
+
+    The left pane only changes what is being browsed. Preset switching happens
+    exclusively through select buttons in the right pane.
+    """
+
+    active_item = next((item for item in items if item.id == active_id), None)
+    default_category, default_family = _preset_browser_defaults(active_item)
+    category_key = f"{prefix}_browser_category"
+    family_key = f"{prefix}_browser_family"
+    seen_key = f"{prefix}_browser_active_seen"
+    if st.session_state.get(seen_key) != active_id:
+        st.session_state[category_key] = default_category
+        st.session_state[family_key] = default_family
+        st.session_state[seen_key] = active_id
+    if st.session_state.get(category_key) not in {"explore", "farm", "train", "custom"}:
+        st.session_state[category_key] = default_category
+    if not st.session_state.get(family_key):
+        st.session_state[family_key] = default_family
+    category = str(st.session_state[category_key])
+    family = st.session_state.get(family_key)
+    item_by_node = _preset_item_map(items)
+
+    if query.strip():
+        roots, custom_items = catalog.build_preset_tree(items, query=query)
+        _preset_search_results(
+            store,
+            cfg,
+            active_id,
+            roots,
+            custom_items,
+            prefix=prefix,
+            query=query,
+        )
+        return
+
+    if compact:
+        nav_column, content_column = st.columns([0.9, 2.85], gap="large")
+    else:
+        nav_column, content_column = st.columns([0.9, 2.85], gap="large")
+
+    with nav_column:
+        st.caption("КАТЕГОРИИ")
+        for group in catalog.PRESET_GROUPS:
+            if group.id == "custom" and not any(
+                _preset_item_node(item) is None for item in items
+            ):
+                continue
+            label = (
+                f"● {group.icon} {group.label}"
+                if category == group.id
+                else f"{group.icon} {group.label}"
+            )
+            if st.button(
+                label,
+                key=f"{prefix}_category_{group.id}",
+                type="secondary",
+                width="stretch",
+            ):
+                st.session_state[category_key] = group.id
+                if group.id != "train":
+                    st.session_state[family_key] = None
+                st.rerun()
+
+        if category == "train":
+            st.caption("НАВЫКИ")
+            for node in catalog.PRESET_NODES:
+                if node.category_id != "train" or node.parent_id is not None:
+                    continue
+                label = f"{_PRESET_FAMILY_ICONS.get(node.id, '•')} {node.label}"
+                if st.button(
+                    label,
+                    key=f"{prefix}_family_{node.id}",
+                    type="primary" if family == node.id else "secondary",
+                    width="stretch",
+                ):
+                    st.session_state[family_key] = node.id
+                    st.rerun()
+
+    with content_column:
+        if category == "train":
+            node = catalog.PRESET_NODE_BY_ID.get(str(family))
+            if node is None or node.parent_id is not None:
+                node = next(
+                    (
+                        candidate
+                        for candidate in catalog.PRESET_NODES
+                        if candidate.category_id == "train"
+                        and candidate.parent_id is None
+                    ),
+                    None,
+                )
+                if node is not None:
+                    st.session_state[family_key] = node.id
+            if node is None:
+                st.info("В каталоге нет тренировочных семейств.")
+                return
+            parent = item_by_node.get(node.id)
+            st.caption(f"СЕМЕЙСТВО НАВЫКА · {node.label.upper()}")
+            if parent is not None:
+                with st.container(border=True):
+                    st.markdown(f"**{parent.name}**")
+                    st.caption(" ".join(parent.config.description.split()))
+                    if parent.id == active_id:
+                        st.caption("● Активен")
+                    elif st.button(
+                        f"Выбрать {parent.name}",
+                        key=f"{prefix}_select_{parent.name}",
+                        width="content",
+                    ):
+                        _request_preset_switch(
+                            store,
+                            cfg,
+                            parent.id,
+                            close_picker=prefix == "picker",
+                        )
+            children = [
+                item_by_node[child.id]
+                for child in catalog.preset_children(node.id)
+                if child.id in item_by_node
+            ]
+            if children:
+                st.caption("ПОДПРОФИЛИ")
+                _preset_browser_grid(
+                    store, cfg, children, active_id, prefix=prefix
+                )
+            return
+
+        if category == "custom":
+            st.caption("ПОЛЬЗОВАТЕЛЬСКИЕ ПРЕСЕТЫ")
+            st.subheader("Custom")
+            custom_items = [
+                item for item in items if _preset_item_node(item) is None
+            ]
+            if custom_items:
+                _preset_browser_grid(
+                    store,
+                    cfg,
+                    custom_items,
+                    active_id,
+                    prefix=prefix,
+                    custom=True,
+                )
+            else:
+                st.info(
+                    "Своих пресетов пока нет. Дублируйте активный профиль "
+                    "ниже — он появится здесь."
+                )
+            return
+
+        group = next(
+            (part for part in catalog.PRESET_GROUPS if part.id == category),
+            None,
+        )
+        if group is None:
+            st.info("Выберите категорию слева.")
+            return
+        st.caption("КАТЕГОРИЯ")
+        st.subheader(group.label)
+        st.caption(group.description)
+        category_roots = [
+            item_by_node[node.id]
+            for node in catalog.PRESET_NODES
+            if node.category_id == category
+            and node.parent_id is None
+            and node.id in item_by_node
+        ]
+        _preset_browser_grid(
+            store, cfg, category_roots, active_id, prefix=prefix
+        )
+
+
 def _close_preset_picker() -> None:
     st.session_state["_preset_picker_open"] = False
 
@@ -757,25 +1075,16 @@ def _preset_picker_dialog(
         key="preset_picker_query",
         placeholder="Aim, jump, streams, stamina, tech…",
     )
-    roots, custom_items = catalog.build_preset_tree(items, query=query)
-    active_item = next(
-        (item for item in items if item.id == active_id), None
-    )
-    defaults = _preset_active_ancestors(active_item) if active_item else []
-    _render_preset_tree(
+    _preset_browser(
         store,
         cfg,
         active_id,
-        roots,
-        custom_items,
+        items,
         prefix="picker",
         query=query,
-        show_description=False,
-        default_expanded=defaults,
+        compact=True,
     )
-    if not roots and not custom_items:
-        st.info("По этому запросу пресетов нет.")
-    if st.button("Закрыть", key="picker_close", use_container_width=True):
+    if st.button("Закрыть", key="picker_close", width="stretch"):
         st.session_state["_preset_picker_open"] = False
         st.rerun()
 
@@ -5436,8 +5745,8 @@ def page_presets(store: Storage, cfg: PresetConfig) -> None:
 
     st.subheader("Иерархия пресетов")
     st.caption(
-        "Родительские профили выбираются так же, как дочерние. "
-        "Стрелка раскрывает дочерние направления и не меняет активный пресет."
+        "Слева — категории и семейства навыков, справа — родительский профиль "
+        "и его подпрофили. Переход по семействам не меняет активный пресет."
     )
     search_cols = st.columns([3.2, 1.0])
     preset_query = search_cols[0].text_input(
@@ -5453,21 +5762,14 @@ def page_presets(store: Storage, cfg: PresetConfig) -> None:
     ):
         st.session_state["preset_catalog_search"] = ""
         st.rerun()
-    roots, custom_items = catalog.build_preset_tree(
-        items, query=preset_query
-    )
-    if not roots and not custom_items:
-        st.warning("По этому запросу пресетов нет.")
-    _render_preset_tree(
+    _preset_browser(
         store,
         cfg,
         active_id,
-        roots,
-        custom_items,
+        items,
         prefix="catalog",
         query=preset_query,
-        show_description=True,
-        default_expanded=_preset_all_parent_ids(),
+        compact=False,
     )
 
     st.subheader("Текущий пресет")

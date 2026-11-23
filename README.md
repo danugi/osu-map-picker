@@ -80,6 +80,10 @@ OSU_PICKER_PLAYER_SCORES=1
 
 Запросы ограничены 50 score-строками на игрока, кешируются в SQLite и не заменяют обычный поиск. Ошибка источника не прерывает discovery.
 
+## Flow Aim evidence
+
+Flow Aim is measured from the local `.osu` geometry, not from BPM, stars or mapper tags. A transition is meaningful when both cursor segments are at least 0.35 circle diameters and the beat gap is at most 1.5 beats. Slider exit points are used instead of only slider starts. A flow transition permits a gradual turn up to 115 degrees; tiny cursor corrections and reversals are not evidence. Only runs of at least four consecutive flow transitions count. `flow_share` is the share of meaningful transitions inside those sustained runs; `flow_intensity`, `flow_longest`, `flow_run_count` and `flow_quality` describe how strong and sustained the pattern is. The analyzer version is bumped whenever this geometry cache changes, so old persisted analyses are re-queued.
+
 ## Данные и резервные копии
 
 При запуске через `run.bat` данные по умолчанию хранятся в `%LOCALAPPDATA%\OsuMapPicker`. Если предпочитаемую папку нельзя создать и она ещё не существовала, скрипт пробует `%USERPROFILE%\OsuMapPicker`. Если существующая папка недоступна для записи, приложение останавливается, не перемещая и не заменяя базу.

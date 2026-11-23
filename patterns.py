@@ -21,7 +21,7 @@ from typing import Callable
 import gameplay
 from models import PatternChain, PatternSection, SequenceAnalysis
 
-ANALYZER_VERSION = 2
+ANALYZER_VERSION = 3
 
 # Canonical labels the analyzer can actually persist from measured geometry.
 # Keep this in sync with ``_combined_labels``; tests assert the generated
@@ -46,7 +46,18 @@ BURST_MAX_NOTES = 9
 # diameters so CS changes the physical spacing rather than the label.
 JUMP_DIAMETERS = 1.2
 WIDE_JUMP_DIAMETERS = 2.0
-FLOW_ANGLE_DEGREES = 35.0
+# A sustained flow run permits gradual and even moderately sharp direction
+# changes, but not reversals. 115 degrees is the boundary between a connected
+# turn and a snap back toward the previous object.
+FLOW_ANGLE_DEGREES = 115.0
+# Tiny cursor corrections are not meaningful flow evidence.
+FLOW_MIN_DIAMETERS = 0.35
+# At least four consecutive meaningful transitions are required; one isolated
+# coincidence is ignored.
+FLOW_MIN_RUN = 4
+# Flow aim is usually 1/2 or slower; this also prevents unrelated dense tapping
+# from becoming flow evidence.
+FLOW_MAX_GAP_BEATS = 1.5
 ANGLE_CHANGE_DEGREES = 90.0
 SLIDER_HEAVY_SHARE = 0.35
 HIGH_DENSITY_NOTES_PER_SECOND = 5.0
@@ -83,6 +94,10 @@ SEQUENCE_FEATURE_KEYS = frozenset(
         "jump_share",
         "wide_jump_share",
         "flow_share",
+        "flow_intensity",
+        "flow_longest",
+        "flow_run_count",
+        "flow_quality",
         "angle_change_share",
         "slider_share",
         "notes_per_second",
@@ -169,6 +184,83 @@ def _angle_degrees(
     return math.degrees(math.acos(max(-1.0, min(1.0, cosine))))
 
 
+def _flow_metrics(
+    notes: list[gameplay.PreviewObject], cs: float
+) -> tuple[float, int, int, float, int]:
+    """Measure sustained flow runs from meaningful cursor movement.
+
+    A transition is meaningful when both movement segments are at least 0.35
+    circle diameters and the timing is at most 1.5 beats. The angle uses the
+    exit point of sliders, so a slider's path is not silently represented by
+    its start position alone. Only runs of at least four transitions count.
+    Returns (share, longest, run_count, quality, meaningful_count).
+    """
+
+    if len(notes) < 4:
+        return 0.0, 0, 0, 0.0, 0
+    diameter = _circle_diameter(cs)
+    entries = [(note.x, note.y) for note in notes]
+    exits = [
+        note.points[-1]
+        if note.kind == "slider" and note.points
+        else (note.x, note.y)
+        for note in notes
+    ]
+    flags: list[bool | None] = []
+    qualities: list[float] = []
+    for index in range(1, len(notes) - 1):
+        previous = notes[index - 1]
+        current = notes[index]
+        ax = entries[index][0] - exits[index - 1][0]
+        ay = entries[index][1] - exits[index - 1][1]
+        bx = entries[index + 1][0] - exits[index][0]
+        by = entries[index + 1][1] - exits[index][1]
+        norm_a = math.hypot(ax, ay)
+        norm_b = math.hypot(bx, by)
+        gap = float(current.start - previous.start)
+        beat = max(1.0, float(current.beat_length))
+        meaningful = (
+            norm_a / diameter >= FLOW_MIN_DIAMETERS
+            and norm_b / diameter >= FLOW_MIN_DIAMETERS
+            and MIN_GAP_MS <= gap <= beat * FLOW_MAX_GAP_BEATS
+        )
+        if not meaningful:
+            flags.append(None)
+            qualities.append(0.0)
+            continue
+        cosine = (ax * bx + ay * by) / (norm_a * norm_b)
+        angle = math.degrees(math.acos(max(-1.0, min(1.0, cosine))))
+        flags.append(angle <= FLOW_ANGLE_DEGREES)
+        qualities.append(_clamp(1.0 - angle / FLOW_ANGLE_DEGREES))
+    total = sum(1 for flag in flags if flag is not None)
+    runs: list[tuple[int, int]] = []
+    start: int | None = None
+    for index, flag in enumerate((*flags, False)):
+        if flag is True and start is None:
+            start = index
+        elif flag is not True and start is not None:
+            runs.append((start, index))
+            start = None
+    sustained = [run for run in runs if run[1] - run[0] >= FLOW_MIN_RUN]
+    flow_transitions = sum(end - begin for begin, end in sustained)
+    if not total or not flow_transitions:
+        return 0.0, 0, 0, 0.0, total
+    quality = (
+        sum(
+            sum(qualities[begin:end])
+            for begin, end in sustained
+        )
+        / flow_transitions
+    )
+    return (
+        _clamp(flow_transitions / total),
+        max(end - begin for begin, end in sustained),
+        len(sustained),
+        _clamp(quality),
+        total,
+    )
+
+
 def _geometry(
     notes: list[gameplay.PreviewObject], cs: float
 ) -> tuple[dict[str, float], tuple[str, ...], tuple[PatternSection, ...]]:
@@ -210,11 +302,8 @@ def _geometry(
         if distances
         else 0.0
     )
-    flow_share = (
-        sum(1 for value in angles if value <= FLOW_ANGLE_DEGREES)
-        / len(angles)
-        if angles
-        else 0.0
+    flow_share, flow_longest, flow_run_count, flow_quality, flow_total = (
+        _flow_metrics(notes, cs)
     )
     angle_share = (
         sum(1 for value in angles if value >= ANGLE_CHANGE_DEGREES)
@@ -237,6 +326,10 @@ def _geometry(
         "jump_share": _clamp(jump_share),
         "wide_jump_share": _clamp(wide_share),
         "flow_share": _clamp(flow_share),
+        "flow_longest": flow_longest,
+        "flow_run_count": flow_run_count,
+        "flow_quality": _clamp(flow_quality),
+        "flow_total": flow_total,
         "angle_change_share": _clamp(angle_share),
         "slider_share": _clamp(slider_share),
         "notes_per_second": max(0.0, notes_per_second),
@@ -276,6 +369,9 @@ def _section_labels(
                 jump_share=metrics.get("jump_share", 0.0),
                 wide_jump_share=metrics.get("wide_jump_share", 0.0),
                 flow_share=metrics.get("flow_share", 0.0),
+                flow_longest=int(metrics.get("flow_longest", 0)),
+                flow_run_count=int(metrics.get("flow_run_count", 0)),
+                flow_quality=float(metrics.get("flow_quality", 0.0)),
                 angle_change_share=metrics.get("angle_change_share", 0.0),
             )
         )
@@ -356,6 +452,9 @@ def analyze_sequences(preview: gameplay.BeatmapPreview) -> SequenceAnalysis:
             jump_share=metrics.get("jump_share", 0.0),
             wide_jump_share=metrics.get("wide_jump_share", 0.0),
             flow_share=metrics.get("flow_share", 0.0),
+            flow_longest=int(metrics.get("flow_longest", 0)),
+            flow_run_count=int(metrics.get("flow_run_count", 0)),
+            flow_quality=float(metrics.get("flow_quality", 0.0)),
             angle_change_share=metrics.get("angle_change_share", 0.0),
             slider_share=metrics.get("slider_share", 0.0),
             notes_per_second=metrics.get("notes_per_second", 0.0),
@@ -426,6 +525,9 @@ def analyze_sequences(preview: gameplay.BeatmapPreview) -> SequenceAnalysis:
         jump_share=metrics.get("jump_share", 0.0),
         wide_jump_share=metrics.get("wide_jump_share", 0.0),
         flow_share=metrics.get("flow_share", 0.0),
+        flow_longest=int(metrics.get("flow_longest", 0)),
+        flow_run_count=int(metrics.get("flow_run_count", 0)),
+        flow_quality=float(metrics.get("flow_quality", 0.0)),
         angle_change_share=metrics.get("angle_change_share", 0.0),
         slider_share=metrics.get("slider_share", 0.0),
         notes_per_second=metrics.get("notes_per_second", 0.0),
@@ -473,6 +575,12 @@ def sequence_features(analysis: SequenceAnalysis) -> dict[str, float]:
         "jump_share": _clamp(analysis.jump_share),
         "wide_jump_share": _clamp(analysis.wide_jump_share),
         "flow_share": _clamp(analysis.flow_share),
+        # 50% of meaningful transitions inside sustained runs is already a
+        # strong flow map; this keeps the ranking score interpretable.
+        "flow_intensity": _clamp(analysis.flow_share / 0.50),
+        "flow_longest": _clamp(analysis.flow_longest / 8.0),
+        "flow_run_count": _clamp(analysis.flow_run_count / 8.0),
+        "flow_quality": _clamp(analysis.flow_quality),
         "angle_change_share": _clamp(analysis.angle_change_share),
         "slider_share": _clamp(analysis.slider_share),
         "notes_per_second": _clamp(

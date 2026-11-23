@@ -77,8 +77,12 @@ def test_analysis_json_roundtrip() -> None:
         truncated=True,
         jump_share=0.4,
         wide_jump_share=0.2,
+        flow_share=0.35,
+        flow_longest=9,
+        flow_run_count=3,
+        flow_quality=0.7,
         labels=("wide_aim",),
-        analyzer_version=2,
+        analyzer_version=3,
     )
     restored = analysis.sequence_from_json(analysis.sequence_to_json(original))
     assert restored == original

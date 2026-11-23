@@ -56,6 +56,9 @@ def _section_from(data: dict) -> PatternSection:
         jump_share=float(data.get("jump_share", 0.0)),
         wide_jump_share=float(data.get("wide_jump_share", 0.0)),
         flow_share=float(data.get("flow_share", 0.0)),
+        flow_longest=int(data.get("flow_longest", 0)),
+        flow_run_count=int(data.get("flow_run_count", 0)),
+        flow_quality=float(data.get("flow_quality", 0.0)),
         angle_change_share=float(data.get("angle_change_share", 0.0)),
     )
 
@@ -83,6 +86,9 @@ def sequence_from_json(raw: str | None) -> SequenceAnalysis | None:
             jump_share=float(data.get("jump_share", 0.0)),
             wide_jump_share=float(data.get("wide_jump_share", 0.0)),
             flow_share=float(data.get("flow_share", 0.0)),
+            flow_longest=int(data.get("flow_longest", 0)),
+            flow_run_count=int(data.get("flow_run_count", 0)),
+            flow_quality=float(data.get("flow_quality", 0.0)),
             angle_change_share=float(data.get("angle_change_share", 0.0)),
             slider_share=float(data.get("slider_share", 0.0)),
             notes_per_second=float(data.get("notes_per_second", 0.0)),

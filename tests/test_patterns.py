@@ -161,11 +161,11 @@ def test_geometry_labels_multiple_patterns() -> None:
     # A compact fast chain followed by wide zig-zag jumps: more than one
     # measured category must be allowed at once.
     notes = [
-        (1000 + index * 125, 100 + index * 8, 100) for index in range(12)
+        (1000 + index * 125, 100 + index * 60, 100) for index in range(24)
     ]
     notes += [
-        (3000 + index * 300, 100 if index % 2 else 400, 100)
-        for index in range(12)
+        (5000 + index * 300, 100 if index % 2 else 400, 100)
+        for index in range(24)
     ]
     analysis = analyze(notes)
     assert "streams" in analysis.labels
@@ -178,7 +178,7 @@ def test_geometry_labels_multiple_patterns() -> None:
 
 def test_geometry_detects_flow_and_wide_jumps_separately() -> None:
     flow = analyze(
-        [(1000 + index * 250, 100 + index * 30, 100) for index in range(10)]
+        [(1000 + index * 250, 100 + index * 60, 100) for index in range(10)]
     )
     wide = analyze(
         [(1000 + index * 250, 100 if index % 2 else 400, 100) for index in range(10)]
@@ -192,7 +192,7 @@ def test_geometry_detects_flow_and_wide_jumps_separately() -> None:
 def test_mixed_sections_are_reported() -> None:
     # First 24 notes are compact and straight, next 24 are wide zig-zag jumps.
     notes = [
-        (1000 + index * 125, 100 + index * 4, 100) for index in range(24)
+        (1000 + index * 125, 100 + index * 60, 100) for index in range(24)
     ]
     notes += [
         (5000 + index * 300, 100 if index % 2 else 400, 100)
@@ -250,3 +250,38 @@ def test_cached_analysis_is_reused_until_the_file_changes(
     assert calls == 2
     assert third.analyzed_notes == first.analyzed_notes
     assert third.stream_chains[0].start_ms == 2000
+
+
+def test_tiny_cursor_movements_do_not_create_flow_evidence() -> None:
+    notes = [(1000 + index * 200, 100 + index * 4, 100) for index in range(20)]
+    analysis = analyze(notes)
+    assert analysis.flow_share == 0.0
+    assert analysis.flow_longest == 0
+    assert "flow_aim" not in analysis.labels
+
+
+def test_reversing_zigzag_is_not_sustained_flow() -> None:
+    notes = [
+        (1000 + index * 250, 100 if index % 2 else 400, 100)
+        for index in range(20)
+    ]
+    analysis = analyze(notes, beat_length=500)
+    assert analysis.flow_share < 0.20
+    assert "flow_aim" not in analysis.labels
+
+
+def test_gradual_curve_is_flow_not_only_a_straight_line() -> None:
+    import math
+
+    notes = [
+        (
+            1000 + index * 240,
+            80 + index * 65,
+            256 + int(110 * math.sin(index * 0.30)),
+        )
+        for index in range(24)
+    ]
+    analysis = analyze(notes)
+    assert analysis.flow_share > 0.50
+    assert analysis.flow_longest >= 8
+    assert "flow_aim" in analysis.labels

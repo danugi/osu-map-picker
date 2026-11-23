@@ -14,6 +14,7 @@ from streamlit.testing.v1 import AppTest
 import analysis
 import analysis_worker
 import config
+import catalog
 import app as app_module
 import appearance
 import discovery
@@ -507,6 +508,16 @@ def _select_preset(at: AppTest, name: str):
     if at.session_state["active_config"].name == name:
         return at
     _button(at, "open_preset_picker").click().run()
+    node = catalog.preset_node(name)
+    if node is None:
+        _button(at, "picker_category_custom").click().run()
+    else:
+        _button(at, f"picker_category_{node.category_id}").click().run()
+        family = node.parent_id or (
+            node.id if node.category_id == "train" else None
+        )
+        if family:
+            _button(at, f"picker_family_{family}").click().run()
     key = next(
         candidate
         for candidate in (
@@ -1034,44 +1045,27 @@ def test_skill_hierarchy_counts_search_and_pins(app_env) -> None:
     assert any("Закреплённые навыки" in item.label for item in at.expander)
 
 
-def test_preset_catalog_shows_full_hierarchy_at_a_glance(app_env) -> None:
+def test_preset_catalog_two_pane_navigation_keeps_family_context(app_env) -> None:
     at = AppTest.from_file(APP, default_timeout=90)
     at.session_state["nav"] = "presets"
     at.run()
     texts = _texts(at)
-    for header in ("🧭 Explore", "💯 Farm", "🎯 Train"):
-        assert header in texts
-    for name in (
-        "Aim Farm",
-        "Aim",
-        "Jump Aim",
-        "Flow Aim",
-        "Wide Aim",
-        "Aim Control",
-        "Aim + Bursts",
-        "High BPM",
-        "Burst-oriented Streams",
-        "Continuous Streams",
-        "Stamina",
-        "Alternating",
-        "Slider Tech",
-        "Rhythm Control",
-    ):
+    for category in ("explore", "farm", "train"):
+        assert _button(at, f"catalog_category_{category}") is not None
+    for name in ("Aim", "Jump Aim", "Flow Aim", "Wide Aim", "Aim Control", "Aim + Bursts"):
         assert name in texts, name
     assert len(at.expander) == 0
-    assert _button(at, "catalog_toggle_aim") is not None
+    assert _button(at, "catalog_family_aim") is not None
     assert _button(at, "catalog_select_Jump Aim") is not None
 
+    _button(at, "catalog_family_streams").click().run()
+    assert at.session_state["active_config"].name == "Aim"
+    assert "Burst-oriented Streams" in _texts(at)
+    assert "Continuous Streams" in _texts(at)
+    assert _button(at, "catalog_select_Streams") is not None
+    assert not _has_button(at, "catalog_select_Jump Aim")
 
-def test_catalog_expand_toggle_does_not_change_active_preset(app_env) -> None:
-    at = AppTest.from_file(APP, default_timeout=90)
-    at.session_state["nav"] = "presets"
-    at.run()
-    assert at.session_state["active_config"].name == "Aim"
-    _button(at, "catalog_toggle_aim").click().run()
-    assert "Jump Aim" not in _texts(at)
-    assert at.session_state["active_config"].name == "Aim"
-    _button(at, "catalog_toggle_aim").click().run()
+    _button(at, "catalog_family_aim").click().run()
     assert "Jump Aim" in _texts(at)
     assert at.session_state["active_config"].name == "Aim"
 
@@ -1094,6 +1088,7 @@ def test_custom_preset_is_available_in_catalog_and_picker(app_env) -> None:
     at = AppTest.from_file(APP, default_timeout=90)
     at.run()
     _button(at, "open_preset_picker").click().run()
+    _button(at, "picker_category_custom").click().run()
     assert _button(at, "picker_custom_select_My Custom Profile") is not None
     _button(at, "picker_custom_select_My Custom Profile").click().run()
     assert at.session_state["active_preset_id"] == custom.id

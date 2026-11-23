@@ -346,7 +346,7 @@ def test_v10_migration_upgrades_untouched_aim_farm(storage: Storage) -> None:
         "Sped Up",
     ]
     assert upgraded.config.ranking.relevance_targets == ["aim_classic"]
-    assert presets.BUILTIN_PRESETS_VERSION == 18
+    assert presets.BUILTIN_PRESETS_VERSION == 19
 
 
 def test_v10_migration_preserves_edited_builtin_and_user_data(
@@ -530,11 +530,11 @@ def test_v11_migration_updates_untouched_v10_aim_farm_limits(storage) -> None:
 
     updated = storage.get_preset(farm.id)
     assert updated is not None
-    assert presets.BUILTIN_PRESETS_VERSION == 18
+    assert presets.BUILTIN_PRESETS_VERSION == 19
     assert updated.config.discovery.max_requests == 56
     assert updated.config.discovery.max_pages_per_strategy == 3
     assert updated.config.discovery.fetch_attributes_limit == 40
-    assert storage.get_preference("builtins_version") == "18"
+    assert storage.get_preference("builtins_version") == "19"
 
 
 def test_v12_migration_adds_policy_to_untouched_builtins(storage) -> None:
@@ -578,7 +578,7 @@ def test_v12_migration_adds_policy_to_untouched_builtins(storage) -> None:
     assert kept is not None
     assert kept.config.filters.stars_min == 4.25
     assert kept.config.ranking.relevance_policy == {}
-    assert storage.get_preference("builtins_version") == "18"
+    assert storage.get_preference("builtins_version") == "19"
 
 
 def test_v13_migration_removes_raw_burst_feature_only_from_untouched(storage) -> None:
@@ -602,7 +602,7 @@ def test_v13_migration_removes_raw_burst_feature_only_from_untouched(storage) ->
         modern.ranking.relevance_policy
     )
     assert "require_features_any" not in updated.config.ranking.relevance_policy
-    assert storage.get_preference("builtins_version") == "18"
+    assert storage.get_preference("builtins_version") == "19"
 
     edited = copy.deepcopy(updated.config)
     edited.ranking.relevance_policy = copy.deepcopy(
@@ -655,7 +655,7 @@ def test_v14_migration_rewrites_retired_ids_in_user_presets(storage) -> None:
     policy_targets = migrated.config.ranking.relevance_policy["primary_targets"]
     assert "speed_short_bursts" not in policy_targets
     assert policy_targets.count("burst_control") == 1
-    assert storage.get_preference("builtins_version") == "18"
+    assert storage.get_preference("builtins_version") == "19"
     # Alias table stays consistent with the retirement list.
     assert set(SKILL_ALIASES) == {
         "speed_short_bursts",
@@ -713,7 +713,7 @@ def test_v15_migration_renames_untouched_mixed_aim_to_aim(storage) -> None:
         "aim_bursts",
     ]
     assert storage.get_preset_by_name("Mixed Aim") is None
-    assert storage.get_preference("builtins_version") == "18"
+    assert storage.get_preference("builtins_version") == "19"
 
 
 def test_v15_rename_keeps_edited_mixed_aim_and_seeds_aim(storage) -> None:
@@ -793,7 +793,7 @@ def test_v16_migration_merges_bursts_into_untouched_legacy_streams(storage) -> N
         "streams",
         "bursts",
     ]
-    assert storage.get_preference("builtins_version") == "18"
+    assert storage.get_preference("builtins_version") == "19"
 
 
 def test_v16_migration_upgrades_streams_row_with_legacy_targets(storage) -> None:
@@ -924,7 +924,7 @@ def test_v18_migration_promotes_hierarchy_and_fixes_streams_policy_only_when_unt
         "streams": 0.0,
         "bursts": 0.0,
     }
-    assert storage.get_preference("builtins_version") == "18"
+    assert storage.get_preference("builtins_version") == "19"
     assert storage.get_preset_by_name("Jump Aim") is not None
     assert storage.get_preset_by_name("Continuous Streams") is not None
     assert storage.get_preset_by_name("Reading") is not None  # legacy row kept
@@ -968,3 +968,46 @@ def test_v16_retired_rows_stay_hidden_but_resolvable(storage) -> None:
         "stream_long": 0.55,
         "speed_stamina": 0.35,
     }
+
+
+def test_v19_migration_updates_only_untouched_flow_aim(storage) -> None:
+    row = storage.get_preset_by_name("Flow Aim")
+    assert row is not None
+    old = copy.deepcopy(row.config)
+    old.description = (
+        "Прокси для связного aim: Classic Aim и Flow Aim вместе. Это не "
+        "измерение flow-геометрии; структура движений остаётся ограниченной."
+    )
+    old.ranking.skill_weights = {"aim_flow": 0.70, "aim_classic": 0.30}
+    old.ranking.relevance_policy = {
+        "primary_targets": ["aim_flow"],
+        "require_features_any": ["flow_share"],
+        "feature_minimums": {"flow_share": 0.0},
+    }
+    assert presets._preset_fingerprint(old) == (
+        "2a783c105408abd43b34fc3b2808f97f185a2eaee259b1ed63515fb491bf2e8e"
+    )
+    storage.update_preset(row.id, old)
+    storage.set_preference("builtins_version", "18")
+    presets.ensure_builtin_presets(storage)
+
+    updated = storage.get_preset_by_name("Flow Aim")
+    assert updated is not None
+    assert updated.config.ranking.relevance_policy["feature_minimums"][
+        "flow_share"
+    ] == 0.20
+    assert updated.config.ranking.skill_weights["aim_flow"] == 0.75
+    assert storage.get_preference("builtins_version") == "19"
+
+
+def test_v19_migration_keeps_edited_flow_aim(storage) -> None:
+    row = storage.get_preset_by_name("Flow Aim")
+    assert row is not None
+    edited = copy.deepcopy(row.config)
+    edited.ranking.skill_weights = {"aim_flow": 0.99, "aim_classic": 0.01}
+    storage.update_preset(row.id, edited)
+    storage.set_preference("builtins_version", "18")
+    presets.ensure_builtin_presets(storage)
+    kept = storage.get_preset_by_name("Flow Aim")
+    assert kept is not None
+    assert kept.config.ranking.skill_weights["aim_flow"] == 0.99

@@ -940,9 +940,9 @@ def _wide_aim() -> PresetConfig:
 def _flow_aim() -> PresetConfig:
     cfg = _skill_preset(
         "Flow Aim",
-        "Прокси для связного aim: Classic Aim и Flow Aim вместе. Это не "
-        "измерение flow-геометрии; структура движений остаётся ограниченной.",
-        {"aim_flow": 0.70, "aim_classic": 0.30},
+        "Связный aim: устойчивые flow-цепочки из реальных .osu-переходов. "
+        "Classic Aim дополняет ранжирование, но не заменяет flow-доказательство.",
+        {"aim_flow": 0.75, "aim_classic": 0.25},
         comfort_stars=5.5,
         diversity=0.50,
         mapping_weight=1.3,
@@ -1303,7 +1303,7 @@ _RELEVANCE_POLICIES: dict[str, dict[str, Any]] = {
     "Flow Aim": {
         "primary_targets": ["aim_flow"],
         "require_features_any": ["flow_share"],
-        "feature_minimums": {"flow_share": 0.0},
+        "feature_minimums": {"flow_share": 0.20},
     },
     "Aim Control": {
         "primary_targets": ["aim_control"],
@@ -1574,7 +1574,7 @@ _PRE_V11_FINGERPRINTS = {
     ),
 }
 
-BUILTIN_PRESETS_VERSION = 18
+BUILTIN_PRESETS_VERSION = 19
 _V18_NEW_NAMES = frozenset(
     {
         "Jump Aim",
@@ -2149,6 +2149,27 @@ def _upgrade_v18_definitions(storage: Any) -> int:
     return changed
 
 
+def _upgrade_v19_definitions(storage: Any) -> int:
+    """Refresh the untouched v18 Flow Aim definition only.
+
+    Speed and Double-tap were already updated in 1.100; their stored v18 rows
+    must stay byte-for-byte untouched here so user edits and older migration
+    tests remain valid.
+    """
+
+    flow_fingerprint = (
+        "2a783c105408abd43b34fc3b2808f97f185a2eaee259b1ed63515fb491bf2e8e"
+    )
+    row = storage.get_preset_by_name("Flow Aim")
+    modern = builtin_by_name("Flow Aim")
+    if row is None or not row.is_builtin or modern is None:
+        return 0
+    if _preset_fingerprint(row.config) != flow_fingerprint:
+        return 0
+    storage.update_preset(row.id, modern)
+    return 1
+
+
 def ensure_builtin_presets(storage: Any) -> int:
     """Seed built-ins and add newer profiles without destroying user edits.
 
@@ -2221,6 +2242,8 @@ def ensure_builtin_presets(storage: Any) -> int:
     if version < 18:
         _upgrade_v18_definitions(storage)
         new_names.update(_V18_NEW_NAMES)
+    if version < 19:
+        _upgrade_v19_definitions(storage)
 
     for preset in builtin_presets():
         if preset.name not in new_names:
