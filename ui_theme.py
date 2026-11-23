@@ -1186,6 +1186,106 @@ h2, [data-testid="stHeadingWithActionElements"] h2 {
 }
 </style>
 """
+
+    css += """
+<style>
+/* Restrained motion: state changes only, transform/opacity only. */
+@keyframes osu-soft-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes osu-dialog-in {
+  from { opacity: 0; transform: translateY(6px) scale(0.995); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes osu-spinner-pulse {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 1; }
+}
+[class*="st-key-picker_browser_content"],
+[class*="st-key-catalog_browser_content"] {
+  animation: osu-soft-in 160ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+[class*="st-key-result_enter_"] {
+  animation: osu-soft-in 170ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+[data-testid="stDialog"] {
+  animation-duration: 160ms !important;
+  animation-timing-function: cubic-bezier(0.2, 0.7, 0.2, 1) !important;
+}
+[data-testid="stDialog"] > div,
+.stDialog > div {
+  animation: osu-dialog-in 160ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+[data-testid="stSpinner"],
+.stSpinner {
+  animation: osu-spinner-pulse 1.25s ease-in-out infinite;
+}
+.stButton > button,
+.stDownloadButton > button,
+.stLinkButton > a,
+[data-testid="stFormSubmitButton"] > button {
+  transition:
+    background 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease,
+    transform 120ms cubic-bezier(0.2, 0.7, 0.2, 1) !important;
+}
+.stButton > button:hover,
+.stDownloadButton > button:hover,
+.stLinkButton > a:hover,
+[data-testid="stFormSubmitButton"] > button:hover {
+  transform: translateY(-1px);
+}
+.stButton > button:active,
+.stDownloadButton > button:active,
+.stLinkButton > a:active,
+[data-testid="stFormSubmitButton"] > button:active {
+  transform: translateY(0) scale(0.995);
+}
+[data-testid="stVerticalBlockBorderWrapper"] {
+  transition:
+    border-color 120ms ease,
+    background 120ms ease,
+    transform 120ms cubic-bezier(0.2, 0.7, 0.2, 1) !important;
+}
+[data-testid="stVerticalBlockBorderWrapper"]:hover {
+  transform: translateY(-1px);
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+  [class*="st-key-picker_browser_content"],
+  [class*="st-key-catalog_browser_content"],
+  [class*="st-key-result_enter_"],
+  [data-testid="stDialog"],
+  [data-testid="stDialog"] > div,
+  .stDialog > div,
+  [data-testid="stSpinner"],
+  .stSpinner {
+    animation: none !important;
+  }
+  .stButton > button,
+  .stDownloadButton > button,
+  .stLinkButton > a,
+  [data-testid="stFormSubmitButton"] > button,
+  [data-testid="stVerticalBlockBorderWrapper"] {
+    transition: none !important;
+  }
+  .stButton > button:hover,
+  .stDownloadButton > button:hover,
+  .stLinkButton > a:hover,
+  [data-testid="stFormSubmitButton"] > button:hover,
+  [data-testid="stVerticalBlockBorderWrapper"]:hover {
+    transform: none !important;
+  }
+}
+</style>
+"""
     return css
 
 

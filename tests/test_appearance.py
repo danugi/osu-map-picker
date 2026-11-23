@@ -209,3 +209,14 @@ def test_theme_css_applies_effects_only_to_the_fixed_background() -> None:
     preview = ui_theme.preview_html(settings, uri)
     assert "Recommendation 84" in preview
     assert "data:image/webp;base64,AAAA" in preview
+
+
+def test_motion_css_is_lightweight_and_reduced_motion_aware() -> None:
+    css = ui_theme.build_theme_css(AppearanceSettings(), None)
+    assert "@keyframes osu-soft-in" in css
+    assert "prefers-reduced-motion: reduce" in css
+    assert "animation: none !important" in css
+    assert "transition: none !important" in css
+    assert "st-key-result_enter_" in css
+    assert "st-key-picker_browser_content" in css
+    assert "st-key-catalog_browser_content" in css

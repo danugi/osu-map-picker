@@ -370,6 +370,7 @@ def _clear_result_display() -> None:
         "result_new_ids",
         "result_only_new",
         "result_expand_notice",
+        "result_animation_ids",
         "preview_beatmap_id",
         "random_meta",
     ):
@@ -963,96 +964,97 @@ def _preset_browser(
                     st.rerun()
 
     with content_column:
-        if category == "train":
-            node = catalog.PRESET_NODE_BY_ID.get(str(family))
-            if node is None or node.parent_id is not None:
-                node = next(
-                    (
-                        candidate
-                        for candidate in catalog.PRESET_NODES
-                        if candidate.category_id == "train"
-                        and candidate.parent_id is None
-                    ),
-                    None,
-                )
-                if node is not None:
-                    st.session_state[family_key] = node.id
-            if node is None:
-                st.info("В каталоге нет тренировочных семейств.")
+        with st.container(key=f"{prefix}_browser_content"):
+            if category == "train":
+                node = catalog.PRESET_NODE_BY_ID.get(str(family))
+                if node is None or node.parent_id is not None:
+                    node = next(
+                        (
+                            candidate
+                            for candidate in catalog.PRESET_NODES
+                            if candidate.category_id == "train"
+                            and candidate.parent_id is None
+                        ),
+                        None,
+                    )
+                    if node is not None:
+                        st.session_state[family_key] = node.id
+                if node is None:
+                    st.info("В каталоге нет тренировочных семейств.")
+                    return
+                parent = item_by_node.get(node.id)
+                st.caption(f"СЕМЕЙСТВО НАВЫКА · {node.label.upper()}")
+                if parent is not None:
+                    with st.container(border=True):
+                        st.markdown(f"**{parent.name}**")
+                        st.caption(" ".join(parent.config.description.split()))
+                        if parent.id == active_id:
+                            st.caption("● Активен")
+                        elif st.button(
+                            f"Выбрать {parent.name}",
+                            key=f"{prefix}_select_{parent.name}",
+                            width="content",
+                        ):
+                            _request_preset_switch(
+                                store,
+                                cfg,
+                                parent.id,
+                                close_picker=prefix == "picker",
+                            )
+                children = [
+                    item_by_node[child.id]
+                    for child in catalog.preset_children(node.id)
+                    if child.id in item_by_node
+                ]
+                if children:
+                    st.caption("ПОДПРОФИЛИ")
+                    _preset_browser_grid(
+                        store, cfg, children, active_id, prefix=prefix
+                    )
                 return
-            parent = item_by_node.get(node.id)
-            st.caption(f"СЕМЕЙСТВО НАВЫКА · {node.label.upper()}")
-            if parent is not None:
-                with st.container(border=True):
-                    st.markdown(f"**{parent.name}**")
-                    st.caption(" ".join(parent.config.description.split()))
-                    if parent.id == active_id:
-                        st.caption("● Активен")
-                    elif st.button(
-                        f"Выбрать {parent.name}",
-                        key=f"{prefix}_select_{parent.name}",
-                        width="content",
-                    ):
-                        _request_preset_switch(
-                            store,
-                            cfg,
-                            parent.id,
-                            close_picker=prefix == "picker",
-                        )
-            children = [
-                item_by_node[child.id]
-                for child in catalog.preset_children(node.id)
-                if child.id in item_by_node
-            ]
-            if children:
-                st.caption("ПОДПРОФИЛИ")
-                _preset_browser_grid(
-                    store, cfg, children, active_id, prefix=prefix
-                )
-            return
 
-        if category == "custom":
-            st.caption("ПОЛЬЗОВАТЕЛЬСКИЕ ПРЕСЕТЫ")
-            st.subheader("Custom")
-            custom_items = [
-                item for item in items if _preset_item_node(item) is None
-            ]
-            if custom_items:
-                _preset_browser_grid(
-                    store,
-                    cfg,
-                    custom_items,
-                    active_id,
-                    prefix=prefix,
-                    custom=True,
-                )
-            else:
-                st.info(
-                    "Своих пресетов пока нет. Дублируйте активный профиль "
-                    "ниже — он появится здесь."
-                )
-            return
+            if category == "custom":
+                st.caption("ПОЛЬЗОВАТЕЛЬСКИЕ ПРЕСЕТЫ")
+                st.subheader("Custom")
+                custom_items = [
+                    item for item in items if _preset_item_node(item) is None
+                ]
+                if custom_items:
+                    _preset_browser_grid(
+                        store,
+                        cfg,
+                        custom_items,
+                        active_id,
+                        prefix=prefix,
+                        custom=True,
+                    )
+                else:
+                    st.info(
+                        "Своих пресетов пока нет. Дублируйте активный профиль "
+                        "ниже — он появится здесь."
+                    )
+                return
 
-        group = next(
-            (part for part in catalog.PRESET_GROUPS if part.id == category),
-            None,
-        )
-        if group is None:
-            st.info("Выберите категорию слева.")
-            return
-        st.caption("КАТЕГОРИЯ")
-        st.subheader(group.label)
-        st.caption(group.description)
-        category_roots = [
-            item_by_node[node.id]
-            for node in catalog.PRESET_NODES
-            if node.category_id == category
-            and node.parent_id is None
-            and node.id in item_by_node
-        ]
-        _preset_browser_grid(
-            store, cfg, category_roots, active_id, prefix=prefix
-        )
+            group = next(
+                (part for part in catalog.PRESET_GROUPS if part.id == category),
+                None,
+            )
+            if group is None:
+                st.info("Выберите категорию слева.")
+                return
+            st.caption("КАТЕГОРИЯ")
+            st.subheader(group.label)
+            st.caption(group.description)
+            category_roots = [
+                item_by_node[node.id]
+                for node in catalog.PRESET_NODES
+                if node.category_id == category
+                and node.parent_id is None
+                and node.id in item_by_node
+            ]
+            _preset_browser_grid(
+                store, cfg, category_roots, active_id, prefix=prefix
+            )
 
 
 def _close_preset_picker() -> None:
@@ -2781,6 +2783,9 @@ def _remember_result(
         st.session_state["result_shuffle_seed"] = secrets.randbits(64)
         st.session_state["result_pick_id"] = None
         st.session_state["result_display_order"] = None
+        st.session_state["result_animation_ids"] = [
+            item.beatmapset.id for item in result.scored
+        ]
     if result.scored:
         try:
             store.record_history(
@@ -2920,6 +2925,7 @@ def _mark_search_expansion(previous_set_ids: set[int]) -> None:
     )
     if added:
         st.session_state["result_new_ids"] = added
+        st.session_state["result_animation_ids"] = added
         # Filtering is opt-in. The default stays the full cumulative result.
         st.session_state["result_only_new"] = False
         st.session_state["result_expand_notice"] = (
@@ -4071,6 +4077,10 @@ def _render_result(
                     "«Почему карт мало»."
                 )
 
+    animation_ids = {
+        int(value)
+        for value in st.session_state.pop("result_animation_ids", ())
+    }
     if picked is not None:
         _render_card(
             store,
@@ -4085,12 +4095,19 @@ def _render_result(
             columns = st.columns(3, gap="medium")
             for offset, item in enumerate(shown[start : start + 3]):
                 with columns[offset]:
-                    _render_card(
-                        store,
-                        item,
-                        start + offset + 1,
-                        weights,
+                    set_id = item.beatmapset.id
+                    card_key = (
+                        f"result_enter_{set_id}"
+                        if set_id in animation_ids
+                        else f"result_card_{set_id}"
                     )
+                    with st.container(key=card_key):
+                        _render_card(
+                            store,
+                            item,
+                            start + offset + 1,
+                            weights,
+                        )
     if picked is None and len(items) > visible:
         remaining = len(items) - len(shown)
         st.button(

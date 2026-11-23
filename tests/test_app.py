@@ -413,6 +413,22 @@ def test_expanded_search_increases_discovery_pages_not_attribute_reserve(
     assert expanded["fetch_attributes"] == normal["fetch_attributes"]
 
 
+def test_expansion_animation_state_is_consumed_once(
+    app_env, monkeypatch
+) -> None:
+    _install_fake_expansion(monkeypatch, list(range(1, 22)) + [101])
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.session_state["nav"] = "search"
+    at.session_state["result"] = _result_with_cards(21)
+    at.session_state["result_visible"] = 30
+    at.run()
+    assert "result_animation_ids" not in at.session_state
+    _button(at, "expand_search_limits").click().run()
+    assert not at.exception
+    assert "result_animation_ids" not in at.session_state
+    assert at.session_state["result_new_ids"] == [101]
+
+
 def test_expanded_search_with_zero_new_keeps_old_result(
     app_env, monkeypatch
 ) -> None:
