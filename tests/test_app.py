@@ -99,8 +99,8 @@ def test_app_starts_without_credentials_and_does_not_search(app_env) -> None:
 def test_sidebar_seeds_all_presets(app_env) -> None:
     at = AppTest.from_file(APP, default_timeout=60)
     at.run()
-    selector = at.sidebar.selectbox[0]
-    assert len(selector.options) == 23
+    assert _button(at, "open_preset_picker") is not None
+    assert at.session_state["active_config"].name == "Aim"
     store = Storage(app_env)
     names = {preset.name for preset in store.list_presets()}
     assert names == {
@@ -108,10 +108,10 @@ def test_sidebar_seeds_all_presets(app_env) -> None:
     }
     assert "Any Taste" not in names
     assert "Aim Farm / PP" not in names
-    assert any(item.endswith("/ Streams") for item in selector.options)
-    assert any(item.endswith("/ Stamina") for item in selector.options)
-    assert "Streams & Stamina" not in selector.options
-    assert "Bursts" not in selector.options
+    assert "Streams" in names
+    assert "Stamina" in names
+    assert "Streams & Stamina" not in names
+    assert "Bursts" not in names
 
 
 def test_search_button_without_credentials_is_honest(app_env) -> None:
@@ -383,13 +383,19 @@ def test_every_settings_section_renders(app_env, section: str) -> None:
 
 
 def _select_preset(at: AppTest, name: str):
-    box = at.sidebar.selectbox[0]
-    option = next(
-        option
-        for option in box.options
-        if option == name or option.endswith(f"/ {name}")
+    if at.session_state["active_config"].name == name:
+        return at
+    _button(at, "open_preset_picker").click().run()
+    key = next(
+        candidate
+        for candidate in (
+            f"picker_select_{name}",
+            f"picker_custom_select_{name}",
+        )
+        if _has_button(at, candidate)
     )
-    return box.select(option).run()
+    _button(at, key).click().run()
+    return at
 
 
 def _button(at: AppTest, key: str):
@@ -817,7 +823,7 @@ def test_appearance_upload_survives_and_does_not_change_search(app_env) -> None:
     assert path is not None and path.is_file()
     assert path.parent == app_env.parent / "appearance"
     assert at.session_state["active_config"].to_dict() == original
-    assert at.sidebar.selectbox[0].value is not None
+    assert _button(at, "open_preset_picker") is not None
 
     # A fresh script run reads the same local image and keeps search config.
     fresh = AppTest.from_file(APP, default_timeout=90)
@@ -907,34 +913,123 @@ def test_skill_hierarchy_counts_search_and_pins(app_env) -> None:
     assert any("Закреплённые навыки" in item.label for item in at.expander)
 
 
-def test_preset_catalog_is_grouped_with_counts(app_env) -> None:
+def test_preset_catalog_shows_full_hierarchy_at_a_glance(app_env) -> None:
     at = AppTest.from_file(APP, default_timeout=90)
     at.session_state["nav"] = "presets"
     at.run()
-    labels = [item.label for item in at.expander]
-    assert "🧭 Explore · 2" in labels
-    assert "💯 Farm · 1" in labels
-    assert "🎯 Train · 20" in labels
-    assert "🧩 Custom · 0" in labels
-    assert "↳ Aim · 5" in labels
-    assert "↳ Speed · 3" in labels
-    assert "↳ Streams · 2" in labels
-    assert "Aim Farm" in _texts(at)
+    texts = _texts(at)
+    for header in ("🧭 Explore", "💯 Farm", "🎯 Train"):
+        assert header in texts
+    for name in (
+        "Aim Farm",
+        "Aim",
+        "Jump Aim",
+        "Flow Aim",
+        "Wide Aim",
+        "Aim Control",
+        "Aim + Bursts",
+        "High BPM",
+        "Burst-oriented Streams",
+        "Continuous Streams",
+        "Stamina",
+        "Alternating",
+        "Slider Tech",
+        "Rhythm Control",
+    ):
+        assert name in texts, name
+    assert len(at.expander) == 0
+    assert _button(at, "catalog_toggle_aim") is not None
+    assert _button(at, "catalog_select_Jump Aim") is not None
+
+
+def test_catalog_expand_toggle_does_not_change_active_preset(app_env) -> None:
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.session_state["nav"] = "presets"
+    at.run()
+    assert at.session_state["active_config"].name == "Aim"
+    _button(at, "catalog_toggle_aim").click().run()
+    assert "Jump Aim" not in _texts(at)
+    assert at.session_state["active_config"].name == "Aim"
+    _button(at, "catalog_toggle_aim").click().run()
     assert "Jump Aim" in _texts(at)
-    assert "Streams" in _texts(at)
-    assert "Stamina" in _texts(at)
+    assert at.session_state["active_config"].name == "Aim"
+
+
+def test_catalog_selects_parent_and_child_independently(app_env) -> None:
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.session_state["nav"] = "presets"
+    at.run()
+    _button(at, "catalog_select_Jump Aim").click().run()
+    assert at.session_state["active_config"].name == "Jump Aim"
+    _button(at, "catalog_select_Aim").click().run()
+    assert at.session_state["active_config"].name == "Aim"
+
+
+def test_custom_preset_is_available_in_catalog_and_picker(app_env) -> None:
+    store = Storage(app_env)
+    custom = store.create_preset(
+        presets.default_config("My Custom Profile"), is_builtin=False
+    )
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.run()
+    _button(at, "open_preset_picker").click().run()
+    assert _button(at, "picker_custom_select_My Custom Profile") is not None
+    _button(at, "picker_custom_select_My Custom Profile").click().run()
+    assert at.session_state["active_preset_id"] == custom.id
+    at.session_state["nav"] = "presets"
+    at.run()
+    assert not _has_button(at, "catalog_custom_select_My Custom Profile")
+
+
+def test_sidebar_hierarchical_picker_selects_children(app_env) -> None:
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.run()
+    _button(at, "open_preset_picker").click().run()
+    assert not at.exception
+    assert _button(at, "picker_select_Flow Aim") is not None
+    _button(at, "picker_select_Flow Aim").click().run()
+    assert at.session_state["active_config"].name == "Flow Aim"
+    _button(at, "open_preset_picker").click().run()
+    _button(at, "picker_select_Aim").click().run()
+    assert at.session_state["active_config"].name == "Aim"
+
+
+def test_picker_close_does_not_reopen_on_next_run(app_env) -> None:
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.run()
+    _button(at, "open_preset_picker").click().run()
+    _button(at, "picker_close").click().run()
+    assert not _has_button(at, "picker_select_Jump Aim")
+    at.run()
+    assert not _has_button(at, "picker_select_Jump Aim")
+    assert at.session_state["active_config"].name == "Aim"
+
+
+def test_picker_search_keeps_parent_context(app_env) -> None:
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.run()
+    _button(at, "open_preset_picker").click().run()
+    next(
+        item
+        for item in at.text_input
+        if item.key == "preset_picker_query"
+    ).set_value("jump aim").run()
+    assert _button(at, "picker_select_Jump Aim") is not None
+    assert not _has_button(at, "picker_select_Flow Aim")
+    assert "**Aim**" in _texts(at)
 
 
 def test_retired_presets_are_absent_from_catalog_and_selector(app_env) -> None:
     at = AppTest.from_file(APP, default_timeout=90)
     at.session_state["nav"] = "presets"
     at.run()
-    selector = at.sidebar.selectbox[0]
-    for retired in ("Flashlight", "Reading", "Accuracy", "Weird Aim", "Reading + Aim"):
-        assert retired not in selector.options
-    page_text = " ".join(_texts(at))
+    page_text = _texts(at)
     for retired in ("Flashlight", "Reading", "Accuracy", "Weird Aim", "Reading + Aim"):
         assert retired not in page_text
+        assert not _has_button(at, f"catalog_select_{retired}")
+    _button(at, "open_preset_picker").click().run()
+    for retired in ("Flashlight", "Reading", "Accuracy", "Weird Aim", "Reading + Aim"):
+        assert not _has_button(at, f"picker_select_{retired}")
 
 
 def test_catalog_search_preserves_parent_and_child_context(app_env) -> None:
@@ -2167,13 +2262,13 @@ def test_library_preview_keeps_selection_and_library_state(app_env) -> None:
     assert entry.version == "Hidden 5"
     assert at.session_state["library_query"] == "Long Library Set"
     preset_id = at.session_state["active_preset_id"]
-    assert at.sidebar.selectbox[0] is not None
+    assert _button(at, "open_preset_picker") is not None
     _button(at, "close_library_preview").click().run()
     assert not at.exception, _texts(at)
     assert "library_preview_entry" not in at.session_state
     assert at.session_state["library_query"] == "Long Library Set"
     assert at.session_state["active_preset_id"] == preset_id
-    assert at.sidebar.selectbox[0] is not None
+    assert _button(at, "open_preset_picker") is not None
 
 
 def _library_entry_for_test(store: Storage, set_id: int):
