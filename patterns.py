@@ -285,9 +285,13 @@ def _flow_metrics(
         )
         if shape < FLOW_MIN_SHAPE:
             continue
-        quality = sum(
+        smoothness = sum(
             _clamp(1.0 - angle / FLOW_ANGLE_DEGREES) for angle in angles
         ) / len(angles)
+        # Quality combines turn smoothness with the same shape evidence that
+        # admitted the run, so a nearly straight pass cannot score excellent
+        # flow merely by being straight.
+        quality = smoothness * (0.5 + 0.5 * shape)
         accepted.append((begin, end, shape, quality))
     flow_transitions = sum(end - begin for begin, end, _, _ in accepted)
     meaningful = sum(1 for row in rows if row is not None)
