@@ -23,10 +23,12 @@ def _analyze(beatmap_id: int):
 def _features(analysis):
     keys = (
         "flow_share",
-        "flow_intensity",
+        "flow_coverage",
         "flow_longest",
+        "flow_longest_share",
         "flow_run_count",
         "flow_quality",
+        "flow_shape",
     )
     raw = patterns.sequence_features(analysis)
     scores = {key: raw[key] for key in keys}

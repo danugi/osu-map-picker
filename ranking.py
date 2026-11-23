@@ -199,6 +199,7 @@ def validate_ranking(settings: RankingSettings) -> None:
         "primary_targets",
         "min_primary",
         "require_features_any",
+        "require_features_all",
         "feature_minimums",
     }
     if unknown_policy:
@@ -239,26 +240,37 @@ def validate_ranking(settings: RankingSettings) -> None:
         raise RankingConfigError(
             "relevance_policy.require_features_any: ожидался массив строк"
         )
-    unknown_features = set(features_any) - set(FEATURE_LABELS)
+    features_all = policy.get("require_features_all", [])
+    if not isinstance(features_all, list) or not all(
+        isinstance(item, str) for item in features_all
+    ):
+        raise RankingConfigError(
+            "relevance_policy.require_features_all: ожидался массив строк"
+        )
+    unknown_features = (set(features_any) | set(features_all)) - set(
+        FEATURE_LABELS
+    )
     if unknown_features:
         raise RankingConfigError(
-            "relevance_policy.require_features_any: неизвестные признаки: "
+            "relevance_policy: неизвестные признаки: "
             + ", ".join(sorted(unknown_features))
         )
-    if features_any and not targets:
+    if (features_any or features_all) and not targets:
         raise RankingConfigError(
-            "relevance_policy.require_features_any требует relevance_targets"
+            "relevance_policy.require_features требует relevance_targets"
         )
     feature_minimums = policy.get("feature_minimums", {})
     if not isinstance(feature_minimums, dict):
         raise RankingConfigError(
             "relevance_policy.feature_minimums: ожидался объект"
         )
-    unknown_minimums = set(feature_minimums) - set(features_any)
+    unknown_minimums = set(feature_minimums) - set(features_any) - set(
+        features_all
+    )
     if unknown_minimums:
         raise RankingConfigError(
             "relevance_policy.feature_minimums: признаки должны входить в "
-            "require_features_any: "
+            "require_features_any/all: "
             + ", ".join(sorted(unknown_minimums))
         )
     for key, value in feature_minimums.items():

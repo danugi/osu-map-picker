@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import math
 import os
 
 import pytest
 
 import gameplay
 import patterns
+import presets
+from models import BeatmapFeatures, Candidate
+from relevance import evaluate_relevance
+from skillsets import evaluate_skills
 
 
 def make_osu(
@@ -161,7 +166,12 @@ def test_geometry_labels_multiple_patterns() -> None:
     # A compact fast chain followed by wide zig-zag jumps: more than one
     # measured category must be allowed at once.
     notes = [
-        (1000 + index * 125, 100 + index * 60, 100) for index in range(24)
+        (
+            1000 + index * 125,
+            80 + index * 60,
+            256 + int(110 * math.sin(index * 0.25)),
+        )
+        for index in range(24)
     ]
     notes += [
         (5000 + index * 300, 100 if index % 2 else 400, 100)
@@ -178,7 +188,14 @@ def test_geometry_labels_multiple_patterns() -> None:
 
 def test_geometry_detects_flow_and_wide_jumps_separately() -> None:
     flow = analyze(
-        [(1000 + index * 250, 100 + index * 60, 100) for index in range(10)]
+        [
+            (
+                1000 + index * 250,
+                80 + index * 65,
+                256 + int(110 * math.sin(index * 0.30)),
+            )
+            for index in range(10)
+        ]
     )
     wide = analyze(
         [(1000 + index * 250, 100 if index % 2 else 400, 100) for index in range(10)]
@@ -192,7 +209,12 @@ def test_geometry_detects_flow_and_wide_jumps_separately() -> None:
 def test_mixed_sections_are_reported() -> None:
     # First 24 notes are compact and straight, next 24 are wide zig-zag jumps.
     notes = [
-        (1000 + index * 125, 100 + index * 60, 100) for index in range(24)
+        (
+            1000 + index * 125,
+            80 + index * 60,
+            256 + int(110 * math.sin(index * 0.25)),
+        )
+        for index in range(24)
     ]
     notes += [
         (5000 + index * 300, 100 if index % 2 else 400, 100)
@@ -285,3 +307,134 @@ def test_gradual_curve_is_flow_not_only_a_straight_line() -> None:
     assert analysis.flow_share > 0.50
     assert analysis.flow_longest >= 8
     assert "flow_aim" in analysis.labels
+
+
+def _flow_gate(analysis):
+    keys = (
+        "flow_share",
+        "flow_coverage",
+        "flow_longest",
+        "flow_longest_share",
+        "flow_run_count",
+        "flow_quality",
+        "flow_shape",
+    )
+    raw = patterns.sequence_features(analysis)
+    features = BeatmapFeatures(
+        scores={key: raw[key] for key in keys},
+        sources={key: "osu_sequence" for key in keys},
+        statuses={key: "measured" for key in keys},
+    )
+    skills = evaluate_skills(features)
+    candidate = Candidate(
+        beatmapset=None,
+        beatmap=None,
+        traits=features,
+        skillsets=skills,
+    )
+    return evaluate_relevance(
+        candidate, presets.builtin_by_name("Flow Aim").ranking
+    )
+
+
+def test_separated_high_spaced_stream_sections_are_not_flow() -> None:
+    # Four regular high-spaced tap chains. Straight, even spacing and even
+    # rhythm are stream evidence, not a connected flow trajectory.
+    notes: list[tuple[int, int, int]] = []
+    for section in range(4):
+        base = 1000 + section * 3000
+        notes.extend(
+            (base + index * 160, 60 + index * 120, 120)
+            for index in range(10)
+        )
+        notes.extend(
+            (base + 1800 + index * 250, 460, 300 if index % 2 else 120)
+            for index in range(3)
+        )
+    analysis = analyze(notes)
+    assert analysis.flow_share == 0.0
+    assert analysis.flow_longest == 0
+    assert "streams" in analysis.labels
+    assert not _flow_gate(analysis).passed
+
+
+def test_fast_regular_high_spacing_is_not_flow() -> None:
+    notes = [
+        (1000 + index * 90, 80 + index * 240, 100)
+        for index in range(40)
+    ]
+    analysis = analyze(notes, beat_length=300)
+    assert analysis.flow_share == 0.0
+    assert analysis.flow_longest == 0
+    assert not _flow_gate(analysis).passed
+
+
+def test_multiple_short_flow_coincidences_do_not_pass() -> None:
+    notes: list[tuple[int, int, int]] = []
+    for section in range(5):
+        base = 1000 + section * 2200
+        notes.extend(
+            (
+                base + index * 200,
+                100 + index * 45,
+                256 + int(30 * math.sin(index * 0.8)),
+            )
+            for index in range(5)
+        )
+        notes.append((base + 1200, 470, 470))
+    analysis = analyze(notes)
+    assert analysis.flow_longest == 4
+    assert analysis.flow_run_count >= 3
+    assert not _flow_gate(analysis).passed
+
+
+def test_long_reversing_stream_is_not_flow() -> None:
+    notes = [
+        (1000 + index * 180, 100 if index % 2 else 480, 100)
+        for index in range(30)
+    ]
+    analysis = analyze(notes)
+    assert analysis.flow_share == 0.0
+    assert analysis.flow_longest == 0
+    assert not _flow_gate(analysis).passed
+
+
+def test_flow_with_an_ordinary_stream_still_qualifies() -> None:
+    notes = [
+        (
+            1000 + index * 240,
+            80 + index * 65,
+            256 + int(110 * math.sin(index * 0.30)),
+        )
+        for index in range(24)
+    ]
+    notes.extend(
+        (8000 + index * 160, 60 + index * 120, 420)
+        for index in range(20)
+    )
+    analysis = analyze(notes)
+    assert analysis.flow_longest >= 15
+    assert "streams" in analysis.labels
+    assert _flow_gate(analysis).passed
+
+
+def test_multiple_genuine_flow_passages_qualify() -> None:
+    notes = []
+    for section in range(2):
+        base = 1000 + section * 5000
+        notes.extend(
+            (
+                base + index * 240,
+                80 + index * 65,
+                256 + int(110 * math.sin(index * 0.30)),
+            )
+            for index in range(20)
+        )
+        notes.extend(
+            (base + 4200 + index * 250, 470, 120 if index % 2 else 400)
+            for index in range(4)
+        )
+    analysis = analyze(notes)
+    assert analysis.flow_longest >= 15
+    assert analysis.flow_run_count >= 2
+    assert _flow_gate(analysis).passed

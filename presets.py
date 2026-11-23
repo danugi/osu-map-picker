@@ -1302,8 +1302,17 @@ _RELEVANCE_POLICIES: dict[str, dict[str, Any]] = {
     },
     "Flow Aim": {
         "primary_targets": ["aim_flow"],
-        "require_features_any": ["flow_share"],
-        "feature_minimums": {"flow_share": 0.20},
+        "require_features_any": [],
+        "require_features_all": [
+            "flow_share",
+            "flow_coverage",
+            "flow_longest",
+        ],
+        "feature_minimums": {
+            "flow_share": 0.20,
+            "flow_coverage": 0.20,
+            "flow_longest": 0.75,
+        },
     },
     "Aim Control": {
         "primary_targets": ["aim_control"],
@@ -1574,7 +1583,7 @@ _PRE_V11_FINGERPRINTS = {
     ),
 }
 
-BUILTIN_PRESETS_VERSION = 19
+BUILTIN_PRESETS_VERSION = 20
 _V18_NEW_NAMES = frozenset(
     {
         "Jump Aim",
@@ -2170,6 +2179,22 @@ def _upgrade_v19_definitions(storage: Any) -> int:
     return 1
 
 
+def _upgrade_v20_definitions(storage: Any) -> int:
+    """Refresh the untouched v19 Flow Aim gate for analyzer v4 evidence."""
+
+    old_fingerprint = (
+        "b5e21e0ee982f08de45e2587b3ccf988341c8abf495f80694ba39c5114c30294"
+    )
+    row = storage.get_preset_by_name("Flow Aim")
+    modern = builtin_by_name("Flow Aim")
+    if row is None or not row.is_builtin or modern is None:
+        return 0
+    if _preset_fingerprint(row.config) != old_fingerprint:
+        return 0
+    storage.update_preset(row.id, modern)
+    return 1
+
+
 def ensure_builtin_presets(storage: Any) -> int:
     """Seed built-ins and add newer profiles without destroying user edits.
 
@@ -2244,6 +2269,8 @@ def ensure_builtin_presets(storage: Any) -> int:
         new_names.update(_V18_NEW_NAMES)
     if version < 19:
         _upgrade_v19_definitions(storage)
+    if version < 20:
+        _upgrade_v20_definitions(storage)
 
     for preset in builtin_presets():
         if preset.name not in new_names:

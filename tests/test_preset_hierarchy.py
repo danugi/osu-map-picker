@@ -65,6 +65,9 @@ def _shared_pool(storage: Storage) -> None:
         flow_longest=12,
         flow_run_count=3,
         flow_quality=0.80,
+        flow_coverage=0.70,
+        flow_shape=0.80,
+        flow_longest_share=0.60,
         angle_change_share=0.70,
         rhythm_variability=0.80,
     )

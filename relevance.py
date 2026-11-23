@@ -239,7 +239,7 @@ def _legacy_reason(
 
 def _policy(
     settings: RankingSettings,
-) -> tuple[list[str], int, list[str], dict[str, float]]:
+) -> tuple[list[str], int, list[str], dict[str, float], list[str]]:
     policy = settings.relevance_policy or {}
     targets = [str(item) for item in settings.relevance_targets if str(item)]
     primary = [
@@ -263,6 +263,11 @@ def _policy(
             if str(item)
         ],
         minimums,
+        [
+            str(item)
+            for item in policy.get("require_features_all", [])
+            if str(item)
+        ],
     )
 
 
@@ -353,7 +358,13 @@ def evaluate_relevance(
             reason=_legacy_reason(targets, threshold, available, matched),
         )
 
-    primary_ids, min_primary, feature_ids, feature_minimums = _policy(settings)
+    (
+        primary_ids,
+        min_primary,
+        feature_ids,
+        feature_minimums,
+        required_all,
+    ) = _policy(settings)
     primary_set = set(primary_ids)
     primary = [item for item in targets if item.target_id in primary_set]
     primary_available = [item for item in primary if item.score is not None]
@@ -361,6 +372,19 @@ def evaluate_relevance(
     feature_pass, feature_reason = _feature_state(
         candidate, feature_ids, threshold, feature_minimums
     )
+    all_pass = True
+    all_reason = ""
+    for feature in required_all:
+        passed_one, reason_one = _feature_state(
+            candidate, [feature], threshold, feature_minimums
+        )
+        if not passed_one:
+            all_pass = False
+            all_reason = reason_one
+            break
+    feature_pass = feature_pass and all_pass
+    if not all_pass:
+        feature_reason = all_reason
     passed = len(primary_matched) >= min_primary and feature_pass
     if primary_matched:
         best = max(

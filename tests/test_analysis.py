@@ -81,6 +81,9 @@ def test_analysis_json_roundtrip() -> None:
         flow_longest=9,
         flow_run_count=3,
         flow_quality=0.7,
+        flow_coverage=0.15,
+        flow_shape=0.7,
+        flow_longest_share=0.6,
         labels=("wide_aim",),
         analyzer_version=3,
     )
